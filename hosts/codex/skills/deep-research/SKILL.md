@@ -9,7 +9,7 @@ Rules:
 - Use host-native web search for current claims. Do not rely only on local wiki pages when the topic may have changed.
 - If native search is unavailable or insufficient, use `research_web_search` with `provider=openai`, `provider=brave`, or `provider=perplexity` when API keys are configured.
 - Prefer primary sources first: official docs, release notes, source repos, papers, company blogs, and named-person posts.
-- Use `wiki_enqueue_github` for GitHub repo releases/commits, `wiki_enqueue_arxiv` for papers, and `wiki_enqueue_rss` for feeds when those sources should become durable source cards.
+- Use `wiki_enqueue_github` for GitHub repo releases/commits, `wiki_enqueue_arxiv` for papers, and `wiki_enqueue_rss` for feeds to queue adapter jobs. Those jobs create durable source cards after the worker runs.
 - Use `x_recent_search` or `x_enqueue_recent_search` when X is a relevant primary/near-primary signal.
 - Use secondary analysis to find controversy, missing context, and implications.
 - Write durable source cards or notes into `arcwell-llm-wiki` before producing a final brief.

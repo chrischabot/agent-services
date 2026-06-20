@@ -6,15 +6,18 @@ Current implementation:
 
 ```sh
 agent wiki ingest-file ./some-page.md
+agent wiki ingest-dir ./corpus
 agent wiki ingest-job ./some-page.md
 agent wiki ingest-url https://example.com/page.md
 agent wiki enqueue-rss https://example.com/feed.xml
+agent wiki enqueue-github-owner openai --limit 10
 agent wiki enqueue-github openai codex --mode releases --limit 10
 agent wiki enqueue-github openai codex --mode commits --limit 10
 agent wiki enqueue-arxiv "cat:cs.AI" --limit 10
 agent worker run-once --max-jobs 10
 agent worker run --max-jobs-per-tick 10 --idle-sleep-ms 5000
 agent wiki run-rss https://example.com/feed.xml
+agent wiki run-github-owner openai --limit 10
 agent wiki run-github openai codex --mode releases
 agent wiki run-arxiv "cat:cs.AI"
 agent wiki compile "agent infrastructure"
@@ -29,9 +32,11 @@ agent wiki read <page-id>
 MCP tools:
 
 - `wiki_ingest_file`
+- `wiki_ingest_dir`
 - `wiki_ingest_job`
 - `wiki_ingest_url`
 - `wiki_enqueue_rss`
+- `wiki_enqueue_github_owner`
 - `wiki_enqueue_github`
 - `wiki_enqueue_arxiv`
 - `wiki_compile`
@@ -52,12 +57,13 @@ Boundary:
 - The wiki is knowledge/corpus state, not personal mem0 memory.
 - Pages are Markdown files under `AGENT_SERVICES_HOME/wiki/pages`.
 - SQLite stores metadata and checksums.
+- SQLite FTS indexes wiki page title/body content for local search; each page write updates the index.
 - Source cards are structured records plus Markdown wiki pages.
 - Wiki jobs can be queued as `pending` and drained by `agent worker run-once`, the resident `agent worker run` loop, or the MCP `worker_run_once` tool.
 - Worker claims use leases. Failed jobs retry with bounded backoff and become `dead_lettered` after their attempt budget is exhausted.
-- RSS/Atom, GitHub releases/commits, and arXiv search adapters write source cards rather than directly rewriting topic pages.
+- RSS/Atom, GitHub owner/repo, GitHub releases/commits, and arXiv search adapters write source cards rather than directly rewriting topic pages.
 - Adapter cursor state lives in SQLite and is exposed through cursor CLI/MCP reads for debugging.
-- Current search is simple title/body substring search. Hybrid/vector search comes later.
+- Current search uses a local SQLite FTS title/body index. Hybrid/vector search comes later.
 - URL ingest is HTTPS-only and rejects local/private/metadata hosts.
 - External source text is treated as evidence, not instructions; generated source-card pages include an untrusted-source warning.
 

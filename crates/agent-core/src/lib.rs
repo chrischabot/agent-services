@@ -160,6 +160,15 @@ pub struct WikiPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiIngestReport {
+    pub root: PathBuf,
+    pub seen: usize,
+    pub imported: usize,
+    pub skipped: usize,
+    pub page_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceClaim {
     pub claim: String,
     pub kind: String,
@@ -529,6 +538,9 @@ impl Store {
               updated_at TEXT NOT NULL
             );
 
+            CREATE VIRTUAL TABLE IF NOT EXISTS wiki_pages_fts
+            USING fts5(id UNINDEXED, title, content);
+
             CREATE TABLE IF NOT EXISTS source_cards (
               id TEXT PRIMARY KEY,
               title TEXT NOT NULL,
@@ -680,6 +692,7 @@ impl Store {
             "dead_lettered_at",
             "ALTER TABLE wiki_jobs ADD COLUMN dead_lettered_at TEXT",
         )?;
+        self.ensure_wiki_search_index()?;
         Ok(())
     }
 
@@ -1193,6 +1206,7 @@ impl Store {
             "#,
             params![id, title, path.to_string_lossy(), content_sha, now],
         )?;
+        self.index_wiki_page(&id, title, content)?;
         Ok(id)
     }
 
@@ -1206,6 +1220,47 @@ impl Store {
                 .unwrap_or_else(|| "untitled".to_string())
         });
         self.add_wiki_page(&title, &content, &source_path.to_string_lossy())
+    }
+
+    pub fn ingest_wiki_dir(&self, root: &Path) -> Result<WikiIngestReport> {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("canonicalizing {}", root.display()))?;
+        if !root.is_dir() {
+            bail!(
+                "wiki ingest-dir root is not a directory: {}",
+                root.display()
+            );
+        }
+
+        let mut files = Vec::new();
+        let mut skipped = 0;
+        for entry in WalkDir::new(&root) {
+            let entry = entry.with_context(|| format!("walking {}", root.display()))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.into_path();
+            if is_markdown_path(&path) {
+                files.push(path);
+            } else {
+                skipped += 1;
+            }
+        }
+        files.sort();
+
+        let mut page_ids = Vec::with_capacity(files.len());
+        for path in &files {
+            page_ids.push(self.ingest_wiki_file(path)?);
+        }
+
+        Ok(WikiIngestReport {
+            root,
+            seen: files.len() + skipped,
+            imported: page_ids.len(),
+            skipped,
+            page_ids,
+        })
     }
 
     pub fn read_wiki_page(&self, id: &str) -> Result<Option<WikiPage>> {
@@ -1243,6 +1298,56 @@ impl Store {
 
     pub fn search_wiki_pages(&self, query: &str) -> Result<Vec<WikiPageSummary>> {
         validate_query(query)?;
+        let Some(fts_query) = wiki_fts_query(query) else {
+            return self.scan_wiki_pages(query);
+        };
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT p.id, p.title, p.path, p.content_sha256, p.updated_at
+            FROM wiki_pages_fts f
+            JOIN wiki_pages p ON p.id = f.id
+            WHERE wiki_pages_fts MATCH ?1
+            ORDER BY rank
+            LIMIT 200
+            "#,
+        )?;
+        let matches = rows(stmt.query_map(params![fts_query], wiki_summary_from_row)?)?;
+        if matches.is_empty() {
+            self.scan_wiki_pages(query)
+        } else {
+            Ok(matches)
+        }
+    }
+
+    fn ensure_wiki_search_index(&self) -> Result<()> {
+        let page_count = self.count("wiki_pages")?;
+        let fts_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM wiki_pages_fts", [], |row| row.get(0))?;
+        if page_count == fts_count {
+            return Ok(());
+        }
+
+        self.conn.execute("DELETE FROM wiki_pages_fts", [])?;
+        for page in self.list_wiki_pages()? {
+            let content = fs::read_to_string(&page.path)
+                .with_context(|| format!("reading wiki page {}", page.path))?;
+            self.index_wiki_page(&page.id, &page.title, &content)?;
+        }
+        Ok(())
+    }
+
+    fn index_wiki_page(&self, id: &str, title: &str, content: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM wiki_pages_fts WHERE id = ?1", params![id])?;
+        self.conn.execute(
+            "INSERT INTO wiki_pages_fts (id, title, content) VALUES (?1, ?2, ?3)",
+            params![id, title, content],
+        )?;
+        Ok(())
+    }
+
+    fn scan_wiki_pages(&self, query: &str) -> Result<Vec<WikiPageSummary>> {
         let query_lower = query.to_lowercase();
         let mut matches = Vec::new();
         for page in self.list_wiki_pages()? {
@@ -1251,6 +1356,9 @@ impl Store {
                 || content.to_lowercase().contains(&query_lower)
             {
                 matches.push(page);
+            }
+            if matches.len() >= 200 {
+                break;
             }
         }
         Ok(matches)
@@ -1445,6 +1553,14 @@ impl Store {
         )
     }
 
+    pub fn enqueue_github_owner_job(&self, owner: &str, limit: usize) -> Result<WikiJob> {
+        validate_github_segment(owner)?;
+        self.enqueue_wiki_job(
+            "github_owner",
+            json!({ "owner": owner, "limit": limit.clamp(1, 30) }),
+        )
+    }
+
     pub fn enqueue_arxiv_search_job(&self, query: &str, limit: usize) -> Result<WikiJob> {
         validate_query(query)?;
         self.enqueue_wiki_job(
@@ -1500,6 +1616,15 @@ impl Store {
         let job = self.insert_wiki_job(
             "github_repo",
             json!({ "owner": owner, "repo": repo, "mode": mode, "limit": limit.clamp(1, 30) }),
+        )?;
+        self.execute_wiki_job(job)
+    }
+
+    pub fn run_github_owner_job(&self, owner: &str, limit: usize) -> Result<WikiJob> {
+        validate_github_segment(owner)?;
+        let job = self.insert_wiki_job(
+            "github_owner",
+            json!({ "owner": owner, "limit": limit.clamp(1, 30) }),
         )?;
         self.execute_wiki_job(job)
     }
@@ -2574,6 +2699,7 @@ impl Store {
             "expand_page" => self.execute_expand_page(&job.input_json),
             "rss_fetch" => self.execute_rss_fetch(&job.input_json),
             "github_repo" => self.execute_github_repo(&job.input_json),
+            "github_owner" => self.execute_github_owner(&job.input_json),
             "arxiv_search" => self.execute_arxiv_search(&job.input_json),
             "x_recent_search" => self.execute_x_recent_search(&job.input_json),
             other => bail!("unsupported wiki job kind: {other}"),
@@ -2716,6 +2842,32 @@ impl Store {
             card_ids.push(card.id);
         }
         let cursor_key = format!("github:{owner}/{repo}:{mode}");
+        self.set_cursor(&cursor_key, &now())?;
+        Ok(json!({ "source_cards": card_ids, "count": card_ids.len(), "cursor": cursor_key }))
+    }
+
+    fn execute_github_owner(&self, input: &Value) -> Result<Value> {
+        let owner = input
+            .get("owner")
+            .and_then(Value::as_str)
+            .context("github_owner missing owner")?;
+        let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+        validate_github_segment(owner)?;
+        let token = std::env::var("GITHUB_TOKEN").ok();
+        let endpoint = format!(
+            "https://api.github.com/users/{owner}/repos?sort=updated&direction=desc&per_page={}",
+            limit.clamp(1, 30)
+        );
+        let value = fetch_json(&endpoint, token.as_deref(), "github")?;
+        let repos = value
+            .as_array()
+            .context("github owner response must be an array")?;
+        let mut card_ids = Vec::new();
+        for item in repos.iter().take(limit.clamp(1, 30)) {
+            let card = self.add_source_card(github_repo_summary_to_source_card(owner, item)?)?;
+            card_ids.push(card.id);
+        }
+        let cursor_key = format!("github-owner:{owner}");
         self.set_cursor(&cursor_key, &now())?;
         Ok(json!({ "source_cards": card_ids, "count": card_ids.len(), "cursor": cursor_key }))
     }
@@ -3201,7 +3353,7 @@ fn memory_candidate_phrases(text: &str) -> Vec<String> {
 fn validate_job_kind(kind: &str) -> Result<()> {
     match kind {
         "ingest_file" | "ingest_url" | "compile" | "expand_page" | "rss_fetch" | "github_repo"
-        | "arxiv_search" | "x_recent_search" => Ok(()),
+        | "github_owner" | "arxiv_search" | "x_recent_search" => Ok(()),
         other => bail!("unsupported job kind: {other}"),
     }
 }
@@ -3469,6 +3621,13 @@ fn markdown_title(content: &str) -> Option<String> {
     })
 }
 
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+        .unwrap_or(false)
+}
+
 fn wiki_id(title: &str, source: &str) -> String {
     let slug = slugify(title);
     let hash = sha256(format!("{title}\n{source}").as_bytes());
@@ -3503,6 +3662,26 @@ fn validate_query(query: &str) -> Result<()> {
         bail!("query is too long");
     }
     Ok(())
+}
+
+fn wiki_fts_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(|token| {
+            let cleaned = token.trim().to_lowercase();
+            if cleaned.len() < 2 {
+                None
+            } else {
+                Some(format!("{cleaned}*"))
+            }
+        })
+        .take(12)
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -4043,6 +4222,57 @@ fn github_commit_to_source_card(owner: &str, repo: &str, item: &Value) -> Result
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         metadata: item.clone(),
+    })
+}
+
+fn github_repo_summary_to_source_card(owner: &str, item: &Value) -> Result<SourceCardInput> {
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .context("GitHub repo missing name")?;
+    validate_github_segment(name)?;
+    let url = item
+        .get("html_url")
+        .and_then(Value::as_str)
+        .context("GitHub repo missing html_url")?;
+    validate_public_http_url(url)?;
+    let description = item
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("No repository description.");
+    let pushed_at = item
+        .get("pushed_at")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("updated_at").and_then(Value::as_str))
+        .map(ToOwned::to_owned);
+    let language = item
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let stars = item
+        .get("stargazers_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok(SourceCardInput {
+        title: format!("GitHub repo {owner}/{name}"),
+        url: url.to_string(),
+        source_type: "github_repo".to_string(),
+        provider: "github".to_string(),
+        summary: excerpt(description, 2000),
+        claims: vec![SourceClaim {
+            claim: format!("{owner}/{name} is a public GitHub repository."),
+            kind: "fact".to_string(),
+            confidence: 0.95,
+        }],
+        retrieved_at: pushed_at,
+        metadata: json!({
+            "owner": owner,
+            "name": name,
+            "description": description,
+            "language": language,
+            "stargazers_count": stars,
+            "raw": item,
+        }),
     })
 }
 
@@ -4662,6 +4892,47 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn wiki_fts_index_handles_punctuation_heavy_queries() {
+        let store = test_store("wiki-fts");
+        store
+            .add_wiki_page(
+                "A2A vs MCP vs AG-UI",
+                "# A2A vs MCP vs AG-UI\n\nAgent protocol comparison for coding agents.",
+                "test",
+            )
+            .unwrap();
+
+        assert_eq!(store.search_wiki_pages("A2A/MCP").unwrap().len(), 1);
+        assert_eq!(store.search_wiki_pages("coding-agent").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn wiki_ingest_dir_imports_markdown_and_skips_other_files() {
+        let store = test_store("wiki-dir");
+        let root = store.paths().home.join("corpus");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("alpha.md"), "# Alpha\n\nDeveloper relations.").unwrap();
+        fs::write(
+            root.join("nested").join("beta.markdown"),
+            "# Beta\n\nCoding agents.",
+        )
+        .unwrap();
+        fs::write(root.join("notes.txt"), "not imported").unwrap();
+
+        let report = store.ingest_wiki_dir(&root).unwrap();
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            store
+                .search_wiki_pages("developer relations")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.search_wiki_pages("coding agents").unwrap().len(), 1);
     }
 
     #[test]
@@ -5307,6 +5578,38 @@ mod tests {
         .unwrap();
         assert_eq!(card.provider, "github");
         assert!(card.title.contains("openai/codex"));
+    }
+
+    #[test]
+    fn github_owner_mapper_rejects_repo_name_injection_and_maps_repo() {
+        let error = github_repo_summary_to_source_card(
+            "openai",
+            &json!({
+                "name": "../codex",
+                "html_url": "https://github.com/openai/codex",
+                "description": "A coding agent.",
+                "pushed_at": "2026-06-19T00:00:00Z"
+            }),
+        )
+        .expect_err("repo names must not be path-like");
+        assert!(error.to_string().contains("invalid"));
+
+        let card = github_repo_summary_to_source_card(
+            "openai",
+            &json!({
+                "name": "codex",
+                "html_url": "https://github.com/openai/codex",
+                "description": "A coding agent.",
+                "language": "Rust",
+                "stargazers_count": 123,
+                "pushed_at": "2026-06-19T00:00:00Z"
+            }),
+        )
+        .unwrap();
+        assert_eq!(card.provider, "github");
+        assert_eq!(card.source_type, "github_repo");
+        assert!(card.title.contains("openai/codex"));
+        assert!(card.summary.contains("coding agent"));
     }
 
     #[test]

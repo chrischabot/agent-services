@@ -234,9 +234,11 @@ agent memory search "Ophelia"
 agent profile set communication.style "Direct, sourced, warm."
 agent wiki search "agent infrastructure"
 agent wiki ingest-file ./notes.md
+agent wiki ingest-dir ./corpus
 agent research plan "Vercel Eve"
 agent research brief "Vercel Eve"
 agent wiki enqueue-rss https://example.com/feed.xml
+agent wiki enqueue-github-owner openai --limit 10
 agent wiki enqueue-github openai codex --mode releases
 agent wiki enqueue-arxiv "cat:cs.AI"
 agent x recent-search "from:openai"

@@ -414,6 +414,9 @@ enum WikiSubcommand {
     IngestFile {
         path: PathBuf,
     },
+    IngestDir {
+        path: PathBuf,
+    },
     Search {
         query: String,
     },
@@ -434,6 +437,11 @@ enum WikiSubcommand {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    EnqueueGithubOwner {
+        owner: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     EnqueueArxiv {
         query: String,
         #[arg(long, default_value_t = 10)]
@@ -447,6 +455,11 @@ enum WikiSubcommand {
         repo: String,
         #[arg(long, default_value = "releases")]
         mode: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    RunGithubOwner {
+        owner: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
@@ -567,6 +580,7 @@ fn wiki(store: Store, args: WikiCommand) -> Result<()> {
             let id = store.ingest_wiki_file(&path)?;
             print_json(&json!({ "ok": true, "id": id }))
         }
+        WikiSubcommand::IngestDir { path } => print_json(&store.ingest_wiki_dir(&path)?),
         WikiSubcommand::Search { query } => print_json(&store.search_wiki_pages(&query)?),
         WikiSubcommand::IngestJob { path } => print_json(&store.run_wiki_ingest_file_job(&path)?),
         WikiSubcommand::IngestUrl { url } => print_json(&store.run_wiki_ingest_url_job(&url)?),
@@ -577,6 +591,9 @@ fn wiki(store: Store, args: WikiCommand) -> Result<()> {
             mode,
             limit,
         } => print_json(&store.enqueue_github_repo_job(&owner, &repo, &mode, limit)?),
+        WikiSubcommand::EnqueueGithubOwner { owner, limit } => {
+            print_json(&store.enqueue_github_owner_job(&owner, limit)?)
+        }
         WikiSubcommand::EnqueueArxiv { query, limit } => {
             print_json(&store.enqueue_arxiv_search_job(&query, limit)?)
         }
@@ -587,6 +604,9 @@ fn wiki(store: Store, args: WikiCommand) -> Result<()> {
             mode,
             limit,
         } => print_json(&store.run_github_repo_job(&owner, &repo, &mode, limit)?),
+        WikiSubcommand::RunGithubOwner { owner, limit } => {
+            print_json(&store.run_github_owner_job(&owner, limit)?)
+        }
         WikiSubcommand::RunArxiv { query, limit } => {
             print_json(&store.run_arxiv_search_job(&query, limit)?)
         }
@@ -1301,6 +1321,10 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             let url = required_string(&arguments, "url")?;
             Ok(json!(store.run_wiki_ingest_url_job(&url)?))
         }
+        "wiki_ingest_dir" => {
+            let path = required_string(&arguments, "path")?;
+            Ok(json!(store.ingest_wiki_dir(&PathBuf::from(path))?))
+        }
         "wiki_compile" => {
             let query = required_string(&arguments, "query")?;
             Ok(json!(store.run_wiki_compile_job(&query)?))
@@ -1326,6 +1350,11 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             Ok(json!(
                 store.enqueue_github_repo_job(&owner, &repo, &mode, limit)?
             ))
+        }
+        "wiki_enqueue_github_owner" => {
+            let owner = required_string(&arguments, "owner")?;
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+            Ok(json!(store.enqueue_github_owner_job(&owner, limit)?))
         }
         "wiki_enqueue_arxiv" => {
             let query = required_string(&arguments, "query")?;
@@ -1631,6 +1660,11 @@ fn mcp_tools() -> Vec<Value> {
             [("url", "string", "URL to ingest.")],
         ),
         tool(
+            "wiki_ingest_dir",
+            "Bulk ingest Markdown files from a local directory into the wiki index.",
+            [("path", "string", "Directory path to ingest.")],
+        ),
+        tool(
             "wiki_compile",
             "Compile matching wiki context into a recorded brief job.",
             [("query", "string", "Compile topic.")],
@@ -1658,6 +1692,11 @@ fn mcp_tools() -> Vec<Value> {
                 ("owner", "string", "GitHub owner."),
                 ("repo", "string", "GitHub repo."),
             ],
+        ),
+        tool(
+            "wiki_enqueue_github_owner",
+            "Enqueue a GitHub owner adapter job that discovers recent public repos.",
+            [("owner", "string", "GitHub owner.")],
         ),
         tool(
             "wiki_enqueue_arxiv",

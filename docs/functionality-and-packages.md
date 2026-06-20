@@ -181,7 +181,9 @@ CLI:
 
 ```sh
 agent wiki ingest-file ./notes.md
+agent wiki ingest-dir ./corpus
 agent wiki search "MCP"
+agent wiki enqueue-github-owner openai --limit 10
 agent source-card add --title "Launch" --url "https://example.com" --summary "Summary"
 agent wiki expand "Vercel Eve"
 ```
@@ -190,6 +192,7 @@ Data store:
 
 - Markdown files under `AGENT_SERVICES_HOME/wiki/pages`
 - SQLite `wiki_pages`
+- SQLite `wiki_pages_fts`
 - SQLite `source_cards`
 - SQLite `wiki_jobs`
 

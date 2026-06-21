@@ -10,6 +10,10 @@ Telegram channel package.
 Current implementation:
 
 - Cloudflare worker `POST /telegram/webhook` normalizes Telegram text/caption updates into `arcwell-edge-inbox` events.
+- Non-text Telegram updates are intentionally out of scope for the current
+  package. Photos, videos, documents, stickers, reactions, edits, callbacks,
+  polls, joins/leaves, and other update kinds are rejected as unsupported
+  instead of being partially interpreted.
 - Local `arcwell telegram drain` leases Telegram edge events, records them with `channel_record`, and acks/nacks the source event.
 - Local `arcwell telegram send <chat-id> <text>` requires an explicit `telegram:chat:<chat-id>` authorization with `--send`, sends through Telegram `sendMessage`, escapes MarkdownV2 for the API call, records the outgoing channel message, and persists a delivery attempt with provider response, failed status, and retry hint when applicable.
 - Local `arcwell telegram authorize <subject> --write-projects --send` grants project-write/binding and send rights to subjects such as `telegram:chat:123`, `telegram:user:456`, or `telegram:@username`.
@@ -21,6 +25,8 @@ Current implementation:
 Channel safety rules:
 
 - Telegram text is untrusted user/content data.
+- Captions are treated as text-only message content; attached media bytes and
+  file references are not stored or fetched.
 - Formatting must be normalized before delivery.
 - Incoming update ids are idempotency keys.
 - Project switching must resolve through the project registry, and ambiguity must stop the action.

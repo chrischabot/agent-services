@@ -234,7 +234,7 @@ Adversarial/severe gate:
 - [x] Live-smoke real outgoing Telegram send and delivery attempt recording.
 - [ ] Add automatic worker-driven retry for due Telegram deliveries.
 - [ ] Add safe follow-up context carryover for authorized Telegram chats.
-- [ ] Add richer media/update support or explicitly document text/caption-only
+- [x] Add richer media/update support or explicitly document text/caption-only
       scope.
 
 Description:
@@ -433,7 +433,7 @@ separate quick/surface mode. See `docs/deep-research-system-design.md`.
 - [x] Add saturation reporting that explains why the run stopped: coverage,
       diminishing novelty, unresolved blocker, provider limit, budget, or user
       stop.
-- [ ] Keep Brave and Perplexity as optional provider adapters.
+- [x] Keep Brave and Perplexity as optional provider adapters.
 - [x] Add research output audit command/checklist.
 - [x] Prevent generated research pages from becoming primary sources.
 

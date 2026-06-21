@@ -705,11 +705,12 @@ Adversarial/severe gate:
 - [x] Store policy decisions and approval records in SQLite.
 - [x] Integrate existing cost policies and channel authorization into the
       broader policy model without weakening current checks.
-- [ ] Apply policy checks before web/research provider calls, X calls, source
+- [x] Apply policy checks before web/research provider calls, X calls, source
       ingestion, memory capture/apply, procedure apply, Telegram send, project
-      writes, secret access, and worker jobs. Secret value/ref admin through
-      CLI/MCP is now guarded; provider-internal secret writes and other secret
-      reads still need inventory.
+      writes, secret access, OAuth token writes, and worker enqueue/execution.
+      Severe tests now prove denied source writes, memory capture, worker
+      enqueue, queued URL ingest, and X OAuth stop before local/provider side
+      effects; the broader sensitive-operation inventory remains open above.
 - [x] Add CLI/MCP tools for policy check, explain, list, override, approvals,
       approve, reject, and decision history.
 - [x] Add ops visibility for denied actions, pending approvals, and matching

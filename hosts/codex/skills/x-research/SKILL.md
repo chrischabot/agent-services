@@ -18,7 +18,7 @@ Typical commands:
 
 ```sh
 arcwell x import-json ./x-items.json
-arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,offline.access
+arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,bookmark.read,follows.read,offline.access
 arcwell x recent-search <query>
 arcwell x enqueue-recent-search <query>
 arcwell x list --query <topic>

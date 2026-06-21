@@ -26,7 +26,7 @@ arcwell wiki enqueue-arxiv "cat:cs.AI" --limit 10
 arcwell x enqueue-recent-search "from:openai" --max-results 25
 arcwell worker run-once --max-jobs 10
 
-arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,offline.access
+arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,bookmark.read,follows.read,offline.access
 arcwell x oauth-exchange --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --code "$CODE" --code-verifier "$CODE_VERIFIER"
 arcwell x oauth-refresh --client-id "$X_CLIENT_ID"
 arcwell x recent-search "from:openai" --max-results 25

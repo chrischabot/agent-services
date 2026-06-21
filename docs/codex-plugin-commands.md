@@ -159,7 +159,7 @@ typing part of the name. Use the displayed command name from the picker.
 - `/research-runs` uses `research_runs`.
 - `/research-tasks` uses `research_tasks`.
 - `/research-task-complete` uses `research_task_complete`.
-- `/research-brief` uses `research_brief_from_wiki`.
+- `/research-brief` uses `research_brief_from_wiki` as a report/summary artifact renderer over already-collected evidence; it is not a quick research mode.
 - Research audits use `research_audit` when checking generated recursion,
   stale evidence, contradictions, uncited model answers, or untrusted sources.
 - `/import-claude` uses `arcwell import claude`.
@@ -176,6 +176,8 @@ typing part of the name. Use the displayed command name from the picker.
 
 - `/x-search` uses `x_recent_search`.
 - `/x-enqueue-search` uses `x_enqueue_recent_search`.
+- `/x-import-bookmarks` uses `x_import_bookmarks`.
+- `/x-bookmarks` uses `x_bookmarks`.
 - `/x-watch-rebuild` uses `x_rebuild_definitive_watch_sources`.
 - `/x-import-following-watch-sources` uses `x_import_following_watch_sources`.
 - `/x-import-json` uses `x_import_json_file`.
@@ -238,9 +240,9 @@ Skills are the primary reusable behavior surface. In Codex they appear as `$...`
 
 - `$arcwell-codex:memory-review`: consult personal memory, extract reviewable candidates, and keep memory separate from wiki knowledge.
 - `$arcwell-codex:wiki-research`: search and write source-backed wiki pages.
-- `$arcwell-codex:deep-research`: plan, gather, audit, and brief substantial research.
+- `$arcwell-codex:deep-research`: run the deep-only research workflow: source-map, gather, extract, refute, synthesize, audit, and write back.
 - `$arcwell-codex:research-audit`: adversarially check sources, claims, provenance, and uncertainty.
-- `$arcwell-codex:research-brief`: produce concise wiki-grounded research briefs.
+- `$arcwell-codex:research-brief`: render concise artifacts from already-collected wiki/source-card evidence.
 - `$arcwell-codex:x-research`: import, search, report, and evaluate X evidence safely.
 - `$arcwell-codex:project-control`: resolve and manage project context across threads and channels.
 - `$arcwell-codex:channel-control`: handle Telegram and future channel messages without prompt-injection leakage.

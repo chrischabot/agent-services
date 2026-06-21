@@ -802,8 +802,22 @@ pub struct XItem {
     pub url: String,
     pub created_at: Option<String>,
     pub imported_at: String,
+    pub retrieved_at: Option<String>,
+    pub metrics: Value,
+    pub raw: Value,
     pub source_card_id: Option<String>,
     pub wiki_page_id: Option<String>,
+    pub sources: Vec<XItemSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XItemSource {
+    pub id: String,
+    pub x_id: String,
+    pub source_kind: String,
+    pub source_detail: Option<String>,
+    pub seen_at: String,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1661,9 +1675,25 @@ impl Store {
               url TEXT NOT NULL,
               created_at TEXT,
               imported_at TEXT NOT NULL,
+              retrieved_at TEXT,
+              metrics_json TEXT NOT NULL DEFAULT '{}',
+              raw_json TEXT NOT NULL DEFAULT '{}',
               source_card_id TEXT,
               wiki_page_id TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS x_item_sources (
+              id TEXT PRIMARY KEY,
+              x_id TEXT NOT NULL,
+              source_kind TEXT NOT NULL,
+              source_detail TEXT,
+              seen_at TEXT NOT NULL,
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              UNIQUE(x_id, source_kind, source_detail)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_x_item_sources_x_id ON x_item_sources(x_id);
+            CREATE INDEX IF NOT EXISTS idx_x_item_sources_kind ON x_item_sources(source_kind);
 
             CREATE TABLE IF NOT EXISTS edge_events (
               id TEXT PRIMARY KEY,
@@ -1958,6 +1988,21 @@ impl Store {
             "source_cards",
             "metadata_json",
             "ALTER TABLE source_cards ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        self.ensure_column(
+            "x_items",
+            "retrieved_at",
+            "ALTER TABLE x_items ADD COLUMN retrieved_at TEXT",
+        )?;
+        self.ensure_column(
+            "x_items",
+            "metrics_json",
+            "ALTER TABLE x_items ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        self.ensure_column(
+            "x_items",
+            "raw_json",
+            "ALTER TABLE x_items ADD COLUMN raw_json TEXT NOT NULL DEFAULT '{}'",
         )?;
         self.ensure_column(
             "procedures",
@@ -5336,31 +5381,76 @@ impl Store {
     }
 
     pub fn list_x_items(&self, query: Option<&str>) -> Result<Vec<XItem>> {
-        match query {
-            Some(query) => {
-                validate_query(query)?;
-                let needle = format!("%{}%", query);
-                let mut stmt = self.conn.prepare(
-                    r#"
-                    SELECT id, x_id, author, text, url, created_at, imported_at, source_card_id, wiki_page_id
-                    FROM x_items
-                    WHERE x_id LIKE ?1 OR author LIKE ?1 OR text LIKE ?1 OR url LIKE ?1
-                    ORDER BY imported_at DESC
-                    "#,
-                )?;
-                rows(stmt.query_map(params![needle], x_item_from_row)?)
-            }
-            None => {
-                let mut stmt = self.conn.prepare(
-                    r#"
-                    SELECT id, x_id, author, text, url, created_at, imported_at, source_card_id, wiki_page_id
-                    FROM x_items
-                    ORDER BY imported_at DESC
-                    "#,
-                )?;
-                rows(stmt.query_map([], x_item_from_row)?)
-            }
+        self.list_x_items_filtered(query, None, None)
+    }
+
+    pub fn list_x_items_filtered(
+        &self,
+        query: Option<&str>,
+        source_kind: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<XItem>> {
+        if let Some(query) = query {
+            validate_query(query)?;
         }
+        if let Some(source_kind) = source_kind {
+            validate_x_item_source_kind(source_kind)?;
+        }
+        let limit = limit.unwrap_or(100).clamp(1, 1_000) as i64;
+        let mut params_vec: Vec<String> = Vec::new();
+        let mut where_clauses = Vec::new();
+        if let Some(query) = query {
+            params_vec.push(format!("%{}%", query));
+            where_clauses
+                .push("(x.x_id LIKE ? OR x.author LIKE ? OR x.text LIKE ? OR x.url LIKE ?)");
+        }
+        if let Some(source_kind) = source_kind {
+            params_vec.push(source_kind.to_string());
+            where_clauses.push(
+                "EXISTS (SELECT 1 FROM x_item_sources s WHERE s.x_id = x.x_id AND s.source_kind = ?)",
+            );
+        }
+        let mut sql = String::from(
+            r#"
+            SELECT x.id, x.x_id, x.author, x.text, x.url, x.created_at, x.imported_at,
+                   x.retrieved_at, x.metrics_json, x.raw_json, x.source_card_id, x.wiki_page_id
+            FROM x_items x
+            "#,
+        );
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        sql.push_str(
+            " ORDER BY COALESCE(x.created_at, x.imported_at) DESC, x.imported_at DESC LIMIT ?",
+        );
+        let mut params_dyn: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        match (query, source_kind) {
+            (Some(_), Some(_)) => {
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[1]);
+            }
+            (Some(_), None) => {
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+                params_dyn.push(&params_vec[0]);
+            }
+            (None, Some(_)) => {
+                params_dyn.push(&params_vec[0]);
+            }
+            (None, None) => {}
+        }
+        params_dyn.push(&limit);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut items = rows(stmt.query_map(params_dyn.as_slice(), x_item_from_row)?)?;
+        for item in &mut items {
+            item.sources = self.list_x_item_sources(&item.x_id)?;
+        }
+        Ok(items)
     }
 
     pub fn x_report(&self, query: Option<&str>) -> Result<XReport> {
@@ -5637,7 +5727,7 @@ impl Store {
                 pairs
                     .append_pair("query", query)
                     .append_pair("max_results", &max_results.clamp(10, 100).to_string())
-                    .append_pair("tweet.fields", "created_at,author_id")
+                    .append_pair("tweet.fields", "created_at,author_id,public_metrics")
                     .append_pair("expansions", "author_id")
                     .append_pair("user.fields", "username,name");
                 if let Some(since_id) = &previous_cursor {
@@ -5646,7 +5736,8 @@ impl Store {
             }
             let value = fetch_x_json(url.as_str(), Some(&token))?;
             x_fail_on_response_errors(&value)?;
-            let import_value = x_search_response_to_import_items(&value)?;
+            let import_value =
+                x_search_response_to_import_items(&value, "recent_search", Some(query))?;
             let report = self.import_x_json_value(&import_value)?;
             if report.rejected > 0 {
                 bail!(
@@ -5692,6 +5783,146 @@ impl Store {
                 "x",
                 "x_recent_search",
                 query,
+                &error.to_string(),
+            );
+        }
+        result
+    }
+
+    pub fn x_import_bookmarks(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+    ) -> Result<XImportReport> {
+        let endpoint =
+            std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
+        self.x_import_bookmarks_with_base(bookmark_days, max_bookmarks, &endpoint)
+    }
+
+    fn x_import_bookmarks_with_base(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        endpoint: &str,
+    ) -> Result<XImportReport> {
+        let bookmark_days = bookmark_days.clamp(1, 366);
+        let max_bookmarks = max_bookmarks.clamp(1, 5_000);
+        let projected = estimated_x_definitive_watch_cost(max_bookmarks, 0);
+        self.policy_guard(PolicyRequest {
+            action: "provider.network".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("x_import_bookmarks".to_string()),
+            channel: None,
+            subject: None,
+            target: Some(endpoint.to_string()),
+            projected_usd: Some(projected),
+            metadata: json!({ "bookmark_days": bookmark_days, "max_bookmarks": max_bookmarks }),
+            untrusted_excerpt: None,
+        })?;
+        self.require_cost_budget(
+            "arcwell-x",
+            "x_import_bookmarks",
+            "x",
+            "bookmarks",
+            Some("x_import_bookmarks"),
+            projected,
+            "X bookmark import",
+        )?;
+
+        let result = (|| -> Result<XImportReport> {
+            let token = self.x_bearer_token()?;
+            let base = validated_x_api_base(endpoint)?;
+            let user_id = self.x_user_id(&base, &token)?;
+            let cutoff = Utc::now() - chrono::Duration::days(bookmark_days);
+            let mut seen = 0;
+            let mut imported = 0;
+            let mut skipped_duplicates = 0;
+            let mut rejected = 0;
+            let mut imported_items = Vec::new();
+            let mut pagination_token: Option<String> = None;
+
+            while seen < max_bookmarks {
+                let page_size = (max_bookmarks - seen).clamp(1, 100);
+                let mut url = base.join(&format!("/2/users/{user_id}/bookmarks"))?;
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    pairs
+                        .append_pair("max_results", &page_size.to_string())
+                        .append_pair(
+                            "tweet.fields",
+                            "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets",
+                        )
+                        .append_pair("expansions", "author_id")
+                        .append_pair(
+                            "user.fields",
+                            "username,name,description,verified,verified_type",
+                        );
+                    if let Some(token) = &pagination_token {
+                        pairs.append_pair("pagination_token", token);
+                    }
+                }
+                let value = fetch_x_json(url.as_str(), Some(&token))?;
+                x_fail_on_response_errors(&value)?;
+                let tweets = value
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if tweets.is_empty() {
+                    break;
+                }
+                let users = x_users_by_id(&value);
+                for tweet in tweets {
+                    if seen >= max_bookmarks {
+                        break;
+                    }
+                    seen += 1;
+                    match x_bookmark_tweet_to_item_input(&tweet, &users, cutoff) {
+                        Ok(Some(input)) => match self.insert_x_item(input) {
+                            Ok(Some(item)) => {
+                                imported += 1;
+                                imported_items.push(item);
+                            }
+                            Ok(None) => skipped_duplicates += 1,
+                            Err(_) => rejected += 1,
+                        },
+                        Ok(None) => {}
+                        Err(_) => rejected += 1,
+                    }
+                }
+                pagination_token = value
+                    .pointer("/meta/next_token")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                if pagination_token.is_none() {
+                    break;
+                }
+            }
+
+            Ok(XImportReport {
+                seen,
+                imported,
+                skipped_duplicates,
+                rejected,
+                items: imported_items,
+            })
+        })();
+        if let Err(error) = &result {
+            if x_failure_should_release_budget(error) {
+                let _ = self.release_cost_reservation(
+                    "arcwell-x",
+                    "x_import_bookmarks",
+                    "x",
+                    "bookmarks",
+                    Some("x_import_bookmarks"),
+                );
+            }
+            let _ = self.record_source_failure(
+                "x:bookmarks",
+                "x",
+                "x_import_bookmarks",
+                "bookmarks",
                 &error.to_string(),
             );
         }
@@ -5861,7 +6092,7 @@ impl Store {
                 let mut pairs = url.query_pairs_mut();
                 pairs
                     .append_pair("max_results", &page_size.to_string())
-                    .append_pair("tweet.fields", "created_at,author_id")
+                    .append_pair("tweet.fields", "created_at,author_id,public_metrics")
                     .append_pair("expansions", "author_id")
                     .append_pair(
                         "user.fields",
@@ -6144,7 +6375,8 @@ impl Store {
 
         let value = fetch_x_json(url.as_str(), Some(token))?;
         x_fail_on_response_errors(&value)?;
-        let import_value = x_search_response_to_import_items(&value)?;
+        let import_value =
+            x_search_response_to_import_items(&value, "watch_monitor", Some(handle))?;
         let report = self.import_x_json_value(&import_value)?;
         if report.rejected > 0 {
             bail!(
@@ -10518,9 +10750,14 @@ impl Store {
             )
             .optional()?;
         if existing.is_some() {
+            self.update_existing_x_item(&input)?;
+            self.upsert_x_item_source(&input)?;
             return Ok(None);
         }
 
+        let retrieved_at = input.retrieved_at.clone().unwrap_or_else(now);
+        let metrics_json = canonical_json(&input.metrics)?;
+        let raw_json = canonical_json(&input.raw)?;
         let card = self.add_source_card(SourceCardInput {
             title: format!("X: {} {}", input.author, input.x_id),
             url: input.url.clone(),
@@ -10532,11 +10769,14 @@ impl Store {
                 kind: "source_text".to_string(),
                 confidence: 1.0,
             }],
-            retrieved_at: Some(now()),
+            retrieved_at: Some(retrieved_at.clone()),
             metadata: json!({
                 "x_id": input.x_id,
                 "author": input.author,
-                "created_at": input.created_at
+                "created_at": input.created_at,
+                "source_kind": input.source_kind,
+                "source_detail": input.source_detail,
+                "metrics": input.metrics
             }),
         })?;
         let id = Uuid::new_v4().to_string();
@@ -10544,8 +10784,8 @@ impl Store {
         self.conn.execute(
             r#"
             INSERT INTO x_items
-              (id, x_id, author, text, url, created_at, imported_at, source_card_id, wiki_page_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              (id, x_id, author, text, url, created_at, imported_at, retrieved_at, metrics_json, raw_json, source_card_id, wiki_page_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             params![
                 id,
@@ -10555,14 +10795,19 @@ impl Store {
                 input.url,
                 input.created_at,
                 imported_at,
+                retrieved_at,
+                metrics_json,
+                raw_json,
                 card.id,
                 card.wiki_page_id
             ],
         )?;
+        self.upsert_x_item_source(&input)?;
         self.conn
             .query_row(
                 r#"
-                SELECT id, x_id, author, text, url, created_at, imported_at, source_card_id, wiki_page_id
+                SELECT id, x_id, author, text, url, created_at, imported_at, retrieved_at,
+                       metrics_json, raw_json, source_card_id, wiki_page_id
                 FROM x_items
                 WHERE id = ?1
                 "#,
@@ -10571,6 +10816,65 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    fn update_existing_x_item(&self, input: &XItemInput) -> Result<()> {
+        let metrics_json = canonical_json(&input.metrics)?;
+        let raw_json = canonical_json(&input.raw)?;
+        let retrieved_at = input.retrieved_at.clone().unwrap_or_else(now);
+        self.conn.execute(
+            r#"
+            UPDATE x_items
+            SET text = CASE WHEN text = '' THEN ?2 ELSE text END,
+                metrics_json = CASE WHEN ?3 != '{}' THEN ?3 ELSE metrics_json END,
+                raw_json = CASE WHEN ?4 != '{}' THEN ?4 ELSE raw_json END,
+                retrieved_at = ?5
+            WHERE x_id = ?1
+            "#,
+            params![input.x_id, input.text, metrics_json, raw_json, retrieved_at],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_x_item_source(&self, input: &XItemInput) -> Result<()> {
+        let id = x_item_source_id(
+            &input.x_id,
+            &input.source_kind,
+            input.source_detail.as_deref(),
+        );
+        let seen_at = input.retrieved_at.clone().unwrap_or_else(now);
+        let metadata_json = canonical_json(&input.source_metadata)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO x_item_sources (id, x_id, source_kind, source_detail, seen_at, metadata_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(id) DO UPDATE SET
+              seen_at = excluded.seen_at,
+              metadata_json = excluded.metadata_json
+            "#,
+            params![
+                id,
+                input.x_id,
+                input.source_kind,
+                input.source_detail,
+                seen_at,
+                metadata_json
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_x_item_sources(&self, x_id: &str) -> Result<Vec<XItemSource>> {
+        validate_key(x_id)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, x_id, source_kind, source_detail, seen_at, metadata_json
+            FROM x_item_sources
+            WHERE x_id = ?1
+            ORDER BY seen_at DESC
+            "#,
+        )?;
+        rows(stmt.query_map(params![x_id], x_item_source_from_row)?)
     }
 
     fn search_wiki_pages_for_research(&self, query: &str) -> Result<Vec<WikiPageSummary>> {
@@ -11911,6 +12215,14 @@ fn default_policy_rules() -> Vec<PolicyRule> {
             Some("x"),
             Some("x_monitor"),
             "default policy allows the curated X watch-source monitor after policy and cost checks",
+        ),
+        default_allow_rule(
+            "default-allow-x-import-bookmarks",
+            "provider.network",
+            Some("arcwell-x"),
+            Some("x"),
+            Some("x_import_bookmarks"),
+            "default policy allows authenticated X bookmark import after policy and cost checks",
         ),
         default_allow_rule(
             "default-allow-brave-web-search",
@@ -13544,6 +13856,8 @@ fn research_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResearchRu
 }
 
 fn x_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<XItem> {
+    let metrics_json: String = row.get(8)?;
+    let raw_json: String = row.get(9)?;
     Ok(XItem {
         id: row.get(0)?,
         x_id: row.get(1)?,
@@ -13552,8 +13866,24 @@ fn x_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<XItem> {
         url: row.get(4)?,
         created_at: row.get(5)?,
         imported_at: row.get(6)?,
-        source_card_id: row.get(7)?,
-        wiki_page_id: row.get(8)?,
+        retrieved_at: row.get(7)?,
+        metrics: parse_json_column(&metrics_json, 8)?,
+        raw: parse_json_column(&raw_json, 9)?,
+        source_card_id: row.get(10)?,
+        wiki_page_id: row.get(11)?,
+        sources: Vec::new(),
+    })
+}
+
+fn x_item_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<XItemSource> {
+    let metadata_json: String = row.get(5)?;
+    Ok(XItemSource {
+        id: row.get(0)?,
+        x_id: row.get(1)?,
+        source_kind: row.get(2)?,
+        source_detail: row.get(3)?,
+        seen_at: row.get(4)?,
+        metadata: parse_json_column(&metadata_json, 5)?,
     })
 }
 
@@ -15150,6 +15480,12 @@ struct XItemInput {
     text: String,
     url: String,
     created_at: Option<String>,
+    retrieved_at: Option<String>,
+    metrics: Value,
+    raw: Value,
+    source_kind: String,
+    source_detail: Option<String>,
+    source_metadata: Value,
 }
 
 fn parse_x_item_input(value: &Value) -> Result<XItemInput> {
@@ -15168,12 +15504,40 @@ fn parse_x_item_input(value: &Value) -> Result<XItemInput> {
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("https://x.com/{author}/status/{x_id}"));
     let created_at = first_string(object, &["created_at", "date"]).map(ToOwned::to_owned);
+    let metrics = object
+        .get("metrics")
+        .or_else(|| object.get("public_metrics"))
+        .or_else(|| object.get("metrics_json"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let raw = object
+        .get("raw")
+        .or_else(|| object.get("raw_json"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let source_kind = first_string(object, &["source_kind", "source"])
+        .unwrap_or("json_import")
+        .to_string();
+    let source_detail =
+        first_string(object, &["source_detail", "source_label"]).map(ToOwned::to_owned);
+    let source_metadata = object
+        .get("source_metadata")
+        .or_else(|| object.get("provenance"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let retrieved_at = first_string(object, &["retrieved_at", "seen_at"]).map(ToOwned::to_owned);
     Ok(XItemInput {
         x_id,
         author,
         text,
         url,
         created_at,
+        retrieved_at,
+        metrics,
+        raw,
+        source_kind,
+        source_detail,
+        source_metadata,
     })
 }
 
@@ -15182,7 +15546,20 @@ fn validate_x_item_input(input: &XItemInput) -> Result<()> {
     validate_key(&input.author)?;
     validate_notes(&input.text)?;
     validate_public_http_url(&input.url)?;
+    validate_x_item_source_kind(&input.source_kind)?;
     Ok(())
+}
+
+fn validate_x_item_source_kind(source_kind: &str) -> Result<()> {
+    match source_kind {
+        "bookmark" | "json_import" | "recent_search" | "watch_monitor" => Ok(()),
+        other => bail!("unsupported X item source kind: {other}"),
+    }
+}
+
+fn x_item_source_id(x_id: &str, source_kind: &str, source_detail: Option<&str>) -> String {
+    let hash = sha256(format!("{x_id}\n{source_kind}\n{}", source_detail.unwrap_or("")).as_bytes());
+    format!("xsrc-{}", &hash[..32])
 }
 
 fn x_following_user_to_watch_source(user: &Value) -> Result<WatchSourceInput> {
@@ -15261,6 +15638,65 @@ fn x_bookmark_tweet_author_watch_source(
     input.metadata["bookmark_tweet_created_at"] =
         Value::String(created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     Ok(Some(input))
+}
+
+fn x_bookmark_tweet_to_item_input(
+    tweet: &Value,
+    users: &BTreeMap<String, Value>,
+    cutoff: DateTime<Utc>,
+) -> Result<Option<XItemInput>> {
+    let object = tweet
+        .as_object()
+        .context("bookmarked tweet must be an object")?;
+    let x_id = first_string(object, &["id"]).context("bookmarked tweet missing id")?;
+    let author_id =
+        first_string(object, &["author_id"]).context("bookmarked tweet missing author_id")?;
+    let text = first_string(object, &["text"]).context("bookmarked tweet missing text")?;
+    let created_at_raw =
+        first_string(object, &["created_at"]).context("bookmarked tweet missing created_at")?;
+    let created_at = DateTime::parse_from_rfc3339(created_at_raw)
+        .context("bookmarked tweet has invalid created_at")?
+        .with_timezone(&Utc);
+    if created_at < cutoff {
+        return Ok(None);
+    }
+    let user = users
+        .get(author_id)
+        .with_context(|| format!("bookmarked tweet author not expanded: {author_id}"))?;
+    let user_object = user
+        .as_object()
+        .context("bookmarked tweet author expansion must be an object")?;
+    let author = first_string(user_object, &["username", "handle"])
+        .unwrap_or(author_id)
+        .trim_start_matches('@')
+        .to_string();
+    validate_x_handle(&author)?;
+    let retrieved_at = now();
+    Ok(Some(XItemInput {
+        x_id: x_id.to_string(),
+        author: author.clone(),
+        text: text.to_string(),
+        url: format!("https://x.com/{author}/status/{x_id}"),
+        created_at: Some(created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        retrieved_at: Some(retrieved_at.clone()),
+        metrics: tweet
+            .get("public_metrics")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        raw: tweet.clone(),
+        source_kind: "bookmark".to_string(),
+        source_detail: Some("bookmarks".to_string()),
+        source_metadata: json!({
+            "imported_from": "x_api/bookmarks",
+            "bookmark_imported_at": retrieved_at,
+            "tweet_created_at": created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "x_author_id": author_id,
+            "author_name": first_string(user_object, &["name"]),
+            "author_description": first_string(user_object, &["description"]),
+            "verified": user.get("verified").and_then(Value::as_bool),
+            "verified_type": first_string(user_object, &["verified_type"])
+        }),
+    }))
 }
 
 fn merge_x_watch_source(
@@ -15956,15 +16392,59 @@ fn render_x_report(query: Option<&str>, items: &[XItem]) -> String {
     } else {
         for item in items {
             markdown.push_str(&format!(
-                "- [{}]({}) by `@{}`\n  - {}\n",
+                "- [{}]({}) by `@{}`\n  - Source: {}\n  - Stats: {}\n  - {}\n",
                 item.x_id,
                 item.url,
                 escape_untrusted_markdown_text(&item.author),
+                escape_untrusted_markdown_text(&x_sources_summary(item)),
+                escape_untrusted_markdown_text(&x_metrics_summary(&item.metrics)),
                 escape_untrusted_markdown_text(&item.text)
             ));
         }
     }
     markdown
+}
+
+fn x_sources_summary(item: &XItem) -> String {
+    let sources = item
+        .sources
+        .iter()
+        .map(|source| match &source.source_detail {
+            Some(detail) if !detail.is_empty() => {
+                format!("{} ({detail})", source.source_kind)
+            }
+            _ => source.source_kind.clone(),
+        })
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        "unknown".to_string()
+    } else {
+        sources.join(", ")
+    }
+}
+
+fn x_metrics_summary(metrics: &Value) -> String {
+    let Some(object) = metrics.as_object() else {
+        return "none recorded".to_string();
+    };
+    let mut parts = Vec::new();
+    for key in [
+        "like_count",
+        "reply_count",
+        "retweet_count",
+        "quote_count",
+        "bookmark_count",
+        "impression_count",
+    ] {
+        if let Some(value) = object.get(key).and_then(Value::as_i64) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    if parts.is_empty() {
+        "none recorded".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn fetch_text(url: &str, bearer_token: Option<&str>) -> Result<String> {
@@ -16476,7 +16956,11 @@ fn github_item_id(item: &Value) -> Option<String> {
         })
 }
 
-fn x_search_response_to_import_items(value: &Value) -> Result<Value> {
+fn x_search_response_to_import_items(
+    value: &Value,
+    source_kind: &str,
+    source_detail: Option<&str>,
+) -> Result<Value> {
     let users = value
         .pointer("/includes/users")
         .and_then(Value::as_array)
@@ -16520,7 +17004,17 @@ fn x_search_response_to_import_items(value: &Value) -> Result<Value> {
             "author": author,
             "text": text,
             "url": format!("https://x.com/{author}/status/{id}"),
-            "created_at": tweet.get("created_at").and_then(Value::as_str)
+            "created_at": tweet.get("created_at").and_then(Value::as_str),
+            "metrics": tweet.get("public_metrics").cloned().unwrap_or_else(|| json!({})),
+            "raw": tweet,
+            "source_kind": source_kind,
+            "source_detail": source_detail,
+            "source_metadata": {
+                "source_kind": source_kind,
+                "source_detail": source_detail,
+                "imported_from": "x_api",
+                "newest_id": value.pointer("/meta/newest_id").and_then(Value::as_str)
+            }
         }));
     }
     Ok(Value::Array(out))
@@ -22471,7 +22965,13 @@ ARXIV=( "cat:cs.AI" )
                   "id": "200",
                   "author_id": "u1",
                   "text": "Live X search result.",
-                  "created_at": "2026-06-19T00:00:00Z"
+                  "created_at": "2026-06-19T00:00:00Z",
+                  "public_metrics": {
+                    "retweet_count": 1,
+                    "reply_count": 2,
+                    "like_count": 3,
+                    "quote_count": 4
+                  }
                 }
               ],
               "includes": {
@@ -22492,6 +22992,132 @@ ARXIV=( "cat:cs.AI" )
         assert_eq!(cursor.value, "200");
         let item = store.list_x_items(Some("Live X")).unwrap().pop().unwrap();
         assert_eq!(item.author, "openai");
+        assert_eq!(item.metrics["like_count"], 3);
+        assert_eq!(item.sources[0].source_kind, "recent_search");
+    }
+
+    #[test]
+    fn x_import_bookmarks_preserves_body_metrics_and_source() {
+        let store = test_store("x-bookmark-import");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "test-token", "x")
+            .unwrap();
+        let recent = (Utc::now() - chrono::Duration::days(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let old = (Utc::now() - chrono::Duration::days(160))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let bookmarks_body = Box::leak(
+            format!(
+                r#"{{
+                  "data": [
+                    {{
+                      "id": "b1",
+                      "author_id": "u1",
+                      "text": "Useful bookmarked post body.",
+                      "created_at": "{recent}",
+                      "public_metrics": {{
+                        "retweet_count": 5,
+                        "reply_count": 6,
+                        "like_count": 7,
+                        "quote_count": 8,
+                        "bookmark_count": 9,
+                        "impression_count": 10
+                      }}
+                    }},
+                    {{
+                      "id": "old1",
+                      "author_id": "u1",
+                      "text": "Old bookmark outside the window.",
+                      "created_at": "{old}"
+                    }}
+                  ],
+                  "includes": {{
+                    "users": [
+                      {{
+                        "id": "u1",
+                        "username": "openai",
+                        "name": "OpenAI",
+                        "description": "AI research",
+                        "verified": true,
+                        "verified_type": "business"
+                      }}
+                    ]
+                  }},
+                  "meta": {{}}
+                }}"#
+            )
+            .into_boxed_str(),
+        );
+        let base = mock_sequence_server(vec![
+            (
+                "200 OK",
+                "",
+                r#"{"data":{"id":"me","username":"me","name":"Me"}}"#,
+                "application/json",
+            ),
+            ("200 OK", "", bookmarks_body, "application/json"),
+        ]);
+
+        let report = store.x_import_bookmarks_with_base(92, 10, &base).unwrap();
+        assert_eq!(report.seen, 2);
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped_duplicates, 0);
+        assert_eq!(report.rejected, 0);
+
+        let items = store
+            .list_x_items_filtered(None, Some("bookmark"), Some(5))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.x_id, "b1");
+        assert_eq!(item.text, "Useful bookmarked post body.");
+        assert_eq!(item.metrics["like_count"], 7);
+        assert_eq!(item.metrics["bookmark_count"], 9);
+        assert_eq!(item.raw["text"], "Useful bookmarked post body.");
+        assert_eq!(item.sources.len(), 1);
+        assert_eq!(item.sources[0].source_kind, "bookmark");
+        assert_eq!(item.sources[0].source_detail.as_deref(), Some("bookmarks"));
+    }
+
+    #[test]
+    fn x_duplicate_items_keep_multiple_sources() {
+        let store = test_store("x-multi-source");
+        store
+            .import_x_json_value(&json!([
+                {
+                    "id": "multi1",
+                    "author": "openai",
+                    "text": "Same tweet from search.",
+                    "url": "https://x.com/openai/status/multi1",
+                    "created_at": "2026-06-19T00:00:00Z",
+                    "source_kind": "recent_search",
+                    "source_detail": "agents"
+                },
+                {
+                    "id": "multi1",
+                    "author": "openai",
+                    "text": "Same tweet from bookmark.",
+                    "url": "https://x.com/openai/status/multi1",
+                    "created_at": "2026-06-19T00:00:00Z",
+                    "source_kind": "bookmark",
+                    "source_detail": "bookmarks",
+                    "metrics": { "like_count": 11 }
+                }
+            ]))
+            .unwrap();
+
+        let items = store.list_x_items(Some("Same tweet")).unwrap();
+        assert_eq!(items.len(), 1);
+        let source_kinds: BTreeSet<String> = items[0]
+            .sources
+            .iter()
+            .map(|source| source.source_kind.clone())
+            .collect();
+        assert_eq!(
+            source_kinds,
+            BTreeSet::from(["bookmark".to_string(), "recent_search".to_string()])
+        );
+        assert_eq!(items[0].metrics["like_count"], 11);
     }
 
     #[test]

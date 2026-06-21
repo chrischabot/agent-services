@@ -397,50 +397,87 @@ Adversarial/severe gate:
 
 ### 7. Research And Librarian Synthesis
 
+Target design:
+Arcwell Research has one user-facing mode: Deep Research. Invoking research
+means broad source discovery, deep reading, source-card and claim extraction,
+clustering, skeptic/refutation passes, cited synthesis, audit, and durable
+writeback. A short brief can be a report section or interim artifact, but not a
+separate quick/surface mode. See `docs/deep-research-system-design.md`.
+
 - [x] Define a typed source-card schema with versioning.
+- [ ] Add `research run/status/read/audit/stop` as the target deep-run surface
+      over the existing partial plan/workflow/search/report building blocks.
+- [ ] Add a research source ledger with source-family, read-depth, canonical
+      URL, provider, freshness, fetch status, and run-source links.
+- [ ] Link source cards to research runs so audit/report retrieval is not only
+      literal query text search.
 - [ ] Add model-backed source extraction into claims, entities, dates, and links.
-- [ ] Add librarian clustering across RSS, GitHub, arXiv, X, and web search.
+- [ ] Add a structured claim graph with confidence, caveats, temporal scope,
+      source-card evidence links, and contradiction links.
+- [ ] Add clustering across RSS, GitHub, arXiv, X, web search, local wiki, and
+      fetched sources.
 - [x] Add deterministic contradiction, staleness, untrusted-source,
       low-reliability, robots/noindex, and uncertainty audit detection for
       source cards.
 - [ ] Add page expansion that actively gathers related docs/blogs/repos/social
       sources before writing a topic page.
 - [ ] Add native host-search pathway for Codex/OpenAI and Claude where available.
+- [ ] Add Codex-native subagent prompts/configs for scout, corpus builder,
+      extractor, skeptic, synthesizer, and auditor roles.
+- [ ] Add mandatory skeptic/refutation passes for important claims before final
+      synthesis.
+- [ ] Add a report compiler that produces final reports with executive summary,
+      methodology/source coverage, key findings, evidence tables,
+      contradictions, confidence labels, gaps, bibliography, and retrieval date.
+- [ ] Add saturation reporting that explains why the run stopped: coverage,
+      diminishing novelty, unresolved blocker, provider limit, budget, or user
+      stop.
 - [ ] Keep Brave and Perplexity as optional provider adapters.
 - [x] Add research output audit command/checklist.
 - [x] Prevent generated research pages from becoming primary sources.
 
 Description:
-The current research and librarian flows remain deterministic and local, but
-source cards now carry schema version, evidence role, trust level, reliability
-score, provenance strength, inferred source owner, crawl-rate policy, extracted
+The current research and librarian flows remain deterministic and local. Source
+cards now carry schema version, evidence role, trust level, reliability score,
+provenance strength, inferred source owner, crawl-rate policy, extracted
 dates/entities, and audit flags. `research_audit` surfaces generated-page
 recursion, uncited model answers, stale retrieval dates, prompt-injection/SEO
-spam evidence, low-reliability sources, robots/noindex metadata,
-low-confidence claims, and conflicting launch dates. Research briefs and
-librarian expanded pages exclude generated/model-answer, untrusted, and
-low-reliability source cards from primary evidence and include an evidence
-audit section. Model-backed synthesis, live host-native search wiring,
-clustering, and richer contradiction review remain future work.
+spam evidence, low-reliability sources, robots/noindex metadata, low-confidence
+claims, and conflicting launch dates. Research outputs exclude
+generated/model-answer, untrusted, and low-reliability source cards from primary
+evidence and include an evidence audit section. The deep-only target still
+needs source-ledger/run-linking, model-backed extraction, a claim graph,
+clustering, Codex-native subagent orchestration, mandatory skeptic passes,
+report compilation, saturation reporting, and live host-native search proof.
 
 How to test:
 - Source-card schema validation tests.
+- Source-ledger/run-link retrieval tests proving a run finds its source cards
+  even when literal query search misses them.
 - Mock-provider tests for citation extraction, missing citations, conflicting
   sources, stale dates, and source type mixing.
-- End-to-end topic expansion fixture: seed one launch source, verify it collects
-  related source cards and writes a cited page.
-- Run host-native search manually for one live topic and record evidence.
+- End-to-end topic expansion fixture: seed one launch source, verify it
+  collects related source cards, extracts claims, clusters evidence, runs a
+  skeptic pass, and writes a cited report.
+- Run live Deep Research through Codex on at least:
+  `AI startup scene in London`, `most effective image compression algorithms`,
+  and `safe cloud code execution with compile-time security constraint
+  verification`.
 
 Success looks like:
-- A launch/repo/paper can become a wiki page with cited claims, gaps, and
-  uncertainty.
-- Research briefs distinguish local wiki evidence from current web findings.
+- Invoking `$deep-research` produces a deep report, not a quick answer.
+- Broad topics can gather hundreds of candidate sources and explain source
+  coverage/saturation.
+- A launch/repo/paper/market/technical field can become a report with cited
+  claims, gaps, uncertainty, and contradiction notes.
+- Reports distinguish local wiki evidence from current web findings.
 - Contradictions are surfaced instead of smoothed over.
 
 Adversarial/severe gate:
 - Test SEO spam source, prompt-injection page, fake citation, dead link,
-  conflicting launch dates, generated page recursion, stale source, and model
-  answer without citations.
+  conflicting launch dates, generated page recursion, stale source, model answer
+  without citations, subagent summary losing caveats, source-card run-link
+  misses, and final-report claims absent from source cards.
 
 ### 8. Work-Memory Graph
 
@@ -819,6 +856,8 @@ Adversarial/severe gate:
 - [x] Add watch-list audit output with counts and provenance.
 - [x] Add rate-limit and tier-aware failures.
 - [x] Add X bookmarks ingestion path if not already covered by rebuild internals.
+- [x] Store bookmarked tweet bodies, public metrics, and source provenance as
+      first-class X items instead of only watch-source metadata.
 - [x] Add interestingness/source-card/digest flow.
 - [ ] Add Cloudflare callback/cron event capture after edge inbox is durable.
 

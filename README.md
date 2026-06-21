@@ -80,15 +80,23 @@ The wiki can ingest local Markdown files, public URLs, versioned/auditable sourc
 
 ### Deep Research
 
-Coordinates research plans, source gathering, role-based tasks, optional web search through Brave/OpenAI/Perplexity, and wiki-grounded briefs.
+Coordinates deep research runs for Codex and other MCP-capable agents. The
+target product has one user-facing mode: deep research. Invoking research means
+broad source discovery, deep reading, source-card and claim extraction,
+skeptic/refutation passes, cited synthesis, audit, and durable wiki writeback.
+Short summaries are report artifacts, not a separate quick research mode.
 
-The recommended flow is:
+The current partial implementation supports the building blocks:
 
 1. Make a research plan.
-2. Gather current primary sources.
-3. Write source cards into the wiki.
-4. Run skeptic/audit passes.
-5. Produce a brief from local source cards and wiki pages.
+2. Gather current primary sources with host-native search or guarded provider adapters.
+3. Write source cards and notes into the wiki.
+4. Run tracked scout/extractor/skeptic/synthesizer tasks.
+5. Run audit passes before using research externally.
+6. Produce wiki-grounded report drafts from local source cards and wiki pages.
+
+The complete target design is in
+[docs/deep-research-system-design.md](docs/deep-research-system-design.md).
 
 ### X / Twitter
 
@@ -292,6 +300,8 @@ Common commands:
 /watch-rss
 /watch-github
 /watch-arxiv
+/x-import-bookmarks
+/x-bookmarks
 /x-search
 /x-watch-rebuild
 /project-status

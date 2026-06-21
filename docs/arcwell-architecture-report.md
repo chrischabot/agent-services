@@ -1405,8 +1405,8 @@ Why:
 
 Package contents:
 
-- Skill: `$deep-research` for full plan -> scout -> extract -> refute -> synthesize -> cite workflow.
-- Skill: `$research-brief` for smaller one-pass research requests.
+- Skill: `$deep-research` for the one user-facing deep research workflow: plan -> source-map -> scout -> extract -> refute -> synthesize -> audit -> write back.
+- Skill: `$research-brief` only as an artifact renderer for already-collected evidence, not as a quick research mode.
 - Skill: `$research-audit` for checking an existing draft against sources and finding weak claims.
 - Optional custom agents:
   - `research-scout`: broad source discovery, search query expansion, source-map creation.
@@ -1499,8 +1499,8 @@ Phase 3: Deep Research skill path.
 
 - Add `arcwell-deep-research` plugin contents: `$deep-research`, `$research-brief`, and `$research-audit`.
 - Add optional custom agents for `research-scout`, `source-extractor`, `skeptic`, and `synthesizer`.
-- Wire the skill to use web search plus Memory Wiki MCP tools; write source cards and final briefs to the wiki by default, with a per-run `no-write` override.
-- Success: regular Codex can run a multi-subagent research brief with citations, contradictions, confidence labels, and open questions.
+- Wire the skill to use web search plus Memory Wiki MCP tools; write source cards, claims, contradiction notes, and final reports to the wiki by default, with a per-run `no-write` override.
+- Success: regular Codex can run a multi-subagent deep research report with citations, contradictions, confidence labels, source coverage, saturation notes, and open questions.
 
 Phase 4: Wiki ingest jobs.
 
@@ -1617,7 +1617,7 @@ These should carry over from codex-swift:
 - `arcwell-memory` should be a full mem0-shaped lifecycle system: pre-turn recall hooks, post-turn capture hooks, conversation ingestion, candidate collection, ADD/UPDATE/DELETE/NONE reconciliation, procedural memory, scheduled dream/consolidation jobs, review/delete/correct flows, and an inspectable decision ledger. Dream/reconcile changes should auto-apply in trusted personal scopes by default, then produce a digest and remain reversible.
 - Service placement: Memory Wiki is hybrid with local source of truth and optional Cloudflare capture inbox; Telegram is hybrid with Cloudflare webhook plus local Codex bridge; X is Cloudflare-eligible for OAuth/callback/cron/cursors; mail is hybrid via Cloudflare Email Worker plus local processing; Deep Research is host-native-search first with optional Cloudflare seed capture.
 - Deep Research search stack: use the host agent's native search first: OpenAI web search/deep-research in Codex/OpenAI contexts, Claude web search in Claude contexts. Brave Search and Perplexity Search/Sonar are optional provider adapters through `arcwell-search-kit`.
-- Deep Research should write source cards, final briefs, contradiction notes, and unresolved gaps back to the wiki by default, with a per-run `no-write` escape hatch.
+- Deep Research should write source cards, final reports, contradiction notes, and unresolved gaps back to the wiki by default, with a per-run `no-write` escape hatch.
 - Start as a monorepo, likely `arcwell-apps`, so shared envelope, channel, search, MCP, and Cloudflare patterns can evolve together.
 - Name packages `arcwell-*`, not `codex-app-*`. Codex-specific pieces live under host adapters; MCP-compatible services should be usable from Claude Desktop/Code and other agents without inheriting Codex branding or runtime assumptions.
 - Chat channels should route through `arcwell-controller`, a meta-controller for projects, threads, running work, status summaries, natural-language reference resolution, follow-up context, and approved creation/resume operations.

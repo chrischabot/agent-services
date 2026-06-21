@@ -2,7 +2,21 @@
 
 **Status:** Partial.
 
-Research run coordination for MCP-capable agents.
+Deep research coordination for MCP-capable agents.
+
+Target product contract:
+
+- Arcwell has one user-facing research mode: deep.
+- Invoking research means broad source discovery, deep source mining, structured
+  source cards and claims, skeptic/refutation passes, cited synthesis, audit,
+  and durable wiki writeback.
+- There is no quick/surface research mode. A short executive summary or brief is
+  an output artifact inside a deep run, not a separate product path.
+- The normal assistant should not auto-trigger Deep Research for every question;
+  it should run only when research is explicitly invoked or unmistakably
+  requested.
+
+Design reference: `docs/deep-research-system-design.md`.
 
 Current implementation:
 
@@ -33,7 +47,7 @@ MCP resources:
 
 - `arcwell://research`
 
-Boundary:
+Current boundary:
 
 - The local service records runs, searches local wiki pages, and writes briefs back to `arcwell-llm-wiki`.
 - The host agent performs current web search with its native tools when available.
@@ -41,19 +55,24 @@ Boundary:
 - Provider endpoints are guarded to official HTTPS origins or loopback tests unless explicitly overridden.
 - Generated research briefs and source-card wiki artifacts are outputs, not source material. Research source selection excludes generated `Research Brief: ...`, `Expanded: ...`, and `Source Card: ...` wiki pages from local-source evidence.
 - `research_audit` checks local source cards for schema/version metadata, generated-page recursion, uncited model answers, stale retrieval dates, prompt-injection/SEO-spam indicators, low reliability, robots `noindex`, low-confidence claims, and conflicting launch dates.
-- Brief source selection excludes generated/model-answer cards plus explicitly untrusted or low-reliability source cards. Those cards remain stored and auditable as evidence, but they do not ground synthesized briefs.
+- Brief/report source selection excludes generated/model-answer cards plus explicitly untrusted or low-reliability source cards. Those cards remain stored and auditable as evidence, but they do not ground synthesized outputs.
 - Brave, OpenAI, and Perplexity are adapters, not hard dependencies.
 
-Recommended host-agent loop:
+Target host-agent loop:
 
 1. Call `research_plan`.
-2. Create a daemon-tracked workflow with `research_workflow_create` when the work should be split into scout/extractor/skeptic/synthesizer phases.
-3. Search current web sources using the host's native web-search capability, or `research_web_search` when a provider key is configured.
-4. Ingest source cards into `arcwell-llm-wiki`.
-5. Call `research_brief_from_wiki`.
-6. Call `research_audit` and audit the brief against sources before using it externally.
+2. Create a daemon-tracked workflow with `research_workflow_create`.
+3. Build a source map across primary, secondary, dissenting, technical, historical, and adjacent source families.
+4. Search current sources using the host's native web-search capability, or `research_web_search` when a provider key is configured.
+5. Ingest source cards and structured claims into `arcwell-llm-wiki`.
+6. Run skeptic/refutation passes before synthesis.
+7. Compile a cited report from source cards, claims, contradiction notes, and audit notes.
+8. Call `research_audit` before using a report externally or as project evidence.
 
 Future work:
 
 - Model-backed synthesis, extraction, and contradiction review beyond the current deterministic audit heuristics.
+- Source ledger, run-source links, claim graph, clustering, and saturation reporting.
+- Codex-native subagent workflow for scout, corpus builder, extractor, skeptic, synthesizer, and auditor roles.
+- Report compiler that treats "brief" as an artifact of a deep run rather than a shallow mode.
 - End-to-end scheduled monitor loops that expand wiki pages when important sources change; current hooks enqueue due watch-source jobs only.

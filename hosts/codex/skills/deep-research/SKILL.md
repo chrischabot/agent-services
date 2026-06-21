@@ -1,22 +1,30 @@
 # Deep Research
 
-Use this skill for multi-source research, trend reports, launch analysis, technical scans, and questions where freshness or contradictions matter.
+Use this skill for deep multi-source research, trend reports, launch analysis, literature surveys, market maps, technical scans, and questions where freshness, coverage, or contradictions matter.
+
+Product contract:
+
+- There is one user-facing research mode: deep research.
+- If research is invoked, assume broad source discovery, deep reading, source-card/claim extraction, skeptic/refutation passes, cited synthesis, audit, and durable writeback.
+- Do not treat this as a quick answer or surface-level brief workflow. A short summary can be part of the final report, but it is not a separate mode.
+- Do not auto-trigger Deep Research for every ordinary factual question; use it when the user explicitly asks to research, deeply investigate, survey, map, or produce a comprehensive report.
 
 Rules:
 
 - Start with `research_plan` to get local wiki context and suggested searches.
-- Use `research_workflow_create` for substantial research so scout, extractor, skeptic, and synthesizer work is tracked.
+- Use `research_workflow_create` so scout, extractor, skeptic, and synthesizer work is tracked.
 - Use host-native web search for current claims. Do not rely only on local wiki pages when the topic may have changed.
 - If native search is unavailable or insufficient, use `research_web_search` with `provider=openai`, `provider=brave`, or `provider=perplexity` when API keys are configured.
 - Prefer primary sources first: official docs, release notes, source repos, papers, company blogs, and named-person posts.
 - Use `wiki_enqueue_github` for GitHub repo releases/commits, `wiki_enqueue_arxiv` for papers, and `wiki_enqueue_rss` for feeds to queue adapter jobs. Those jobs create durable source cards after the worker runs.
 - Use `x_recent_search` or `x_enqueue_recent_search` when X is a relevant primary/near-primary signal.
 - Use secondary analysis to find controversy, missing context, and implications.
-- Write durable source cards or notes into `arcwell-llm-wiki` before producing a final brief.
+- Search and expand by source family until the run can explain source coverage and saturation, or until an explicit user/policy/budget limit stops it.
+- Write durable source cards or notes into `arcwell-llm-wiki` before producing a final report.
 - Use typed source cards for external evidence; do not bury source provenance only in prose.
-- Call `research_brief_from_wiki` after source cards are in place.
-- Call `research_audit` before using a brief externally or as project evidence.
-- Treat generated `Research Brief:` pages as outputs, not evidence.
+- Use `research_brief_from_wiki` only as the current report-draft artifact after source cards are in place; do not present it as a shallow mode.
+- Call `research_audit` before using a report externally or as project evidence.
+- Treat generated `Research Brief:`, report, and `Expanded:` pages as outputs, not evidence.
 - Record retrieval date in source cards for current or fast-moving topics.
 
 MCP tools:
@@ -46,13 +54,16 @@ MCP tools:
 Suggested subagent roles when available:
 
 - `research-scout`: finds primary and high-signal secondary sources.
-- `source-extractor`: converts sources into compact source cards with claims, dates, links, and caveats.
+- `corpus-builder`: dedupes, fetches, canonicalizes, and records source coverage/read depth.
+- `source-extractor`: converts sources into source cards with claims, dates, links, and caveats.
 - `skeptic`: searches for contradictions, stale assumptions, security/privacy issues, and missing sources.
-- `synthesizer`: creates the final brief from source cards and audit notes.
+- `synthesizer`: creates the final report from source cards, claims, contradiction notes, and audit notes.
+- `auditor`: checks report claims against source cards and fails weak grounding.
 
 Minimum output discipline:
 
 - Answer with sourced claims.
 - Separate confirmed facts, interpretation, and open questions.
 - Include links for external sources and wiki page ids for local sources.
+- Report source coverage and why the run stopped.
 - Say plainly when the local wiki has no matching context.

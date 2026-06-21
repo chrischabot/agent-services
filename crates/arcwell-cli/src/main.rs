@@ -1143,6 +1143,11 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
         "x-enqueue-search",
         SlashAliasTarget::Cli(&["x", "enqueue-recent-search"]),
     ),
+    ("x-bookmarks", SlashAliasTarget::Cli(&["x", "bookmarks"])),
+    (
+        "x-import-bookmarks",
+        SlashAliasTarget::Cli(&["x", "import-bookmarks"]),
+    ),
     (
         "x-import-following-watch-sources",
         SlashAliasTarget::Cli(&["x", "import-following-watch-sources"]),
@@ -1916,6 +1921,12 @@ enum XSubcommand {
         #[arg(long, default_value_t = 10)]
         max_results: usize,
     },
+    ImportBookmarks {
+        #[arg(long, default_value_t = 92)]
+        bookmark_days: i64,
+        #[arg(long, default_value_t = 100)]
+        max_bookmarks: usize,
+    },
     ImportFollowingWatchSources {
         #[arg(long, default_value_t = 1000)]
         max_users: usize,
@@ -1963,6 +1974,16 @@ enum XSubcommand {
     List {
         #[arg(long)]
         query: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    Bookmarks {
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
     },
     Report {
         #[arg(long)]
@@ -2380,6 +2401,10 @@ fn x_command(store: Store, args: XCommand) -> Result<()> {
         XSubcommand::EnqueueRecentSearch { query, max_results } => {
             print_json(&store.enqueue_x_recent_search_job(&query, max_results)?)
         }
+        XSubcommand::ImportBookmarks {
+            bookmark_days,
+            max_bookmarks,
+        } => print_json(&store.x_import_bookmarks(bookmark_days, max_bookmarks)?),
         XSubcommand::ImportFollowingWatchSources { max_users } => {
             print_json(&store.x_import_following_watch_sources(max_users)?)
         }
@@ -2418,7 +2443,20 @@ fn x_command(store: Store, args: XCommand) -> Result<()> {
             client_id,
             client_secret,
         } => print_json(&store.x_oauth_refresh(&client_id, client_secret.as_deref())?),
-        XSubcommand::List { query } => print_json(&store.list_x_items(query.as_deref())?),
+        XSubcommand::List {
+            query,
+            source,
+            limit,
+        } => print_json(&store.list_x_items_filtered(
+            query.as_deref(),
+            source.as_deref(),
+            Some(limit),
+        )?),
+        XSubcommand::Bookmarks { query, limit } => print_json(&store.list_x_items_filtered(
+            query.as_deref(),
+            Some("bookmark"),
+            Some(limit),
+        )?),
         XSubcommand::Report { query } => print_json(&store.x_report(query.as_deref())?),
     }
 }
@@ -6147,6 +6185,19 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
                 store.enqueue_x_recent_search_job(&query, max_results)?
             ))
         }
+        "x_import_bookmarks" => {
+            let bookmark_days = arguments
+                .get("bookmark_days")
+                .and_then(Value::as_i64)
+                .unwrap_or(92);
+            let max_bookmarks = arguments
+                .get("max_bookmarks")
+                .and_then(Value::as_u64)
+                .unwrap_or(100) as usize;
+            Ok(json!(
+                store.x_import_bookmarks(bookmark_days, max_bookmarks)?
+            ))
+        }
         "x_import_following_watch_sources" => {
             let max_users = arguments
                 .get("max_users")
@@ -6228,7 +6279,24 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
         }
         "x_list" => {
             let query = arguments.get("query").and_then(Value::as_str);
-            Ok(json!(store.list_x_items(query)?))
+            let source = arguments.get("source").and_then(Value::as_str);
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            Ok(json!(store.list_x_items_filtered(query, source, limit)?))
+        }
+        "x_bookmarks" => {
+            let query = arguments.get("query").and_then(Value::as_str);
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            Ok(json!(store.list_x_items_filtered(
+                query,
+                Some("bookmark"),
+                limit
+            )?))
         }
         "x_report" => {
             let query = arguments.get("query").and_then(Value::as_str);
@@ -6895,6 +6963,18 @@ fn mcp_tools() -> Vec<Value> {
             [("query", "string", "X search query.")],
         ),
         tool(
+            "x_import_bookmarks",
+            "Import authenticated X bookmarks as full X items with source provenance and public metrics.",
+            [
+                (
+                    "bookmark_days",
+                    "integer",
+                    "Only import bookmarked tweets newer than this many days.",
+                ),
+                ("max_bookmarks", "integer", "Maximum bookmarks to scan."),
+            ],
+        ),
+        tool(
             "x_import_following_watch_sources",
             "Import authenticated X following accounts into the wiki watch-source registry.",
             [(
@@ -6959,7 +7039,27 @@ fn mcp_tools() -> Vec<Value> {
             "Refresh an X OAuth token from the stored X_REFRESH_TOKEN and store the new token response.",
             [("client_id", "string", "X OAuth client id.")],
         ),
-        tool("x_list", "List imported X items.", []),
+        tool(
+            "x_list",
+            "List imported X items, optionally filtered by source such as bookmark.",
+            [
+                ("query", "string", "Optional text query."),
+                (
+                    "source",
+                    "string",
+                    "Optional source kind, for example bookmark.",
+                ),
+                ("limit", "integer", "Maximum items to return."),
+            ],
+        ),
+        tool(
+            "x_bookmarks",
+            "List imported X bookmark items.",
+            [
+                ("query", "string", "Optional text query."),
+                ("limit", "integer", "Maximum items to return."),
+            ],
+        ),
         tool("x_report", "Render a report from imported X items.", []),
         tool(
             "wiki_ingest_file",
@@ -7292,7 +7392,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 103);
+        assert_eq!(command_names.len(), 105);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))

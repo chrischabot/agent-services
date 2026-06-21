@@ -454,9 +454,11 @@ Current blocker:
 
 ## Email Channel Live Smoke
 
-Status: local adversarial mapper fixtures, edge Email Routing enqueue tests, and
-Rust poll/drain/send tests pass. Live Cloudflare Email Routing and
-provider-side outbound delivery are not yet proven.
+Status: local adversarial mapper fixtures, edge Email Routing enqueue tests,
+Rust poll/drain/send tests, deployed Worker redeploy, active dashboard route
+confirmation, and empty-queue local poll pass. A real author-originated message
+through Cloudflare Email Routing and provider-side outbound delivery are not
+yet proven.
 
 Local package smoke:
 
@@ -509,6 +511,14 @@ rule step requires a Cloudflare API token with Email Routing permissions.
 Tracked docs and examples must keep only `agent@example.com` and
 `user@example.com`.
 
+Current route setup note:
+
+- A dashboard-created live route now sends the locally configured agent address
+  to `arcwell-edge-inbox`.
+- `arcwell email poll` against the deployed Worker succeeds on an empty queue.
+- This proves route configuration and drain authentication, not message
+  delivery.
+
 Live smoke:
 
 ```sh
@@ -533,11 +543,8 @@ Expected result for that future smoke:
 
 Current blockers:
 
-- No live test address/route is configured. On 2026-06-21, guarded no-deploy
-  setup uploaded `EMAIL_ROUTES_JSON` to the `arcwell-edge-inbox` Worker, but
-  Cloudflare Email Routing rule creation failed with API error
-  `10000 Authentication error`, so the current token lacks the needed Email
-  Routing rule permission.
+- No controlled author-originated live message has been sent through the
+  configured route and drained into a trusted local channel/source-card record.
 - No provider-side live outbound send/reply smoke has been recorded.
 - No librarian digest scheduler has been wired to email delivery yet.
 

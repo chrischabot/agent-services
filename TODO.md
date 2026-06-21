@@ -1088,12 +1088,12 @@ Adversarial/severe gate:
       channel, source-card, delivery, and `/ops/ui` surfaces.
 - [x] Add guarded setup script for Worker route secret, deploy, and Email
       Routing rule creation.
-- [ ] Run disposable live Cloudflare Email Routing smoke.
-      2026-06-21 note: no-deploy setup uploaded `EMAIL_ROUTES_JSON` to the
-      `arcwell-edge-inbox` Worker, but Cloudflare Email Routing rule creation
-      failed with API error `10000 Authentication error`; the active token needs
-      Email Routing rule permission or the route must be created in the
-      dashboard before live smoke can honestly pass.
+- [x] Create live Cloudflare Email Routing rule to the Arcwell edge Worker for
+      the locally configured agent address without committing real addresses.
+- [x] Run empty-queue local poll against the deployed Worker after route setup.
+- [ ] Run controlled author-originated live ingress smoke and prove one trusted
+      local channel/source-card record.
+- [ ] Run provider-side outbound email delivery smoke.
 
 Description:
 Email is part of the desired proactive assistant loop. The current slice is a
@@ -1104,8 +1104,10 @@ poll/drain into durable email channel/source-card records, and Cloudflare Email
 Service send/reply support. Gmail remains host-native first for interactive
 selected-thread work. Tracked defaults stay as `agent@example.com` and
 `user@example.com`; real agent/author addresses belong in ignored local config
-or secrets. Live Email Routing and provider-side outbound delivery are not yet
-proven.
+or secrets. A dashboard-created live Email Routing rule now targets the Arcwell
+edge Worker for the locally configured agent address, and local poll against
+the deployed Worker succeeds on an empty queue. An actual author-originated
+message and provider-side outbound delivery are not yet proven.
 
 How to test:
 - Package-local severe fixtures:
@@ -1120,14 +1122,15 @@ How to test:
 - Setup script dry/safe gate:
   `scripts/setup-email-route` must refuse without
   `ARCWELL_EMAIL_SETUP_CONFIRM=configure`.
-- Live smoke only with a disposable Cloudflare Email Routing test address or
-  the configured narrow agent address after the route is installed.
+- Live smoke with a controlled message from the configured author address to
+  the configured narrow agent address, followed by `arcwell email poll`.
 
 Success looks like:
 - Normalized important inbound email metadata can become a safe event/source
   card/channel message draft without treating email body as instructions.
 - The docs make clear that local email ingestion/send paths exist, while live
-  Cloudflare routing and live provider delivery remain unclaimed until smoked.
+  Cloudflare message delivery and live provider delivery remain unclaimed until
+  smoked.
 
 Adversarial/severe gate:
 - Local fixtures test spoofed From, malicious HTML, attachment bombs, tracking

@@ -4,5 +4,12 @@
   "compatibility_date": "2026-06-19",
   "vars": {
     "MAX_PAYLOAD_BYTES": "64000"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "EDGE_DB",
+      "database_name": "arcwell_edge_inbox",
+      "database_id": "e467e06a-4623-4b1f-aa0a-866c7f645df6"
+    }
+  ]
 }

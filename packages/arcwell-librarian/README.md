@@ -1,5 +1,7 @@
 # arcwell-librarian
 
+**Status:** Scaffold/Partial.
+
 Wiki librarian and interestingness package.
 
 Current first-pass implementation:
@@ -7,6 +9,9 @@ Current first-pass implementation:
 - Digest candidates can be created from source-card ids.
 - Candidates are scored with transparent rule-based signals.
 - Topics can be expanded into wiki pages through `librarian_expand_topic`.
+- Expanded pages include deterministic source-card audit notes and exclude generated/model-answer source cards from primary evidence.
+- Email is documented as a future digest delivery option in `arcwell-email`, but
+  no outbound email delivery path exists yet.
 
 MCP tools:
 
@@ -15,11 +20,14 @@ MCP tools:
 - `librarian_expand_topic`
 - `source_card_add`
 - `source_card_search`
+- `source_card_read`
 - `wiki_expand_page`
 
 Remaining work:
 
 - Cluster related source cards across RSS, GitHub, arXiv, X, and web search.
-- Add contradiction detection.
-- Add delivery routing to Telegram/email.
+- Add richer contradiction detection beyond deterministic source-card audit heuristics.
+- Add delivery routing to Telegram/email with explicit recipient authorization,
+  dedupe, quiet hours, loop prevention, policy/cost checks, and delivery attempt
+  records.
 - Add model-backed page synthesis with source-grounded citations.

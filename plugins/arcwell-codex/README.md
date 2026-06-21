@@ -1,5 +1,8 @@
 # Arcwell Codex Plugin
 
+**Status:** Partial. The package, prompts, skills, MCP config, and dev sync loop
+exist; fresh-thread Codex command/hook smoke is still missing.
+
 This plugin connects Codex to local `arcwell` through:
 
 - `arcwell mcp` for live tools and resources

@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+seed/wardrobe-import.sql
+worker-configuration.d.ts

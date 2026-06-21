@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "arcwell-garderobe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "dev": {
+    "port": 8788
+  },
+  "vars": {
+    "WARDROBE_USER_ID": "local-user",
+    "WARDROBE_USER_EMAIL": "owner@example.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "arcwell_garderobe",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "WardrobeMCP"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["WardrobeMCP"]
+    }
+  ],
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  }
+}

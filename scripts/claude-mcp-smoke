@@ -1,0 +1,285 @@
+#!/usr/bin/env node
+"use strict";
+
+const childProcess = require("child_process");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const REPO_ROOT = path.resolve(__dirname, "..");
+const DEFAULT_BIN = path.join(REPO_ROOT, "target/debug/arcwell");
+const ARCWELL_BIN = process.env.ARCWELL_BIN || (fs.existsSync(DEFAULT_BIN) ? DEFAULT_BIN : "arcwell");
+const HUGE_BYTES = Number.parseInt(process.env.ARCWELL_CLAUDE_SMOKE_HUGE_BYTES || "262144", 10);
+const REQUIRE_HOST_CONFIG = process.argv.includes("--require-host-config");
+const HOST_CONFIG_ARG = valueAfter("--host-config");
+const DESKTOP_CONFIG = path.join(
+  os.homedir(),
+  "Library",
+  "Application Support",
+  "Claude",
+  "claude_desktop_config.json"
+);
+const HOST_CONFIG = HOST_CONFIG_ARG || process.env.CLAUDE_DESKTOP_CONFIG || DESKTOP_CONFIG;
+
+function valueAfter(flag) {
+  const index = process.argv.indexOf(flag);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function fail(message) {
+  console.error(`FAIL: ${message}`);
+  process.exit(1);
+}
+
+function blocked(message) {
+  console.error(`BLOCKED: ${message}`);
+  process.exit(2);
+}
+
+function assert(condition, message) {
+  if (!condition) fail(message);
+}
+
+function mkdirTemp(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `arcwell-${label}-`));
+}
+
+function runMcp(frames, options = {}) {
+  const input = frames.join("\n") + "\n";
+  const env = { ...process.env, ...options.env };
+  if (options.deleteEnv) {
+    for (const name of options.deleteEnv) delete env[name];
+  }
+  const result = childProcess.spawnSync(ARCWELL_BIN, ["mcp"], {
+    cwd: REPO_ROOT,
+    env,
+    input,
+    encoding: "utf8",
+    timeout: options.timeoutMs || 20000,
+    maxBuffer: options.maxBuffer || 12 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    fail(`could not run ${ARCWELL_BIN} mcp: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    fail(`arcwell mcp exited ${result.status}; stderr:\n${result.stderr}`);
+  }
+
+  const responses = result.stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        fail(`MCP stdout contained non-JSON line ${JSON.stringify(line)}: ${error.message}`);
+      }
+    });
+
+  return { ...result, responses };
+}
+
+function byId(responses, id) {
+  const response = responses.find((item) => item.id === id);
+  assert(response, `missing response id ${id}; saw ${responses.map((item) => item.id).join(", ")}`);
+  return response;
+}
+
+function assertResult(response, label) {
+  assert(!response.error, `${label} returned error: ${JSON.stringify(response.error)}`);
+  assert(Object.prototype.hasOwnProperty.call(response, "result"), `${label} missing result`);
+  return response.result;
+}
+
+function assertError(response, label, pattern) {
+  assert(response.error, `${label} unexpectedly returned success`);
+  const message = String(response.error.message || "");
+  assert(pattern.test(message), `${label} error ${JSON.stringify(message)} did not match ${pattern}`);
+}
+
+function toolCall(id, name, args = {}) {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+}
+
+function request(id, method, params = {}) {
+  return JSON.stringify({ jsonrpc: "2.0", id, method, params });
+}
+
+function localProtocolSmoke() {
+  const tmp = mkdirTemp("claude-mcp-smoke");
+  const home = path.join(tmp, "Arcwell Home With Spaces");
+  fs.mkdirSync(home, { recursive: true });
+  const hugeValue = "x".repeat(HUGE_BYTES);
+  const hugeUnknownUri = `wiki://page/${"not-found-".repeat(Math.ceil(HUGE_BYTES / 10))}`;
+
+  const batch = [
+    "{ this is malformed json-rpc",
+    request(1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "arcwell-claude-mcp-smoke", version: "0" },
+    }),
+    JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }),
+    request(3, "tools/list"),
+    request(4, "resources/list"),
+    toolCall(5, "arcwell_health"),
+    toolCall(6, "profile_set", { key: "claude.mcp.smoke.huge", value: hugeValue }),
+    request(7, "resources/read", { uri: "arcwell://profile" }),
+    request(8, "resources/read", { uri: "arcwell://does-not-exist" }),
+    request(9, "resources/read", { uri: hugeUnknownUri }),
+    request(10, "arcwell/unsupported_method", {}),
+    toolCall(11, "project_create", {
+      name: "Claude MCP smoke project",
+      summary: "Disposable project for Claude MCP lifecycle availability checks.",
+      aliases: ["claude-mcp-smoke"],
+    }),
+  ];
+
+  const run = runMcp(batch, {
+    env: { ARCWELL_HOME: home, HOME: path.join(tmp, "home") },
+  });
+
+  const parseError = run.responses.find((item) => item.id === null && item.error);
+  assert(parseError, "malformed JSON-RPC frame did not produce a parse error response");
+  assertError(parseError, "malformed JSON-RPC frame", /expected|key|JSON|EOF|object/i);
+
+  const init = assertResult(byId(run.responses, 1), "initialize");
+  assert(init.serverInfo?.name === "arcwell", "initialize did not identify the arcwell server");
+  assert(init.capabilities?.tools, "initialize did not advertise tools capability");
+  assert(init.capabilities?.resources, "initialize did not advertise resources capability");
+
+  assert(!run.responses.some((item) => item.id === 2), "notification with id-less semantics produced a response");
+
+  const tools = assertResult(byId(run.responses, 3), "tools/list").tools || [];
+  for (const name of ["profile_list", "memory_search", "wiki_search", "ops_snapshot", "project_status_get"]) {
+    assert(tools.some((tool) => tool.name === name), `tools/list missing expected tool ${name}`);
+  }
+
+  const resources = assertResult(byId(run.responses, 4), "resources/list").resources || [];
+  for (const uri of ["arcwell://profile", "arcwell://wiki", "arcwell://ops"]) {
+    assert(resources.some((resource) => resource.uri === uri), `resources/list missing ${uri}`);
+  }
+
+  assertResult(byId(run.responses, 5), "arcwell_health");
+  assertResult(byId(run.responses, 6), "large profile_set");
+
+  const profileRead = assertResult(byId(run.responses, 7), "profile resource");
+  const profileText = profileRead.contents?.[0]?.text;
+  assert(profileText, "profile resource missing text content");
+  const profileItems = JSON.parse(profileText);
+  const hugeItem = profileItems.find((item) => item.key === "claude.mcp.smoke.huge");
+  assert(hugeItem?.value?.length === HUGE_BYTES, "large profile resource response was truncated or corrupted");
+  assert(
+    run.stdout.length < HUGE_BYTES * 8 + 1_000_000,
+    `large response amplified unexpectedly: ${run.stdout.length} bytes for ${HUGE_BYTES} byte input`
+  );
+
+  assertError(byId(run.responses, 8), "unknown resource request", /unknown resource uri/i);
+  const hugeMissingPage = assertResult(byId(run.responses, 9), "huge missing wiki page request");
+  assert(
+    hugeMissingPage.contents?.[0]?.text === "null",
+    "huge missing wiki page request should return explicit JSON null"
+  );
+  assertError(byId(run.responses, 10), "unsupported MCP method", /unsupported MCP method/i);
+
+  const project = assertResult(byId(run.responses, 11), "project_create").structuredContent;
+  assert(project?.id, "project_create did not return a project id");
+
+  const statusRun = runMcp([toolCall(11, "project_status_get", { project_id: project.id })], {
+    env: { ARCWELL_HOME: home, HOME: path.join(tmp, "home") },
+  });
+  const status = assertResult(byId(statusRun.responses, 11), "project_status_get").structuredContent;
+  assert(status.live_state?.available === false, "Claude/Codex live state was reported available without a host adapter");
+  const claudeHost = (status.live_state.hosts || []).find((host) => host.host === "claude");
+  assert(claudeHost, "project live-state matrix omitted Claude");
+  assert(claudeHost.manual_snapshot_supported === true, "Claude manual snapshot support was not surfaced");
+  assert(/unavailable|unproven|manual/i.test(claudeHost.reason), "Claude host lifecycle limits were not explicit");
+
+  console.log(`PASS: local Claude-style stdio MCP smoke passed with ARCWELL_HOME=${home}`);
+}
+
+function badHomeSmoke() {
+  const tmp = mkdirTemp("claude-mcp-bad-home");
+  const badHome = path.join(tmp, "not-a-directory");
+  fs.writeFileSync(badHome, "I am a file, not an Arcwell home.\n");
+  const run = runMcp([toolCall(1, "arcwell_health")], {
+    env: { ARCWELL_HOME: badHome, HOME: path.join(tmp, "home") },
+  });
+  assertError(byId(run.responses, 1), "bad ARCWELL_HOME", /creating|not a directory|file exists|os error/i);
+  console.log("PASS: bad ARCWELL_HOME produces an explicit MCP error.");
+}
+
+function missingEnvSmoke() {
+  const tmp = mkdirTemp("claude-mcp-missing-env");
+  const home = path.join(tmp, "host-home");
+  fs.mkdirSync(home, { recursive: true });
+  const run = runMcp([toolCall(1, "arcwell_health")], {
+    env: { HOME: home },
+    deleteEnv: ["ARCWELL_HOME"],
+  });
+  assertResult(byId(run.responses, 1), "arcwell_health without ARCWELL_HOME");
+  assert(fs.existsSync(path.join(home, ".arcwell", "arcwell.sqlite3")), "missing ARCWELL_HOME did not fall back to HOME/.arcwell");
+  console.log("PASS: missing ARCWELL_HOME falls back to disposable HOME/.arcwell.");
+}
+
+function hostConfigCheck() {
+  if (!fs.existsSync(HOST_CONFIG)) {
+    const message = `Claude Desktop config not found at ${HOST_CONFIG}; authenticated Claude Desktop/Code host-level validation was not run.`;
+    if (REQUIRE_HOST_CONFIG) blocked(message);
+    console.log(`BLOCKED: ${message}`);
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(HOST_CONFIG, "utf8"));
+  } catch (error) {
+    if (REQUIRE_HOST_CONFIG) blocked(`Claude Desktop config is not valid JSON at ${HOST_CONFIG}: ${error.message}`);
+    console.log(`BLOCKED: Claude Desktop config is not valid JSON at ${HOST_CONFIG}: ${error.message}`);
+    return;
+  }
+
+  const server = parsed.mcpServers?.arcwell;
+  if (!server) {
+    const message = `Claude config at ${HOST_CONFIG} does not define mcpServers.arcwell; this may be the wrong or unauthenticated host profile.`;
+    if (REQUIRE_HOST_CONFIG) blocked(message);
+    console.log(`BLOCKED: ${message}`);
+    return;
+  }
+
+  const errors = [];
+  if (server.type && server.type !== "stdio") {
+    errors.push(`expected type=stdio, got ${JSON.stringify(server.type)}`);
+  }
+  if (typeof server.command !== "string" || server.command.length === 0) {
+    errors.push("missing command");
+  }
+  if (!Array.isArray(server.args) || !server.args.includes("mcp")) {
+    errors.push("args must include mcp");
+  }
+  const configuredHome = server.env?.ARCWELL_HOME;
+  if (typeof configuredHome !== "string" || !path.isAbsolute(configuredHome)) {
+    errors.push("env.ARCWELL_HOME must be an absolute path");
+  }
+
+  if (errors.length) {
+    const message = `Claude config ${HOST_CONFIG} has an unsafe arcwell MCP entry: ${errors.join("; ")}`;
+    if (REQUIRE_HOST_CONFIG) blocked(message);
+    console.log(`BLOCKED: ${message}`);
+    return;
+  }
+
+  console.log(`PASS: Claude Desktop config contains a syntactically valid arcwell stdio MCP entry at ${HOST_CONFIG}.`);
+  console.log("BLOCKED: this script still cannot prove an authenticated Claude UI session listed or called Arcwell tools.");
+}
+
+localProtocolSmoke();
+badHomeSmoke();
+missingEnvSmoke();
+hostConfigCheck();

@@ -1,0 +1,16 @@
+[package]
+name = "arcwell-memory-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Memory-augmented chat proxy for the Arcwell Memory"
+
+[dependencies]
+arcwell-memory = { path = "../arcwell-memory" }
+arcwell-memory-core = { path = "../arcwell-memory-core" }
+arcwell-memory-llm = { path = "../arcwell-memory-llm" }
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

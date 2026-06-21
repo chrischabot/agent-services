@@ -1,5 +1,7 @@
 # arcwell-conversation-import
 
+**Status:** Partial.
+
 Consentful conversation history import.
 
 Current implementation:
@@ -17,4 +19,3 @@ Boundary:
 - Imports produce candidates, not hidden context.
 - Raw transcripts should not be injected into prompts by default.
 - Sensitive candidates require review.
-

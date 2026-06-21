@@ -1,0 +1,18 @@
+[package]
+name = "arcwell-memory-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedding providers for the Arcwell Memory (OpenAI, Azure, Gemini, Ollama, OpenAI-compatible)"
+
+[dependencies]
+arcwell-memory-core = { path = "../arcwell-memory-core" }
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock.workspace = true

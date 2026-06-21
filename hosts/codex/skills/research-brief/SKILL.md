@@ -6,6 +6,7 @@ Rules:
 
 - Search the wiki before drafting.
 - Use `research_brief_from_wiki` for the first local draft.
+- Use `research_audit` when the brief may influence decisions, publication, or project state.
 - Read the cited wiki pages and check that the draft did not overstate them.
 - Add a short contradiction/gaps section when sources disagree or freshness is uncertain.
 - Do not cite generated `Research Brief:` pages as primary sources.
@@ -16,6 +17,7 @@ Typical commands:
 ```sh
 arcwell wiki search <query>
 arcwell research brief <query> --no-write
+arcwell research audit <query>
 arcwell research brief <query>
 arcwell research runs
 ```
@@ -25,5 +27,6 @@ MCP tools:
 - `wiki_search`
 - `wiki_read`
 - `research_brief_from_wiki`
+- `research_audit`
 - `research_runs`
 - `research_tasks`

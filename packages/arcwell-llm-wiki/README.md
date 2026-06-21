@@ -1,5 +1,7 @@
 # arcwell-llm-wiki
 
+**Status:** Partial.
+
 Local source-backed Markdown wiki.
 
 Current implementation:
@@ -62,16 +64,18 @@ Boundary:
 - Pages are Markdown files under `ARCWELL_HOME/wiki/pages`.
 - SQLite stores metadata and checksums.
 - SQLite FTS indexes wiki page title/body content for local search; each page write updates the index.
-- Source cards are structured records plus Markdown wiki pages.
+- Source cards are structured records plus Markdown wiki pages with schema version metadata, evidence role, trust level, extracted dates/entities, and deterministic audit flags.
 - Watch sources are durable monitor configuration in SQLite, separate from source-card evidence.
 - `arcwell wiki import-codex-swift-sources` imports the old Codex Swift seed registry from `llm-wiki.md` and `scripts/wiki-sources-restore.sh`, merging duplicate sources idempotently.
 - Wiki jobs can be queued as `pending` and drained by `arcwell worker run-once`, the resident `arcwell worker run` loop, or the MCP `worker_run_once` tool.
 - Worker claims use leases. Failed jobs retry with bounded backoff and become `dead_lettered` after their attempt budget is exhausted.
 - RSS/Atom, GitHub owner/repo, GitHub releases/commits, and arXiv search adapters write source cards rather than directly rewriting topic pages.
 - Adapter cursor state lives in SQLite and is exposed through cursor CLI/MCP reads for debugging.
+- Source-health state records last success, last failure, last item id/date, cursor key/value, and next run hints for RSS, GitHub, arXiv, and X recent search.
+- Source cards are keyed by canonical URL/provider/type so repeated adapter runs update existing cards instead of flooding source-card rows or wiki artifacts.
 - Current search uses a local SQLite FTS title/body index. Hybrid/vector search comes later.
-- URL ingest is HTTPS-only and rejects local/private/metadata hosts.
-- External source text is treated as evidence, not instructions; generated source-card pages include an untrusted-source warning.
+- URL ingest is HTTPS-only, rejects local/private/metadata hosts, validates redirects, enforces content type and size bounds, and writes provenance separately from cleaned readable text.
+- External source text is treated as evidence, not instructions; generated source-card pages include an untrusted-source warning and are excluded from local-source evidence for later research briefs.
 
 Cloudflare boundary:
 

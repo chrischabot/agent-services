@@ -1,0 +1,35 @@
+[package]
+name = "arcwell-memory-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "axum REST server exposing the Arcwell Memory API as a single binary"
+
+[lib]
+name = "arcwell_memory_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "arcwell-memory-server"
+path = "src/main.rs"
+
+[dependencies]
+arcwell-memory = { path = "../arcwell-memory" }
+arcwell-memory-core = { path = "../arcwell-memory-core" }
+axum.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+qdrant = ["arcwell-memory/qdrant"]
+pgvector = ["arcwell-memory/pgvector"]
+
+[dev-dependencies]
+arcwell-memory-client = { path = "../arcwell-memory-client" }
+tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true

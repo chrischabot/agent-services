@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "BLOCKED: node is required for JSON assertions." >&2
+  exit 2
+fi
+
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+export ARCWELL_HOME="${ARCWELL_SMOKE_HOME:-$tmp/arcwell-home}"
+mkdir -p "$ARCWELL_HOME"
+
+CHAT_ID="${TELEGRAM_TEST_CHAT_ID:-123456789}"
+RUN_ID="telegram-live-smoke-$(date +%Y%m%dT%H%M%S)-$$"
+OUTGOING_TEXT="Arcwell Telegram outgoing smoke $RUN_ID"
+INCOMING_TEXT="${TELEGRAM_SMOKE_EXPECT_TEXT:-Arcwell Telegram incoming smoke $RUN_ID}"
+WAIT_SECONDS="${TELEGRAM_SMOKE_WAIT_SECONDS:-90}"
+
+write_ops_snapshot() {
+  local out="$1"
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"arcwell://ops"}}' |
+    "$ARCWELL_BIN" mcp >"$tmp/mcp-ops.jsonl"
+  node - "$tmp/mcp-ops.jsonl" "$out" <<'NODE'
+const fs = require("fs");
+const [input, output] = process.argv.slice(2);
+const lines = fs.readFileSync(input, "utf8").trim().split(/\r?\n/).filter(Boolean);
+const response = JSON.parse(lines.at(-1));
+if (response.error) {
+  console.error(`FAIL: ops MCP resource read failed: ${JSON.stringify(response.error)}`);
+  process.exit(1);
+}
+const text = response.result?.contents?.[0]?.text;
+if (!text) {
+  console.error(`FAIL: ops MCP resource response missing text: ${JSON.stringify(response)}`);
+  process.exit(1);
+}
+fs.writeFileSync(output, text);
+NODE
+}
+
+echo "Arcwell home: $ARCWELL_HOME"
+echo "Running local send-authorization smoke against disposable chat id: $CHAT_ID"
+
+if "$ARCWELL_BIN" telegram send "$CHAT_ID" "unauthorized local smoke" \
+  --bot-token "fake-token" \
+  --api-base "http://127.0.0.1:9" >"$tmp/unauthorized-send.json" 2>"$tmp/unauthorized-send.err"; then
+  echo "FAIL: unauthorized Telegram send unexpectedly succeeded." >&2
+  exit 1
+fi
+if ! grep -q "not authorized to send" "$tmp/unauthorized-send.err"; then
+  echo "FAIL: unauthorized send failed for the wrong reason:" >&2
+  cat "$tmp/unauthorized-send.err" >&2
+  exit 1
+fi
+
+"$ARCWELL_BIN" telegram authorize "telegram:chat:$CHAT_ID" \
+  --read-projects \
+  --write-projects >"$tmp/read-write-auth.json"
+if "$ARCWELL_BIN" telegram send "$CHAT_ID" "read/write is not send" \
+  --bot-token "fake-token" \
+  --api-base "http://127.0.0.1:9" >"$tmp/read-write-send.json" 2>"$tmp/read-write-send.err"; then
+  echo "FAIL: read/write-only Telegram chat was allowed to send." >&2
+  exit 1
+fi
+if ! grep -q "not authorized to send" "$tmp/read-write-send.err"; then
+  echo "FAIL: read/write-only send failed for the wrong reason:" >&2
+  cat "$tmp/read-write-send.err" >&2
+  exit 1
+fi
+
+echo "Local authorization smoke passed."
+
+missing=()
+for name in TELEGRAM_BOT_TOKEN TELEGRAM_TEST_CHAT_ID TELEGRAM_WEBHOOK_SECRET ARCWELL_EDGE_SECRET ARCWELL_EDGE_URL; do
+  if [ -z "${!name:-}" ]; then
+    missing+=("$name")
+  fi
+done
+
+if [ "${ARCWELL_TELEGRAM_LIVE_CONFIRM:-}" != "disposable" ]; then
+  missing+=("ARCWELL_TELEGRAM_LIVE_CONFIRM=disposable")
+fi
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "BLOCKED: live Telegram/edge smoke not run; missing ${missing[*]}."
+  echo "Local auth smoke passed. Re-run with a disposable bot/chat and required env vars for live proof."
+  exit 2
+fi
+
+WEBHOOK_URL="${TELEGRAM_WEBHOOK_URL:-${ARCWELL_EDGE_URL%/}/telegram/webhook}"
+
+echo "Checking Telegram bot token with getMe."
+node - "$tmp/get-me.json" <<'NODE'
+const fs = require("fs");
+const https = require("https");
+const out = process.argv[2];
+const token = process.env.TELEGRAM_BOT_TOKEN;
+https.get({
+  hostname: "api.telegram.org",
+  path: `/bot${token}/getMe`,
+  method: "GET"
+}, (response) => {
+  let body = "";
+  response.on("data", (chunk) => { body += chunk; });
+  response.on("end", () => {
+    fs.writeFileSync(out, body);
+    const doc = JSON.parse(body);
+    if (!doc.ok) {
+      console.error("FAIL: Telegram getMe did not return ok=true.");
+      process.exit(1);
+    }
+  });
+}).on("error", (error) => {
+  console.error(`FAIL: Telegram getMe request failed: ${error.message}`);
+  process.exit(1);
+});
+NODE
+
+echo "Installing Telegram webhook: $WEBHOOK_URL"
+WEBHOOK_URL="$WEBHOOK_URL" node - "$tmp/set-webhook.json" <<'NODE'
+const fs = require("fs");
+const https = require("https");
+const out = process.argv[2];
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const body = new URLSearchParams({
+  url: process.env.WEBHOOK_URL,
+  secret_token: process.env.TELEGRAM_WEBHOOK_SECRET,
+  drop_pending_updates: "true"
+}).toString();
+const request = https.request({
+  hostname: "api.telegram.org",
+  path: `/bot${token}/setWebhook`,
+  method: "POST",
+  headers: {
+    "content-type": "application/x-www-form-urlencoded",
+    "content-length": Buffer.byteLength(body)
+  }
+}, (response) => {
+  let responseBody = "";
+  response.on("data", (chunk) => { responseBody += chunk; });
+  response.on("end", () => {
+    fs.writeFileSync(out, responseBody);
+    const doc = JSON.parse(responseBody);
+    if (!doc.ok) {
+      console.error(`FAIL: setWebhook failed: ${JSON.stringify(doc)}`);
+      process.exit(1);
+    }
+  });
+});
+request.on("error", (error) => {
+  console.error(`FAIL: setWebhook request failed: ${error.message}`);
+  process.exit(1);
+});
+request.write(body);
+request.end();
+NODE
+
+"$ARCWELL_BIN" telegram authorize "telegram:chat:$TELEGRAM_TEST_CHAT_ID" \
+  --read-projects \
+  --write-projects \
+  --send >"$tmp/live-auth.json"
+
+echo "Sending outgoing Telegram smoke message."
+"$ARCWELL_BIN" telegram send "$TELEGRAM_TEST_CHAT_ID" "$OUTGOING_TEXT" \
+  --bot-token "$TELEGRAM_BOT_TOKEN" >"$tmp/live-send.json"
+node - "$tmp/live-send.json" <<'NODE'
+const fs = require("fs");
+const doc = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!doc.ok || doc.message?.status !== "sent" || doc.delivery?.ok !== true) {
+  console.error(`FAIL: outgoing Telegram send was not recorded as sent: ${JSON.stringify(doc)}`);
+  process.exit(1);
+}
+NODE
+
+echo "Send this exact message to the disposable Telegram chat now:"
+echo "$INCOMING_TEXT"
+echo "Waiting up to ${WAIT_SECONDS}s for webhook -> edge -> local drain -> channel record."
+
+deadline=$((SECONDS + WAIT_SECONDS))
+found=0
+while [ "$SECONDS" -lt "$deadline" ]; do
+  "$ARCWELL_BIN" edge drain-remote \
+    --url "$ARCWELL_EDGE_URL" \
+    --secret "$ARCWELL_EDGE_SECRET" \
+    --max-events 10 >"$tmp/edge-drain.json" || true
+  "$ARCWELL_BIN" telegram drain --max-events 10 >"$tmp/telegram-drain.json" || true
+  write_ops_snapshot "$tmp/ops.json"
+  if node - "$tmp/ops.json" "$INCOMING_TEXT" <<'NODE'
+const fs = require("fs");
+const doc = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const needle = process.argv[3];
+const matches = (doc.channel_messages || []).filter((message) =>
+  message.channel === "telegram" &&
+  message.direction === "incoming" &&
+  message.body === needle
+);
+process.exit(matches.length === 1 ? 0 : 1);
+NODE
+  then
+    found=1
+    break
+  fi
+  sleep 3
+done
+
+if [ "$found" -ne 1 ]; then
+  echo "BLOCKED: incoming Telegram webhook was not observed exactly once before timeout."
+  echo "Checked edge drain and local telegram drain repeatedly; inspect $ARCWELL_HOME and Cloudflare logs."
+  exit 2
+fi
+
+"$ARCWELL_BIN" edge drain-remote \
+  --url "$ARCWELL_EDGE_URL" \
+  --secret "$ARCWELL_EDGE_SECRET" \
+  --max-events 10 >"$tmp/edge-drain-after.json" || true
+"$ARCWELL_BIN" telegram drain --max-events 10 >"$tmp/telegram-drain-after.json" || true
+write_ops_snapshot "$tmp/ops-after.json"
+node - "$tmp/ops-after.json" "$INCOMING_TEXT" <<'NODE'
+const fs = require("fs");
+const doc = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const needle = process.argv[3];
+const matches = (doc.channel_messages || []).filter((message) =>
+  message.channel === "telegram" &&
+  message.direction === "incoming" &&
+  message.body === needle
+);
+if (matches.length !== 1) {
+  console.error(`FAIL: expected exactly one incoming channel record after second drain, found ${matches.length}.`);
+  process.exit(1);
+}
+NODE
+
+echo "PASS: real Telegram webhook drained exactly once and outgoing delivery was recorded."

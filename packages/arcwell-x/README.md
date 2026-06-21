@@ -1,5 +1,7 @@
 # arcwell-x
 
+**Status:** Partial.
+
 X import, OAuth, cursor, and reporting package.
 
 Current implementation:
@@ -12,6 +14,7 @@ arcwell x oauth-refresh --client-id "$X_CLIENT_ID"
 arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 1000 --max-recent-follows 100
 arcwell x recent-search "from:openai" --max-results 25
 arcwell x enqueue-recent-search "from:openai" --max-results 25
+arcwell x monitor-watch-sources --max-sources 25 --max-results-per-source 10
 arcwell x list --query eve
 arcwell x report --query eve
 agent cursors get "x:recent-search:from:openai"
@@ -27,6 +30,7 @@ MCP tools:
 - `x_import_following_watch_sources`
 - `x_recent_search`
 - `x_enqueue_recent_search`
+- `x_monitor_watch_sources`
 - `x_list`
 - `x_report`
 - `secret_value_set`
@@ -64,13 +68,36 @@ Boundary:
 - Live recent search uses X API v2 and stores `x:recent-search:<query>` cursor state from `meta.newest_id`.
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.
 - Full following import is available for diagnostics/backfill only; do not use it as the default monitor seed because it imports the whole social graph.
+- `x monitor-watch-sources` polls the active definitive `x_handle` watch list, imports accepted watched-source tweets into X items/source cards/wiki pages, creates digest candidates from new source cards, and records per-source `x:watch:<handle>` cursors plus source-health.
+- X provider failures are classified for expired/rejected tokens, API tier/forbidden responses, and rate-limit/quota responses. Token-like text is redacted from errors and source-health.
+- Watch rebuild gathers bookmark/follow candidates before replacing existing `x_handle` rows, then swaps the list in one SQLite transaction.
+- Cursors advance only after accepted X items/source cards and source-health are durable. Partial X API errors, blocked/protected/deleted items, malformed tweet objects, quota/rate-limit responses, and duplicate newest-id pages do not corrupt cursors.
 - Imported items are treated as untrusted external source text.
 - Each accepted item creates an `x_items` row, a typed source card, and a Markdown source-card wiki page.
 - Duplicate `x_id` values are skipped.
 - Unsafe URLs are rejected.
 
+Live smoke:
+
+```sh
+X_BEARER_TOKEN=... scripts/x-live-smoke
+```
+
+The script uses a disposable `ARCWELL_HOME`, runs a local replay/source-card
+smoke even without credentials, and only runs live recent search, definitive
+watch rebuild, and watch-source monitor when `X_BEARER_TOKEN` or
+`TWITTER_BEARER_TOKEN` is set. It prints counts and sanitized failures, never
+token values.
+
+Current live result:
+
+- The available bearer token can run the live recent-search portion.
+- The definitive watch rebuild is blocked by X `403 Unsupported
+  Authentication`: bookmarks/follows account-data endpoints require OAuth 1.0a
+  User Context or OAuth 2.0 User Context, not application-only bearer auth.
+
 Future work:
 
 - Cloudflare Worker for OAuth callback capture, cron, queueing, and short-lived event buffering.
-- Interestingness classifier and digest delivery.
+- Model-backed interestingness classifier and digest delivery.
 - Richer timeline/list adapters once API access tier/cost constraints are known.

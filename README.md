@@ -1,5 +1,8 @@
 # Arcwell
 
+**Status:** Partial/Risk. Local core behavior is broad and tested, but several
+live integrations remain unproven.
+
 Personal assistant services for Codex, Claude, and other MCP-capable agents.
 
 Arcwell adds long-lived assistant abilities to the agents you already use. Instead of wrapping Codex inside a separate mega-agent, it gives Codex, Claude, and other MCP-capable agents a shared well of local-first context: personal memory, a knowledge wiki, research workflows, X/Twitter ingestion, project awareness, Telegram/channel plumbing, background workers, and ops visibility.
@@ -8,7 +11,9 @@ The idea is simple:
 
 - Keep Codex as the shell where work happens.
 - Add portable services around it through MCP, CLI, skills, and optional Cloudflare Workers.
-- Make the same services usable from Claude Desktop/Code and other agents.
+- Expose the same local services over MCP for Claude Desktop/Code and other
+  agents, while treating Claude host behavior as unvalidated until tested in a
+  real profile.
 - Keep durable personal state local-first in SQLite and Markdown files.
 
 ## What It Provides
@@ -25,15 +30,28 @@ Arcwell is meant to feel like a practical personal assistant layer:
 
 The detailed package/functionality guide is in [docs/functionality-and-packages.md](docs/functionality-and-packages.md).
 
+The brutally honest implementation matrix is in [STATUS.md](STATUS.md), and the
+execution checklist is in [TODO.md](TODO.md).
+
 Packaging, service supervision, auto-restart, and Codex plugin install strategy are documented in [docs/packaging-and-operations.md](docs/packaging-and-operations.md).
 
 The Codex plugin slash-command and `$skill` catalog is documented in [docs/codex-plugin-commands.md](docs/codex-plugin-commands.md).
+
+The personal-memory lifecycle and Codex/mem0 integration notes are documented in
+[docs/memory-integration.md](docs/memory-integration.md).
+
+Live proof still missing: authenticated Cloudflare ingress/drain semantics
+against the deployed worker, real Telegram bot/webhook behavior, fresh-thread
+Codex command/hook smoke, and authenticated Claude host MCP validation. Treat package
+READMEs as current implementation notes, not production readiness claims.
 
 ## Current Features
 
 ### Personal Memory
 
 Stores durable personal facts and preferences, distinct from research knowledge.
+The primary backend is now the in-repo Arcwell Memory Rust provider, derived
+from the former mem0-rs codebase and vendored into this monorepo.
 
 Examples:
 
@@ -41,7 +59,12 @@ Examples:
 - "I prefer direct, sourced answers."
 - "For personalized tasks, consult memory before guessing."
 
-Tools include simple memory add/search, candidate extraction from text, reviewable candidate apply/reject, and duplicate reconciliation.
+Tools include Arcwell Memory add/search/update/delete/history/forget, candidate
+extraction from text, reviewable ADD/UPDATE/DELETE/NONE candidate apply/reject,
+pre-turn recall context, manual/hook capture, lifecycle event inspection, and
+active-store dream/forget reconciliation. The older simple SQLite memory table
+still exists as a compatibility path while model-backed extraction/evals,
+procedural memory, backup retention policy, and UI are completed.
 
 ### Profile
 
@@ -53,7 +76,7 @@ Profile is for stable preferences and operating instructions. Memory is for pers
 
 A local Markdown knowledge base backed by SQLite metadata.
 
-The wiki can ingest local Markdown files, public URLs, source cards, RSS/Atom feeds, GitHub releases/commits, arXiv searches, X items, and research briefs. Source cards are rendered as Markdown pages with provenance and an "untrusted evidence" warning. A separate watch-source registry tracks the feeds, GitHub owners, blogs, arXiv queries, and future handles the assistant should monitor over time.
+The wiki can ingest local Markdown files, public URLs, versioned/auditable source cards, RSS/Atom feeds, GitHub releases/commits, arXiv searches, X items, and research briefs. Source cards are rendered as Markdown pages with provenance, trust/role metadata, extracted dates/entities, audit flags, and an "untrusted evidence" warning. A separate watch-source registry tracks the feeds, GitHub owners, blogs, arXiv queries, and future handles the assistant should monitor over time.
 
 ### Deep Research
 
@@ -84,6 +107,13 @@ This is the "always-on collector, local durable brain" model.
 Channels have a shared model for inbound/outbound messages, sender identity, project binding, source event ids, and safe text handling. Telegram is the first concrete channel package.
 
 Incoming channel text is treated as user/content data. It is never blindly promoted to system instructions.
+
+### Garderobe
+
+`packages/arcwell-garderobe` vendors the Garderobe Cloudflare Worker/D1/OAuth
+remote MCP package for private wardrobe and outfit planning. It is a separate
+source of truth: Arcwell memory/wiki do not ingest private wardrobe inventory by
+default.
 
 ### Projects / Meta-Controller
 
@@ -126,6 +156,14 @@ Install the CLI locally:
 
 ```sh
 cargo install --path crates/arcwell-cli
+```
+
+Release/package readiness is currently local, not published through Homebrew or
+GitHub Releases. Before claiming a package candidate, run:
+
+```sh
+cargo build --release -p arcwell
+scripts/release-readiness-smoke
 ```
 
 The installed command is:
@@ -191,6 +229,16 @@ codex plugin add arcwell-codex@arcwell-local
 
 The repo-scoped Codex plugin lives under `plugins/arcwell-codex` and bundles MCP config plus the arcwell skills. Start a new Codex thread after installing or updating the plugin.
 
+For live development from inside Codex, use the generated dev plugin:
+
+```sh
+scripts/arcwell-dev install
+scripts/arcwell-dev sync
+scripts/arcwell-dev watch
+```
+
+The exact reload rules are in [AGENTS.md](AGENTS.md).
+
 Development-only manual MCP path:
 
 Start the MCP server:
@@ -230,6 +278,9 @@ Common commands:
 ```text
 /remember
 /memory-search
+/memory-recall
+/memory-capture
+/memory-events
 /wiki-search
 /wiki-ingest
 /research-plan
@@ -260,11 +311,21 @@ arcwell wiki import-codex-swift-sources /path/to/codex-swift
 arcwell wiki sources
 arcwell research plan "Vercel Eve"
 arcwell research brief "Vercel Eve"
+arcwell research audit "Vercel Eve"
 arcwell wiki enqueue-rss https://example.com/feed.xml
 arcwell wiki enqueue-github-owner openai --limit 10
 arcwell wiki enqueue-github openai codex --mode releases
 arcwell wiki enqueue-arxiv "cat:cs.AI"
 arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 1000 --max-recent-follows 100
+arcwell backup create
+arcwell backup verify
+arcwell backup restore --from /path/to/backup --target-home /tmp/arcwell-restore-drill
+arcwell service install
+arcwell service status
+arcwell service logs
+arcwell doctor --strict
+arcwell telegram drain
+arcwell telegram send 123 "Hello from Arcwell"
 arcwell x recent-search "from:openai"
 arcwell worker run-once
 arcwell serve --addr 127.0.0.1:8787
@@ -344,7 +405,11 @@ docs/                  Architecture, functionality, implementation, reviews, run
 
 ## Status
 
-This is an early but working implementation. It has a broad first-pass surface area and severe tests for key failure modes, but several parts still need production depth: deployed Cloudflare queues, Telegram webhook transform, richer project/thread sync, model-backed librarian synthesis, full mem0-style memory reconciliation, and a browser ops UI.
+This is an early but working implementation. It has a broad first-pass surface area and severe tests for key failure modes, but several parts still need production depth: authenticated Cloudflare edge ingress/drain smoke, real Telegram webhook/send smoke, richer project/thread sync, model-backed librarian synthesis, model-backed memory extraction/evals, backup forget policy, and interactive ops controls beyond the read-only browser UI.
+
+Packaging is release-readiness-smoked locally, but Homebrew/tap publication,
+signed release artifacts, checksum-verifying installers, and Linux systemd
+packages are not implemented yet.
 
 ## License
 

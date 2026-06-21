@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STABLE_PLUGIN="$REPO_ROOT/plugins/arcwell-codex"
+DEV_ROOT="$REPO_ROOT/.arcwell-dev"
+DEV_PLUGIN="$DEV_ROOT/plugins/arcwell-codex-dev"
+DEV_BIN_DIR="$DEV_ROOT/bin"
+DEV_WRAPPER="$DEV_BIN_DIR/arcwell-dev"
+CODEX_MARKETPLACE_NAME="arcwell-local"
+DEV_PLUGIN_REF="arcwell-codex-dev@$CODEX_MARKETPLACE_NAME"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/arcwell-dev <command>
+
+Commands:
+  build       Build the debug arcwell binary.
+  materialize Generate .arcwell-dev plugin and wrapper from plugins/arcwell-codex.
+  install     Build, materialize, add marketplace, and install arcwell-codex-dev.
+  sync        Build, materialize, and sync into the installed Codex plugin cache.
+  watch       Re-run sync when Rust/plugin/docs files change.
+  smoke       Run local dev-loop smoke checks against a disposable ARCWELL_HOME.
+  status      Print dev binary, plugin, cache, and Codex availability.
+
+Notes:
+  - Use arcwell-codex-dev for development, arcwell-codex for stable use.
+  - After sync, use Cmd+K -> Force Reload Skills or start a new Codex thread.
+  - New/removed tools, slash commands, hooks, or MCP schemas need a new thread.
+USAGE
+}
+
+need_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "missing required command: $cmd" >&2
+    exit 127
+  fi
+}
+
+build() {
+  (cd "$REPO_ROOT" && cargo build -p arcwell)
+}
+
+materialize() {
+  need_cmd rsync
+  need_cmd node
+  mkdir -p "$DEV_BIN_DIR" "$(dirname "$DEV_PLUGIN")"
+  rsync -a --delete "$STABLE_PLUGIN/" "$DEV_PLUGIN/"
+
+  cat > "$DEV_WRAPPER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+BIN="$REPO_ROOT/target/debug/arcwell"
+if [ ! -x "\$BIN" ]; then
+  echo "arcwell dev binary is missing: \$BIN" >&2
+  echo "Run: $REPO_ROOT/scripts/arcwell-dev build" >&2
+  exit 127
+fi
+exec "\$BIN" "\$@"
+EOF
+  chmod +x "$DEV_WRAPPER"
+
+  node - "$DEV_PLUGIN/.codex-plugin/plugin.json" "$DEV_PLUGIN/.mcp.json" "$DEV_PLUGIN/hooks/hooks.json" "$DEV_WRAPPER" <<'NODE'
+const fs = require("fs");
+const [pluginPath, mcpPath, hooksPath, wrapper] = process.argv.slice(2);
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+
+const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
+plugin.name = "arcwell-codex-dev";
+plugin.description = "Development Arcwell plugin for Codex. Uses the local target/debug/arcwell binary.";
+plugin.interface = plugin.interface || {};
+plugin.interface.displayName = "Arcwell Dev";
+plugin.interface.shortDescription = "Live-development Arcwell plugin for Codex.";
+plugin.interface.longDescription = "Development build of Arcwell that points Codex at this checkout's target/debug/arcwell binary.";
+plugin.interface.brandColor = "#0F766E";
+fs.writeFileSync(pluginPath, JSON.stringify(plugin, null, 2) + "\n");
+
+const mcp = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+mcp.mcpServers = mcp.mcpServers || {};
+mcp.mcpServers.arcwell = {
+  command: wrapper,
+  args: ["mcp"],
+  env: {
+    ARCWELL_HOME: process.env.ARCWELL_HOME || `${process.env.HOME}/.arcwell`
+  },
+  startup_timeout_sec: 10,
+  tool_timeout_sec: 120
+};
+fs.writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + "\n");
+
+if (fs.existsSync(hooksPath)) {
+  const hooks = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
+  const rewriteCommand = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(rewriteCommand);
+    } else if (value && typeof value === "object") {
+      if (value.type === "command" && typeof value.command === "string") {
+        value.command = value.command.replace(/^arcwell\b/, shellQuote(wrapper));
+      }
+      Object.values(value).forEach(rewriteCommand);
+    }
+  };
+  rewriteCommand(hooks);
+  fs.writeFileSync(hooksPath, JSON.stringify(hooks, null, 2) + "\n");
+}
+NODE
+
+  echo "materialized dev plugin: $DEV_PLUGIN"
+  echo "materialized dev wrapper: $DEV_WRAPPER"
+}
+
+codex_cache_dir() {
+  local cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache"
+  if [ ! -d "$cache_root" ]; then
+    return 1
+  fi
+  find "$cache_root" -type d -path "*/$CODEX_MARKETPLACE_NAME/arcwell-codex-dev/0.1.0" -print -quit 2>/dev/null
+}
+
+ensure_marketplace_entry() {
+  need_cmd node
+  local marketplace="$REPO_ROOT/.agents/plugins/marketplace.json"
+  node - "$marketplace" <<'NODE'
+const fs = require("fs");
+const path = process.argv[2];
+const doc = JSON.parse(fs.readFileSync(path, "utf8"));
+doc.plugins = Array.isArray(doc.plugins) ? doc.plugins : [];
+const dev = {
+  name: "arcwell-codex-dev",
+  source: { source: "local", path: "./.arcwell-dev/plugins/arcwell-codex-dev" },
+  policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+  category: "Productivity"
+};
+const idx = doc.plugins.findIndex((entry) => entry && entry.name === dev.name);
+if (idx >= 0) {
+  doc.plugins[idx] = dev;
+} else {
+  doc.plugins.push(dev);
+}
+fs.writeFileSync(path, JSON.stringify(doc, null, 2) + "\n");
+NODE
+}
+
+install_plugin() {
+  need_cmd codex
+  build
+  materialize
+  ensure_marketplace_entry
+
+  if codex plugin marketplace list 2>/dev/null | grep -F "$REPO_ROOT" >/dev/null 2>&1; then
+    echo "Codex marketplace already knows this repo."
+  else
+    codex plugin marketplace add "$REPO_ROOT"
+  fi
+
+  echo "Installing $DEV_PLUGIN_REF"
+  if ! codex plugin add "$DEV_PLUGIN_REF"; then
+    echo "codex plugin add failed. If the plugin is already installed, run sync and start a new thread." >&2
+  fi
+}
+
+sync_plugin() {
+  need_cmd rsync
+  build
+  materialize
+  ensure_marketplace_entry
+
+  local cache
+  cache="$(codex_cache_dir || true)"
+  if [ -z "$cache" ]; then
+    echo "arcwell-codex-dev is not installed in the Codex plugin cache yet." >&2
+    echo "Run: scripts/arcwell-dev install" >&2
+    exit 2
+  fi
+  rsync -a --delete "$DEV_PLUGIN/" "$cache/"
+  echo "synced dev plugin into Codex cache: $cache"
+  echo "Reload: Cmd+K -> Force Reload Skills, or start a new Codex thread."
+}
+
+fingerprint() {
+  (
+    cd "$REPO_ROOT"
+    find \
+      Cargo.toml Cargo.lock README.md STATUS.md TODO.md AGENTS.md docs crates plugins .agents hosts \
+      -type f \
+      ! -path '*/target/*' \
+      ! -path '*/node_modules/*' \
+      ! -path '*/.arcwell-dev/*' \
+      -print0 2>/dev/null | sort -z | xargs -0 shasum 2>/dev/null | shasum
+  )
+}
+
+watch_loop() {
+  sync_plugin
+  if command -v fswatch >/dev/null 2>&1; then
+    fswatch -o \
+      "$REPO_ROOT/Cargo.toml" \
+      "$REPO_ROOT/Cargo.lock" \
+      "$REPO_ROOT/README.md" \
+      "$REPO_ROOT/STATUS.md" \
+      "$REPO_ROOT/TODO.md" \
+      "$REPO_ROOT/AGENTS.md" \
+      "$REPO_ROOT/docs" \
+      "$REPO_ROOT/crates" \
+      "$REPO_ROOT/plugins" \
+      "$REPO_ROOT/.agents" \
+      "$REPO_ROOT/hosts" |
+      while read -r _; do
+        echo "change detected; syncing Arcwell dev plugin"
+        sync_plugin || true
+      done
+  else
+    echo "fswatch not found; using polling watcher."
+    local last current
+    last="$(fingerprint)"
+    while sleep 3; do
+      current="$(fingerprint)"
+      if [ "$current" != "$last" ]; then
+        last="$current"
+        echo "change detected; syncing Arcwell dev plugin"
+        sync_plugin || true
+      fi
+    done
+  fi
+}
+
+smoke() {
+  build
+  materialize
+  local tmp
+  tmp="$(mktemp -d)"
+  export ARCWELL_HOME="$tmp"
+  export ARCWELL_MEMORY_PROVIDER=mock
+  export ARCWELL_MEMORY_USER_ID=dev-smoke
+
+  "$DEV_WRAPPER" memory capture "My cat is called Ophelia." --source dev-smoke --user-id dev-smoke >/tmp/arcwell-dev-capture.json
+  "$DEV_WRAPPER" memory recall "Ophelia" --user-id dev-smoke >/tmp/arcwell-dev-recall.json
+  "$DEV_WRAPPER" memory dream >/tmp/arcwell-dev-dream.json
+  "$DEV_WRAPPER" memory events --limit 10 >/tmp/arcwell-dev-events.json
+  "$DEV_WRAPPER" memory hook-recall --event user-prompt-submit --user-id dev-smoke <<<'{"prompt":"Ophelia"}' >/tmp/arcwell-dev-hook-recall.json
+  "$DEV_WRAPPER" memory hook-capture --event stop --user-id dev-smoke <<<'{"transcript":"Smoke hook capture input."}' >/tmp/arcwell-dev-hook-capture.json
+
+  node - "$DEV_PLUGIN/hooks/hooks.json" "$DEV_WRAPPER" <<'NODE'
+const fs = require("fs");
+const [hooksPath, wrapper] = process.argv.slice(2);
+const hooksConfig = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
+const keys = Object.keys(hooksConfig);
+if (keys.length !== 1 || keys[0] !== "hooks") {
+  throw new Error(`hooks config must contain only top-level hooks, got: ${keys.join(", ")}`);
+}
+const commands = [];
+const collectCommands = (value) => {
+  if (Array.isArray(value)) {
+    value.forEach(collectCommands);
+  } else if (value && typeof value === "object") {
+    if (value.type === "command" && typeof value.command === "string") commands.push(value.command);
+    Object.values(value).forEach(collectCommands);
+  }
+};
+collectCommands(hooksConfig);
+if (commands.some((command) => /^arcwell\b/.test(command))) {
+  throw new Error("dev hooks must call the dev wrapper, not arcwell on PATH");
+}
+if (!commands.every((command) => command.includes(wrapper))) {
+  throw new Error("dev hooks are not all wired to the dev wrapper");
+}
+const capture = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-capture.json", "utf8"));
+const recall = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-recall.json", "utf8"));
+const dream = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-dream.json", "utf8"));
+const events = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-events.json", "utf8"));
+const hookRecall = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-hook-recall.json", "utf8"));
+const hookCapture = JSON.parse(fs.readFileSync("/tmp/arcwell-dev-hook-capture.json", "utf8"));
+if (capture.candidates_created < 1) throw new Error("capture did not create a candidate");
+if (!recall.context || typeof recall.context !== "string") throw new Error("recall missing context");
+if (!Array.isArray(dream.actions)) throw new Error("dream report missing actions");
+if (!Array.isArray(events) || events.length < 1) throw new Error("memory events missing");
+if (hookRecall.ok !== true || typeof hookRecall.additionalContext !== "string") {
+  throw new Error("hook recall smoke failed");
+}
+if (hookCapture.ok !== true || !hookCapture.capture) {
+  throw new Error("hook capture smoke failed");
+}
+NODE
+  echo "dev smoke passed"
+}
+
+status() {
+  echo "repo: $REPO_ROOT"
+  echo "debug binary: $REPO_ROOT/target/debug/arcwell"
+  if [ -x "$REPO_ROOT/target/debug/arcwell" ]; then
+    ls -l "$REPO_ROOT/target/debug/arcwell"
+  else
+    echo "debug binary missing"
+  fi
+  echo "dev plugin: $DEV_PLUGIN"
+  [ -d "$DEV_PLUGIN" ] && echo "dev plugin materialized" || echo "dev plugin missing"
+  echo "dev wrapper: $DEV_WRAPPER"
+  [ -x "$DEV_WRAPPER" ] && echo "dev wrapper executable" || echo "dev wrapper missing"
+  local cache
+  cache="$(codex_cache_dir || true)"
+  if [ -n "$cache" ]; then
+    echo "Codex cache: $cache"
+  else
+    echo "Codex cache: arcwell-codex-dev not installed"
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    echo "codex CLI: $(command -v codex)"
+  else
+    echo "codex CLI: missing"
+  fi
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  build) build ;;
+  materialize) materialize ;;
+  install) install_plugin ;;
+  sync) sync_plugin ;;
+  watch) watch_loop ;;
+  smoke) smoke ;;
+  status) status ;;
+  help|-h|--help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

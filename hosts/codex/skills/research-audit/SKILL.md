@@ -15,12 +15,14 @@ Checklist:
 - Did provider search avoid arbitrary non-loopback custom endpoints unless explicitly configured?
 - Were unsafe result URL schemes dropped before wiki write-back?
 - Are external sources represented as typed source cards with untrusted-evidence framing?
+- Did `research_audit` pass, or are its findings reflected in the final caveats?
 - Were URL-ingest jobs blocked from loopback/private/metadata hosts?
 
 Useful tools:
 
 - `wiki_search`
 - `wiki_read`
+- `research_audit`
 - `research_runs`
 - `research_tasks`
 - `backup_create`

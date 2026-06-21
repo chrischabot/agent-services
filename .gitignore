@@ -1,8 +1,10 @@
 /target/
 /.arcwell/
+/.arcwell-dev/
 /.env
 /.dev.vars
 *.sqlite3
 *.sqlite3-*
 node_modules/
 packages/*/worker/node_modules/
+packages/*/worker/dist/

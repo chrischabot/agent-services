@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${EDGE_URL:-}" ]]; then
+  echo "EDGE_URL is required, for example https://arcwell-edge-inbox.<account>.workers.dev" >&2
+  exit 2
+fi
+if [[ -z "${ARCWELL_EDGE_SECRET:-}" ]]; then
+  echo "ARCWELL_EDGE_SECRET is required for the staging worker" >&2
+  exit 2
+fi
+if [[ -z "${ARCWELL_EDGE_NEXT_SECRET:-}" ]]; then
+  echo "ARCWELL_EDGE_NEXT_SECRET is required to prove current/next rotation" >&2
+  exit 2
+fi
+
+RUN_ID="${EDGE_SMOKE_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
+OFFLINE_SECONDS="${EDGE_SMOKE_OFFLINE_SECONDS:-3}"
+RATE_PROBES="${EDGE_SMOKE_RATE_LIMIT_PROBES:-8}"
+if (( RATE_PROBES < 2 || RATE_PROBES > 200 )); then
+  echo "EDGE_SMOKE_RATE_LIMIT_PROBES must be between 2 and 200" >&2
+  exit 2
+fi
+
+WORK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/arcwell-edge-live-smoke.XXXXXX")"
+cleanup() {
+  if [[ "${EDGE_SMOKE_KEEP_HOME:-0}" != "1" ]]; then
+    rm -rf "$WORK_HOME"
+  else
+    echo "Kept ARCWELL_HOME=$WORK_HOME"
+  fi
+}
+trap cleanup EXIT
+
+arcwell_cmd() {
+  if [[ -n "${ARCWELL_BIN:-}" ]]; then
+    "$ARCWELL_BIN" --home "$WORK_HOME" "$@"
+  elif [[ -x "target/debug/arcwell" ]]; then
+    target/debug/arcwell --home "$WORK_HOME" "$@"
+  else
+    cargo run -q -p arcwell -- --home "$WORK_HOME" "$@"
+  fi
+}
+
+request_json() {
+  local method="$1"
+  local path="$2"
+  local secret="$3"
+  local body="${4:-}"
+  local output status payload
+  if [[ -n "$body" ]]; then
+    output="$(curl -sS -X "$method" "${EDGE_URL%/}$path" \
+      -H "content-type: application/json" \
+      -H "x-arcwell-edge-secret: $secret" \
+      --data "$body" \
+      -w $'\n%{http_code}')"
+  else
+    output="$(curl -sS -X "$method" "${EDGE_URL%/}$path" \
+      -H "x-arcwell-edge-secret: $secret" \
+      -w $'\n%{http_code}')"
+  fi
+  status="$(printf '%s' "$output" | tail -n 1)"
+  payload="$(printf '%s' "$output" | sed '$d')"
+  printf '%s\n%s\n' "$status" "$payload"
+}
+
+assert_status() {
+  local actual="$1"
+  local expected="$2"
+  local label="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$label: expected HTTP $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+assert_json() {
+  local payload="$1"
+  local expression="$2"
+  local label="$3"
+  node -e '
+const value = JSON.parse(process.argv[1]);
+const ok = Function("value", `return (${process.argv[2]});`)(value);
+if (!ok) {
+  console.error(process.argv[3]);
+  console.error(JSON.stringify(value, null, 2));
+  process.exit(1);
+}
+' "$payload" "$expression" "$label"
+}
+
+event_body() {
+  local source="$1"
+  local idempotency_key="$2"
+  local text="$3"
+  local max_age="${4:-300}"
+  node -e '
+const [source, idempotencyKey, text, maxAgeSeconds] = process.argv.slice(1);
+console.log(JSON.stringify({
+  source,
+  idempotencyKey,
+  payload: { text, smoke: true },
+  maxAgeSeconds: Number(maxAgeSeconds)
+}));
+' "$source" "$idempotency_key" "$text" "$max_age"
+}
+
+echo "edge live smoke run: $RUN_ID"
+
+mapfile -t health < <(request_json GET /health "$ARCWELL_EDGE_SECRET")
+assert_status "${health[0]}" "200" "health"
+assert_json "${health[1]}" "value.ok === true && value.durable === true" "health did not report durable worker"
+
+mapfile -t forged < <(request_json POST /events "forged-$RUN_ID" "$(event_body smoke "forged:$RUN_ID" forged 60)")
+assert_status "${forged[0]}" "401" "forged secret rejection"
+
+current_id="smoke:current:$RUN_ID"
+mapfile -t current < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event_body smoke "$current_id" current 300)")
+assert_status "${current[0]}" "200" "current secret enqueue"
+assert_json "${current[1]}" "value.accepted === true && value.duplicate === false" "current secret enqueue failed"
+
+next_id="smoke:next:$RUN_ID"
+mapfile -t next < <(request_json POST /events "$ARCWELL_EDGE_NEXT_SECRET" "$(event_body smoke "$next_id" next 300)")
+assert_status "${next[0]}" "200" "next secret enqueue"
+assert_json "${next[1]}" "value.accepted === true && value.duplicate === false" "next secret enqueue failed"
+
+duplicate_id="smoke:duplicate:$RUN_ID"
+duplicate_body="$(event_body smoke "$duplicate_id" duplicate 300)"
+mapfile -t duplicate_first < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$duplicate_body")
+assert_status "${duplicate_first[0]}" "200" "first duplicate-key enqueue"
+mapfile -t duplicate_second < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$duplicate_body")
+assert_status "${duplicate_second[0]}" "200" "second duplicate-key enqueue"
+assert_json "${duplicate_second[1]}" "value.duplicate === true" "duplicate idempotency key was not reported as duplicate"
+
+offline_id="smoke:offline:$RUN_ID"
+mapfile -t offline < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event_body smoke "$offline_id" offline 300)")
+assert_status "${offline[0]}" "200" "offline-period enqueue"
+sleep "$OFFLINE_SECONDS"
+
+drain_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 10)"
+assert_json "$drain_report" \
+  "value.acked >= 4 && value.events.some((event) => event.idempotency_key === '$offline_id') && value.events.filter((event) => event.idempotency_key === '$duplicate_id').length === 1" \
+  "local drain did not import/ack expected unique events"
+
+lease_id="smoke:lease-expire:$RUN_ID"
+mapfile -t lease_event < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event_body smoke "$lease_id" lease-expire 300)")
+assert_status "${lease_event[0]}" "200" "lease-expire enqueue"
+mapfile -t lease_once < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" '{"leaseSeconds":1}')
+assert_status "${lease_once[0]}" "200" "first lease"
+assert_json "${lease_once[1]}" "value.event && value.event.idempotencyKey === '$lease_id' && value.event.status === 'leased'" "first lease did not return expected event"
+sleep 2
+mapfile -t lease_twice < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" '{"leaseSeconds":30}')
+assert_status "${lease_twice[0]}" "200" "lease retry after expiry"
+assert_json "${lease_twice[1]}" "value.event && value.event.idempotencyKey === '$lease_id' && value.event.attempts >= 2" "expired lease was not retryable"
+mapfile -t lease_ack < <(request_json POST /drain/ack "$ARCWELL_EDGE_SECRET" "{\"idempotencyKey\":\"$lease_id\"}")
+assert_status "${lease_ack[0]}" "200" "lease cleanup ack"
+
+persist_fail_id="smoke:persist-fail:$RUN_ID"
+bad_source_body="$(event_body "   " "$persist_fail_id" persist-fail 300)"
+mapfile -t persist_fail_enqueue < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$bad_source_body")
+assert_status "${persist_fail_enqueue[0]}" "200" "local-persist-failure enqueue"
+persist_fail_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 1)"
+assert_json "$persist_fail_report" \
+  "value.imported === 0 && value.acked === 0 && value.nacked === 1" \
+  "local persistence failure was not nacked without ack"
+mapfile -t persist_fail_list < <(request_json GET "/events?limit=100" "$ARCWELL_EDGE_SECRET")
+assert_status "${persist_fail_list[0]}" "200" "event list after persist failure"
+assert_json "${persist_fail_list[1]}" \
+  "value.events.some((event) => event.idempotencyKey === '$persist_fail_id' && event.status !== 'acked')" \
+  "persistence-failure event was acked remotely"
+
+storm_source="storm-$RUN_ID"
+rate_limited=0
+for index in $(seq 1 "$RATE_PROBES"); do
+  storm_id="smoke:storm:$RUN_ID:$index"
+  mapfile -t storm < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event_body "$storm_source" "$storm_id" storm 60)")
+  if [[ "${storm[0]}" == "429" ]]; then
+    rate_limited=1
+    break
+  fi
+done
+if [[ "$rate_limited" != "1" ]]; then
+  echo "rate-limit proof failed: no 429 after $RATE_PROBES bounded staging probes; lower RATE_LIMIT_MAX_EVENTS for the staging worker or raise EDGE_SMOKE_RATE_LIMIT_PROBES" >&2
+  exit 1
+fi
+
+echo "edge live smoke passed with temp ARCWELL_HOME=$WORK_HOME"

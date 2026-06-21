@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell memory hook-recall --event session-start --query \"stable personal preferences, operating profile, current project context\"",
+            "timeout": 30,
+            "statusMessage": "Loading Arcwell memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell memory hook-recall --event user-prompt-submit",
+            "timeout": 30,
+            "statusMessage": "Searching Arcwell memory"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell memory hook-capture --event pre-compact",
+            "timeout": 30,
+            "statusMessage": "Reviewing Arcwell memory candidates"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell memory hook-capture --event stop",
+            "timeout": 30,
+            "statusMessage": "Capturing Arcwell memory candidates"
+          }
+        ]
+      }
+    ]
+  }
+}

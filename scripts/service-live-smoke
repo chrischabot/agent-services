@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$REPO_ROOT/target/debug/arcwell"
+SERVICE_LABEL="com.arcwell.worker"
+MODE="auto"
+KEEP=0
+ALLOW_EXISTING=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/service-live-smoke [--live|--no-live] [--keep-temp] [--allow-existing]
+
+Runs severe service-supervision smoke checks with disposable HOME and
+ARCWELL_HOME paths containing spaces and hostile shell/XML characters.
+
+Default mode is auto:
+  - always runs no-load disposable checks for install metadata, strict doctor,
+    stale heartbeat, corrupt plist, missing binary, log errors, and uninstall
+    cleanup;
+  - runs real launchd bootstrap/restart/kill/log/uninstall checks only when
+    macOS launchd is available and no existing com.arcwell.worker service is
+    loaded for the current user.
+
+Use --live to require real launchd coverage and fail if it is unavailable.
+Use --no-live to skip launchd operations.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --live)
+      MODE="live"
+      ;;
+    --no-live)
+      MODE="no-live"
+      ;;
+    --keep-temp)
+      KEEP=1
+      ;;
+    --allow-existing)
+      ALLOW_EXISTING=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+need_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "missing required command: $cmd" >&2
+    exit 127
+  fi
+}
+
+log() {
+  printf '[service-smoke] %s\n' "$*"
+}
+
+fail() {
+  printf '[service-smoke] FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+json_assert() {
+  local file="$1"
+  local expr="$2"
+  local message="$3"
+  node - "$file" "$expr" "$message" <<'NODE'
+const fs = require("fs");
+const [file, expr, message] = process.argv.slice(2);
+const data = JSON.parse(fs.readFileSync(file, "utf8"));
+if (!Function("data", `return (${expr});`)(data)) {
+  console.error(message);
+  console.error(JSON.stringify(data, null, 2));
+  process.exit(1);
+}
+NODE
+}
+
+json_value() {
+  local file="$1"
+  local expr="$2"
+  node - "$file" "$expr" <<'NODE'
+const fs = require("fs");
+const [file, expr] = process.argv.slice(2);
+const data = JSON.parse(fs.readFileSync(file, "utf8"));
+const value = Function("data", `return (${expr});`)(data);
+if (value === undefined || value === null) process.exit(1);
+if (typeof value === "object") {
+  console.log(JSON.stringify(value));
+} else {
+  console.log(String(value));
+}
+NODE
+}
+
+run_json() {
+  local out="$1"
+  shift
+  "$@" >"$out"
+}
+
+expect_failure_json() {
+  local out="$1"
+  local err="$2"
+  shift 2
+  if "$@" >"$out" 2>"$err"; then
+    cat "$out" >&2 || true
+    fail "expected command to fail: $*"
+  fi
+}
+
+launchd_available() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  command -v launchctl >/dev/null 2>&1 || return 1
+  launchctl print "gui/$(id -u)" >/dev/null 2>&1
+}
+
+service_loaded() {
+  launchctl print "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1
+}
+
+service_pid() {
+  launchctl print "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null \
+    | awk -F'= ' '/pid = / { print $2; exit }'
+}
+
+wait_until() {
+  local description="$1"
+  local seconds="$2"
+  shift 2
+  local deadline=$((SECONDS + seconds))
+  until "$@"; do
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+  log "$description"
+}
+
+cleanup() {
+  set +e
+  if [[ "${LIVE_ATTEMPTED:-0}" == "1" ]] && launchd_available; then
+    launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1
+  fi
+  if [[ "${KEEP:-0}" != "1" && -n "${SMOKE_ROOT:-}" ]]; then
+    chmod -R u+rwX "$SMOKE_ROOT" >/dev/null 2>&1
+    rm -rf "$SMOKE_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+need_cmd cargo
+need_cmd node
+need_cmd sqlite3
+
+log "building target/debug/arcwell"
+(cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+
+SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/arcwell-service-smoke.XXXXXX")"
+SMOKE_HOME="$SMOKE_ROOT/HOME with spaces & hostile 'label'"
+SMOKE_ARCWELL_HOME="$SMOKE_ROOT/ARCWELL HOME with spaces & <xml>"
+mkdir -p "$SMOKE_HOME" "$SMOKE_ARCWELL_HOME"
+export HOME="$SMOKE_HOME"
+export ARCWELL_HOME="$SMOKE_ARCWELL_HOME"
+
+OUT="$SMOKE_ROOT/out.json"
+ERR="$SMOKE_ROOT/err.txt"
+PLIST="$SMOKE_HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+UNRELATED="$SMOKE_ARCWELL_HOME/unrelated-user-data.txt"
+
+log "disposable HOME=$HOME"
+log "disposable ARCWELL_HOME=$ARCWELL_HOME"
+
+log "preparing health prerequisites"
+run_json "$OUT" "$BIN" profile set service.smoke ok --source service-live-smoke
+run_json "$OUT" "$BIN" backup create
+run_json "$OUT" "$BIN" worker run-once --max-jobs 1
+
+log "installing without launchd load to verify hostile paths safely"
+run_json "$OUT" "$BIN" service install --no-load --max-jobs-per-tick 999 --idle-sleep-ms 1
+json_assert "$OUT" "data.ok === true && data.load.attempted === false" "no-load install should report success without launchctl"
+[[ -f "$PLIST" ]] || fail "expected plist at $PLIST"
+grep -Fq "worker" "$PLIST" || fail "plist does not contain worker command"
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "$PLIST" >/dev/null
+fi
+
+log "strict doctor accepts generated plist and fresh heartbeat"
+run_json "$OUT" "$BIN" doctor --strict --max-worker-heartbeat-age-seconds 300
+json_assert "$OUT" "data.ok === true" "strict doctor should pass with generated plist, fresh backup, and heartbeat"
+
+log "stale heartbeat is rejected by strict doctor"
+sqlite3 "$SMOKE_ARCWELL_HOME/arcwell.sqlite3" \
+  "UPDATE worker_heartbeats SET last_seen_at = '2000-01-01T00:00:00+00:00';"
+expect_failure_json "$OUT" "$ERR" "$BIN" doctor --strict --max-worker-heartbeat-age-seconds 1
+json_assert "$OUT" "data.ok === false && data.failures.some((failure) => failure.includes('heartbeat is stale'))" \
+  "strict doctor should reject stale heartbeat"
+run_json "$OUT" "$BIN" worker run-once --max-jobs 1
+
+log "corrupt service metadata is rejected by strict doctor"
+cat >"$PLIST" <<'PLIST'
+<plist version="1.0"><dict><key>Label</key><string>evil.worker</string></dict></plist>
+PLIST
+expect_failure_json "$OUT" "$ERR" "$BIN" doctor --strict --max-worker-heartbeat-age-seconds 300
+json_assert "$OUT" "data.ok === false && data.failures.some((failure) => failure.includes('label mismatch'))" \
+  "strict doctor should reject plist label mismatch"
+json_assert "$OUT" "data.failures.some((failure) => failure.includes('missing ProgramArguments'))" \
+  "strict doctor should reject missing ProgramArguments"
+
+log "missing worker binary is rejected by strict doctor"
+mkdir -p "$SMOKE_ARCWELL_HOME/logs"
+cat >"$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$SERVICE_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SMOKE_ROOT/missing arcwell binary</string>
+    <string>worker</string>
+    <string>run</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$SMOKE_ARCWELL_HOME/logs/worker.out.log</string>
+  <key>StandardErrorPath</key><string>$SMOKE_ARCWELL_HOME/logs/worker.err.log</string>
+</dict>
+</plist>
+PLIST
+expect_failure_json "$OUT" "$ERR" "$BIN" doctor --strict --max-worker-heartbeat-age-seconds 300
+json_assert "$OUT" "data.ok === false && data.failures.some((failure) => failure.includes('service binary is missing'))" \
+  "strict doctor should reject a missing worker binary"
+
+log "log command reports unreadable logs clearly"
+run_json "$OUT" "$BIN" service install --no-load --max-jobs-per-tick 10 --idle-sleep-ms 5000
+mkdir -p "$SMOKE_ARCWELL_HOME/logs"
+touch "$SMOKE_ARCWELL_HOME/logs/worker.out.log"
+chmod 000 "$SMOKE_ARCWELL_HOME/logs/worker.out.log"
+run_json "$OUT" "$BIN" service logs
+json_assert "$OUT" "typeof data.stdout.ok === 'boolean' && typeof data.stderr.ok === 'boolean'" \
+  "service logs should return explicit per-stream status"
+chmod u+rw "$SMOKE_ARCWELL_HOME/logs/worker.out.log"
+
+log "uninstall removes only the service plist"
+printf 'preserve me\n' >"$UNRELATED"
+run_json "$OUT" "$BIN" service uninstall --no-unload
+json_assert "$OUT" "data.ok === true && data.removed === true" "uninstall should remove the disposable plist"
+[[ ! -e "$PLIST" ]] || fail "uninstall left plist behind"
+[[ -f "$UNRELATED" ]] || fail "uninstall deleted unrelated ARCWELL_HOME data"
+
+LIVE_STATUS="skipped"
+LIVE_REASON="--no-live requested"
+if [[ "$MODE" != "no-live" ]]; then
+  if ! launchd_available; then
+    LIVE_STATUS="blocked"
+    LIVE_REASON="macOS launchd gui domain is unavailable for this user/session"
+  elif [[ "$ALLOW_EXISTING" != "1" ]] && service_loaded; then
+    LIVE_STATUS="blocked"
+    LIVE_REASON="existing $SERVICE_LABEL is already loaded; refusing to disturb a real user service"
+  else
+    LIVE_STATUS="attempted"
+    LIVE_REASON=""
+    LIVE_ATTEMPTED=1
+
+    log "running real launchd install/status/restart/kill/logs/uninstall smoke"
+    run_json "$OUT" "$BIN" service install --max-jobs-per-tick 1 --idle-sleep-ms 1000
+    json_assert "$OUT" "data.ok === true && data.load.ok === true" "live service install should bootstrap with launchctl"
+    wait_until "launchd reports service loaded" 15 service_loaded || fail "launchd did not load $SERVICE_LABEL"
+    wait_until "strict doctor passes for live service" 20 "$BIN" doctor --strict --max-worker-heartbeat-age-seconds 5 >/dev/null \
+      || fail "strict doctor did not observe a fresh live worker heartbeat"
+
+    run_json "$OUT" "$BIN" service status
+    json_assert "$OUT" "data.installed === true && data.launchctl.ok === true" "service status should see launchd service"
+
+    OLD_PID="$(service_pid || true)"
+    [[ -n "$OLD_PID" ]] || fail "could not read worker pid from launchd"
+    run_json "$OUT" "$BIN" service restart
+    json_assert "$OUT" "data.ok === true && data.restart.ok === true" "service restart should kickstart the worker"
+    wait_until "worker pid changed after service restart" 15 bash -c \
+      "pid=\$(launchctl print 'gui/$(id -u)/$SERVICE_LABEL' 2>/dev/null | awk -F'= ' '/pid = / { print \$2; exit }'); [[ -n \"\$pid\" && \"\$pid\" != '$OLD_PID' ]]" \
+      || fail "worker pid did not change after restart"
+
+    OLD_PID="$(service_pid || true)"
+    kill "$OLD_PID"
+    wait_until "killed worker restarted by launchd" 20 bash -c \
+      "pid=\$(launchctl print 'gui/$(id -u)/$SERVICE_LABEL' 2>/dev/null | awk -F'= ' '/pid = / { print \$2; exit }'); [[ -n \"\$pid\" && \"\$pid\" != '$OLD_PID' ]]"
+
+    run_json "$OUT" "$BIN" service logs
+    json_assert "$OUT" "data.stdout.ok === true || data.stderr.ok === true" "service logs should read at least one live log stream"
+
+    run_json "$OUT" "$BIN" service uninstall
+    json_assert "$OUT" "data.ok === true && data.removed === true" "live uninstall should remove the plist"
+    [[ ! -e "$PLIST" ]] || fail "live uninstall left plist behind"
+    [[ -f "$UNRELATED" ]] || fail "live uninstall deleted unrelated ARCWELL_HOME data"
+    LIVE_STATUS="passed"
+  fi
+fi
+
+if [[ "$MODE" == "live" && "$LIVE_STATUS" == "blocked" ]]; then
+  fail "live launchd smoke blocked: $LIVE_REASON"
+fi
+
+log "NO_LOAD_STATUS=passed"
+log "LIVE_STATUS=$LIVE_STATUS${LIVE_REASON:+ ($LIVE_REASON)}"
+if [[ "$KEEP" == "1" ]]; then
+  log "kept temp root: $SMOKE_ROOT"
+fi

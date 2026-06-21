@@ -15,6 +15,7 @@ Rules:
 - Write durable source cards or notes into `arcwell-llm-wiki` before producing a final brief.
 - Use typed source cards for external evidence; do not bury source provenance only in prose.
 - Call `research_brief_from_wiki` after source cards are in place.
+- Call `research_audit` before using a brief externally or as project evidence.
 - Treat generated `Research Brief:` pages as outputs, not evidence.
 - Record retrieval date in source cards for current or fast-moving topics.
 
@@ -26,6 +27,7 @@ MCP tools:
 - `research_tasks`
 - `research_task_complete`
 - `research_brief_from_wiki`
+- `research_audit`
 - `research_runs`
 - `wiki_ingest_file`
 - `wiki_enqueue_rss`

@@ -1,0 +1,32 @@
+{
+  "name": "arcwell-garderobe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Arcwell package boundary for the Garderobe wardrobe MCP server on Cloudflare Workers.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf:check": "wrangler deploy --dry-run",
+    "cf:types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply arcwell_garderobe --local",
+    "db:migrate:remote": "wrangler d1 migrations apply arcwell_garderobe --remote",
+    "import:csv": "tsx scripts/import-sheet.ts",
+    "test": "node scripts/severe-integration-tests.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.7.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.15.0",
+    "csv-parse": "^6.1.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "@types/node": "^25.0.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.99.0"
+  }
+}

@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# CLAIM: A candidate Arcwell package binary plus the stable Codex plugin can be
+# staged, upgraded, verified, and uninstalled without corrupting the installed
+# binary, hiding stale PATH resolution, losing user data, or accepting an
+# unsupported local schema.
+# PRECONDITIONS: The smoke runs only in disposable temp prefixes/homes and does
+# not publish artifacts or touch a live launchd/systemd service.
+# ORACLE: CLI JSON output, binary hashes, plugin manifest/hook parsing, SQLite
+# schema metadata, restored profile data, filesystem state, and explicit command
+# failures.
+# SEVERITY: Severe packaging coverage for path handling, stale binaries,
+# interrupted upgrades, old DB/schema state, duplicate service install,
+# permissions, and uninstall cleanup.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_BIN="${ARCWELL_RELEASE_BIN:-$REPO_ROOT/target/release/arcwell}"
+BUILD_RELEASE="${ARCWELL_RELEASE_SMOKE_BUILD:-auto}"
+KEEP_TEMP=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/release-readiness-smoke [--keep-temp]
+
+Runs packaging/release readiness checks in disposable directories. The smoke
+does not publish Homebrew or GitHub artifacts; it verifies the local release
+inputs and install contract those artifacts must preserve.
+
+Environment:
+  ARCWELL_RELEASE_BIN=/path/to/arcwell       Use an existing candidate binary.
+  ARCWELL_RELEASE_SMOKE_BUILD=0|1|auto      Build target/release/arcwell first.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keep-temp)
+      KEEP_TEMP=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+need_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "missing required command: $cmd" >&2
+    exit 127
+  fi
+}
+
+log() {
+  printf '[release-smoke] %s\n' "$*"
+}
+
+fail() {
+  printf '[release-smoke] FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+json_assert() {
+  local file="$1"
+  local expr="$2"
+  local message="$3"
+  node - "$file" "$expr" "$message" <<'NODE'
+const fs = require("fs");
+const [file, expr, message] = process.argv.slice(2);
+const data = JSON.parse(fs.readFileSync(file, "utf8"));
+if (!Function("data", `return (${expr});`)(data)) {
+  console.error(message);
+  console.error(JSON.stringify(data, null, 2));
+  process.exit(1);
+}
+NODE
+}
+
+run_json() {
+  local out="$1"
+  shift
+  "$@" >"$out"
+}
+
+expect_failure() {
+  local out="$1"
+  local err="$2"
+  shift 2
+  if "$@" >"$out" 2>"$err"; then
+    cat "$out" >&2 || true
+    fail "expected command to fail: $*"
+  fi
+}
+
+need_cmd cargo
+need_cmd node
+need_cmd sqlite3
+need_cmd shasum
+
+if [[ "$BUILD_RELEASE" == "1" || ( "$BUILD_RELEASE" == "auto" && ! -x "$SOURCE_BIN" ) ]]; then
+  log "building release candidate binary"
+  (cd "$REPO_ROOT" && cargo build --release -p arcwell >/dev/null)
+fi
+
+[[ -x "$SOURCE_BIN" ]] || fail "release candidate binary is missing or not executable: $SOURCE_BIN"
+
+SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/arcwell release smoke.XXXXXX")"
+cleanup() {
+  if [[ "$KEEP_TEMP" == "1" ]]; then
+    log "kept temp root: $SMOKE_ROOT"
+  else
+    chmod -R u+rwX "$SMOKE_ROOT" >/dev/null 2>&1 || true
+    rm -rf "$SMOKE_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+PREFIX="$SMOKE_ROOT/package prefix with spaces & symbols"
+PKG_BIN_DIR="$PREFIX/bin"
+PKG_BIN="$PKG_BIN_DIR/arcwell"
+HOME_DIR="$SMOKE_ROOT/HOME with spaces"
+ARC_HOME="$SMOKE_ROOT/ARCWELL HOME with spaces & <xml>"
+RESTORE_HOME="$SMOKE_ROOT/restored ARCWELL HOME"
+OUT="$SMOKE_ROOT/out.json"
+ERR="$SMOKE_ROOT/err.txt"
+
+mkdir -p "$PKG_BIN_DIR" "$HOME_DIR" "$ARC_HOME"
+cp "$SOURCE_BIN" "$PKG_BIN"
+chmod +x "$PKG_BIN"
+
+log "candidate binary copied to disposable prefix: $PKG_BIN"
+"$PKG_BIN" --help >/dev/null
+
+log "verifying stable Codex plugin resolves installed arcwell on PATH"
+node - "$REPO_ROOT/plugins/arcwell-codex/.mcp.json" "$REPO_ROOT/plugins/arcwell-codex/hooks/hooks.json" <<'NODE'
+const fs = require("fs");
+const [mcpPath, hooksPath] = process.argv.slice(2);
+const mcp = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+const command = mcp.mcpServers?.arcwell?.command;
+const args = mcp.mcpServers?.arcwell?.args || [];
+if (command !== "arcwell") {
+  throw new Error(`stable plugin must invoke installed arcwell on PATH, found ${JSON.stringify(command)}`);
+}
+if (args.length !== 1 || args[0] !== "mcp") {
+  throw new Error(`stable plugin must run arcwell mcp, found args ${JSON.stringify(args)}`);
+}
+const text = fs.readFileSync(hooksPath, "utf8");
+if (/cargo\s+run|target\/debug|arcwell-dev|\.arcwell-dev/.test(text)) {
+  throw new Error("stable plugin hooks must not reference cargo, target/debug, or arcwell-dev");
+}
+const hooks = JSON.parse(text);
+const commands = [];
+const collect = (value) => {
+  if (Array.isArray(value)) value.forEach(collect);
+  else if (value && typeof value === "object") {
+    if (value.type === "command" && typeof value.command === "string") commands.push(value.command);
+    Object.values(value).forEach(collect);
+  }
+};
+collect(hooks);
+if (commands.length === 0) throw new Error("stable plugin hooks contain no commands to verify");
+for (const hookCommand of commands) {
+  if (!/^arcwell\b/.test(hookCommand)) {
+    throw new Error(`stable hook must invoke arcwell on PATH, found ${hookCommand}`);
+  }
+}
+NODE
+
+STALE_BIN_DIR="$SMOKE_ROOT/stale bin first on PATH"
+mkdir -p "$STALE_BIN_DIR"
+cat >"$STALE_BIN_DIR/arcwell" <<'SH'
+#!/usr/bin/env bash
+echo "stale arcwell binary on PATH" >&2
+exit 42
+SH
+chmod +x "$STALE_BIN_DIR/arcwell"
+
+if PATH="$STALE_BIN_DIR:$PATH" arcwell --help >"$OUT" 2>"$ERR"; then
+  fail "stale PATH probe unexpectedly succeeded"
+fi
+grep -Fq "stale arcwell binary" "$ERR" || fail "stale PATH probe did not hit the stale binary"
+PATH="$PKG_BIN_DIR:$STALE_BIN_DIR:$PATH" arcwell --help >/dev/null
+if [[ "$(PATH="$PKG_BIN_DIR:$STALE_BIN_DIR:$PATH" command -v arcwell)" != "$PKG_BIN" ]]; then
+  fail "installed package binary is not first on PATH"
+fi
+
+log "simulating interrupted upgrade without corrupting current install"
+before_hash="$(shasum -a 256 "$PKG_BIN" | awk '{print $1}')"
+printf 'partial upgrade payload\n' >"$PKG_BIN_DIR/.arcwell.new"
+expect_failure "$OUT" "$ERR" "$PKG_BIN_DIR/.arcwell.new" --help
+after_hash="$(shasum -a 256 "$PKG_BIN" | awk '{print $1}')"
+[[ "$before_hash" == "$after_hash" ]] || fail "interrupted upgrade changed the installed binary"
+cp "$SOURCE_BIN" "$PKG_BIN_DIR/.arcwell.new"
+chmod +x "$PKG_BIN_DIR/.arcwell.new"
+mv "$PKG_BIN_DIR/.arcwell.new" "$PKG_BIN"
+"$PKG_BIN" --help >/dev/null
+
+log "exercising fresh install, backup, restore, and strict doctor in paths with spaces"
+HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" profile set release.smoke ok --source release-readiness-smoke >"$OUT"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" backup create
+json_assert "$OUT" "typeof data.path === 'string' && data.path.includes('backups')" \
+  "backup create should return a backup path"
+backup_path="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).path)' "$OUT")"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" backup verify
+json_assert "$OUT" "data === null || data.ok === true" "latest backup should verify"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" backup restore --from "$backup_path" --target-home "$RESTORE_HOME"
+json_assert "$OUT" "data.ok === true" "backup restore should report ok"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$RESTORE_HOME" profile get release.smoke
+json_assert "$OUT" "data.value === 'ok'" "restored profile value missing"
+
+log "checking old/unsupported schema is caught by strict doctor"
+HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" service install --no-load >"$OUT"
+HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" worker run-once --max-jobs 1 >"$OUT"
+sqlite3 "$ARC_HOME/arcwell.sqlite3" "UPDATE meta SET value = '0' WHERE key = 'schema_version';"
+expect_failure "$OUT" "$ERR" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" doctor --strict --max-worker-heartbeat-age-seconds 300
+json_assert "$OUT" "data.ok === false && data.failures.some((failure) => failure.includes('schema version mismatch'))" \
+  "strict doctor should reject old/unsupported schema version"
+sqlite3 "$ARC_HOME/arcwell.sqlite3" "UPDATE meta SET value = '1' WHERE key = 'schema_version';"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" doctor --strict --max-worker-heartbeat-age-seconds 300
+json_assert "$OUT" "data.ok === true" "strict doctor should recover after schema version is restored"
+
+log "checking duplicate service install and uninstall cleanup"
+plist="$HOME_DIR/Library/LaunchAgents/com.arcwell.worker.plist"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" service install --no-load --max-jobs-per-tick 3 --idle-sleep-ms 10
+json_assert "$OUT" "data.ok === true && data.load.attempted === false" "first no-load service install failed"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" service install --no-load --max-jobs-per-tick 4 --idle-sleep-ms 11
+json_assert "$OUT" "data.ok === true && data.load.attempted === false" "duplicate no-load service install failed"
+[[ -f "$plist" ]] || fail "service plist missing after duplicate install"
+if [[ "$(find "$HOME_DIR/Library/LaunchAgents" -name 'com.arcwell.worker*.plist' -type f | wc -l | tr -d ' ')" != "1" ]]; then
+  fail "duplicate service install created extra plist files"
+fi
+printf 'preserve release smoke data\n' >"$ARC_HOME/user-data-must-remain.txt"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" service uninstall --no-unload
+json_assert "$OUT" "data.ok === true && data.removed === true" "service uninstall should remove existing plist"
+[[ ! -e "$plist" ]] || fail "service plist remains after uninstall"
+[[ -f "$ARC_HOME/user-data-must-remain.txt" ]] || fail "service uninstall deleted unrelated ARCWELL_HOME data"
+run_json "$OUT" env HOME="$HOME_DIR" "$PKG_BIN" --home "$ARC_HOME" service uninstall --no-unload
+json_assert "$OUT" "data.ok === true && data.removed === false" "second uninstall should be idempotent"
+
+log "checking malformed/unwritable paths fail explicitly"
+BAD_HOME="$SMOKE_ROOT/bad home"
+mkdir -p "$BAD_HOME"
+touch "$BAD_HOME/logs"
+expect_failure "$OUT" "$ERR" env HOME="$HOME_DIR" "$PKG_BIN" --home "$BAD_HOME" service install --no-load
+grep -Eq "creating|Not a directory|File exists|os error" "$ERR" || fail "service install failure did not explain bad log path"
+
+UNWRITABLE_PARENT="$SMOKE_ROOT/unwritable parent"
+mkdir -p "$UNWRITABLE_PARENT"
+chmod 500 "$UNWRITABLE_PARENT"
+if [[ "$(id -u)" != "0" ]]; then
+  expect_failure "$OUT" "$ERR" env HOME="$HOME_DIR" "$PKG_BIN" --home "$UNWRITABLE_PARENT/child" doctor
+  grep -Eq "creating|Permission denied|os error" "$ERR" || fail "unwritable home failure did not explain permission problem"
+else
+  log "skipping unwritable home check because root can write through chmod 500"
+fi
+chmod u+rwx "$UNWRITABLE_PARENT"
+
+log "release readiness smoke passed with disposable prefix: $PREFIX"

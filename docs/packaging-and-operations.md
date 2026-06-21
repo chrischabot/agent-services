@@ -44,6 +44,9 @@ Rationale:
 
 - The worker is long-lived and should drain queues even when no Codex thread is active.
 - The HTTP server is useful for humans, ops UI, and local integrations, but should be localhost-only.
+- The current `/ops/ui` page is read-only. Installers should not expose
+  mutating controls until each action has token auth, same-origin/CSRF checks,
+  policy enforcement, idempotency/replay handling, and severe tests.
 - MCP stdio servers are normally lifecycle-managed by the host agent.
 
 ## macOS LaunchAgent
@@ -51,8 +54,8 @@ Rationale:
 Primary macOS package target should install LaunchAgents under:
 
 ```text
-~/Library/LaunchAgents/com.chrischabot.arcwell.worker.plist
-~/Library/LaunchAgents/com.chrischabot.arcwell.http.plist
+~/Library/LaunchAgents/com.arcwell.worker.plist
+~/Library/LaunchAgents/com.arcwell.http.plist
 ```
 
 Recommended worker settings:
@@ -68,9 +71,44 @@ Recommended HTTP settings:
 
 - disabled by default or installed but not bootstrapped unless requested
 - bind only to `127.0.0.1`
+- set `ARCWELL_HTTP_AUTH_TOKEN` to a long local random token before exposing
+  the API to tools beyond the same-user localhost workflow
+- keep browser integrations same-origin; the server intentionally rejects
+  hostile `Origin` headers and does not enable broad CORS
 - logs under `~/.arcwell/logs/http.log`
 
-Commands the installer should provide:
+Commands now provided by the CLI for the macOS worker service:
+
+```sh
+arcwell service install
+arcwell service status
+arcwell service restart
+arcwell service logs
+arcwell service uninstall
+arcwell doctor --strict
+```
+
+Current macOS state: this writes and loads a user LaunchAgent plist for the
+local worker, records worker heartbeat in SQLite, exposes strict doctor checks
+for backup verification, stale backups, dead letters, stale/missing heartbeat,
+required local directories, schema drift, missing/non-file LaunchAgent plist,
+corrupt service plist metadata, and missing worker binary, and supports
+`launchctl kickstart -k` through `arcwell service restart`.
+
+`scripts/service-live-smoke` is the repeatable severe smoke for this surface. It
+uses disposable `HOME` and `ARCWELL_HOME` paths containing spaces and hostile
+shell/XML characters, refuses to disturb an already-loaded `com.arcwell.worker`
+unless explicitly allowed, and exercises:
+
+- no-load install metadata validation;
+- strict doctor pass with fresh backup and heartbeat;
+- strict doctor failure for stale heartbeat, corrupt plist, and missing binary;
+- explicit log-read errors for unreadable log files;
+- uninstall cleanup without deleting unrelated Arcwell home data;
+- real launchd install, status, restart, killed-worker recovery, logs, and
+  uninstall when macOS launchd is available.
+
+Commands the installer should ultimately provide:
 
 ```sh
 arcwell service install worker
@@ -87,7 +125,14 @@ These can be CLI subcommands later; initially they can be shell scripts generate
 
 ## Linux systemd
 
-Linux packaging should use user services:
+Linux systemd user-service support is explicitly deferred, not implemented. The
+reason is verification: this wave ran on macOS and cannot honestly prove
+`systemctl --user` availability, lingering behavior after logout, journal log
+paths, restart semantics, or uninstall cleanup on a Linux user session. Until a
+Linux CI/staging host is available, Arcwell should not claim systemd install
+support.
+
+The target design remains user services:
 
 ```text
 ~/.config/systemd/user/arcwell-worker.service
@@ -107,6 +152,17 @@ Installers should run:
 systemctl --user daemon-reload
 systemctl --user enable --now arcwell-worker.service
 ```
+
+Done criteria for implementing systemd later:
+
+- generate and install the unit under a disposable `$HOME`;
+- run `systemctl --user daemon-reload`, `enable --now`, `status`, `restart`,
+  and `disable --now`;
+- prove `Restart=always` recovers a killed worker;
+- prove `doctor --strict` catches stale heartbeat while stopped;
+- prove logs are inspectable through `journalctl --user-unit`;
+- prove uninstall removes only the unit file and leaves unrelated
+  `ARCWELL_HOME` data intact.
 
 ## Windows
 
@@ -142,6 +198,99 @@ cargo install --git https://github.com/chrischabot/arcwell arcwell
 
 The package should install one binary named `arcwell`.
 
+## Release Readiness Checklist
+
+Assumptions for the current local release gate:
+
+- The candidate package installs one executable named `arcwell`.
+- The stable Codex plugin invokes `arcwell` from `PATH`, not `cargo run`, a
+  debug binary, or the generated dev wrapper.
+- Local user data remains under `ARCWELL_HOME`; uninstalling a service or
+  package must not delete that data unless the user explicitly asks for a data
+  wipe.
+- Schema version `1` is the only supported SQLite schema in this checkout.
+  A future destructive migration must require a fresh backup and an explicit
+  migration/restore plan before release.
+
+Behavioral claim:
+
+> A release candidate binary plus the stable Codex plugin can be staged in a
+> fresh install prefix, survive interrupted upgrade simulation, expose stale
+> `PATH`/plugin-binary mismatches, preserve backup/restore compatibility, catch
+> unsupported schema drift, handle duplicate service install, and uninstall
+> service state without deleting user data.
+
+Run this before claiming release readiness:
+
+```sh
+cargo build --release -p arcwell
+scripts/release-readiness-smoke
+scripts/service-live-smoke --no-live
+scripts/verify-codex-plugin-docs
+```
+
+On a macOS machine where no real `com.arcwell.worker` user service is already
+loaded, also run:
+
+```sh
+scripts/service-live-smoke --live
+```
+
+For Codex plugin/dev-loop packaging changes, also run:
+
+```sh
+scripts/arcwell-dev smoke
+scripts/arcwell-dev sync
+```
+
+`scripts/release-readiness-smoke` uses disposable install, `HOME`, and
+`ARCWELL_HOME` paths containing spaces and shell/XML-hostile characters. It
+checks:
+
+- release candidate binary starts from a staged package prefix;
+- stable plugin `.mcp.json` runs `arcwell mcp`;
+- stable plugin hooks call `arcwell` and do not reference `cargo`,
+  `target/debug`, `.arcwell-dev`, or `arcwell-dev`;
+- a stale `arcwell` earlier on `PATH` is actually detected, then corrected by
+  placing the package prefix first;
+- interrupted upgrade simulation leaves the existing binary hash unchanged;
+- backup create, backup verify, backup restore, and profile readback work from
+  temporary homes;
+- `doctor --strict` rejects an old/unsupported schema version;
+- duplicate `service install --no-load` does not create duplicate plist files;
+- `service uninstall --no-unload` is idempotent and preserves unrelated
+  `ARCWELL_HOME` data;
+- a bad log path and an unwritable home fail explicitly.
+
+Publication blockers:
+
+- No Homebrew tap/formula exists in this repository yet.
+- No GitHub Actions release workflow creates signed or checksummed archives.
+- No install script downloads a release archive and verifies its checksum.
+- Linux systemd user-service behavior is not implemented or live-smoked.
+- Fresh-thread Codex app command/hook smoke is still not recorded.
+
+Ready inputs for a Homebrew formula once a tap exists:
+
+- package name: `arcwell`;
+- current version: use the workspace package version in `Cargo.toml`;
+- build command: `cargo build --release -p arcwell`;
+- installed file: `target/release/arcwell` into `bin`;
+- formula test: run `arcwell --help`, then use a temporary `ARCWELL_HOME` to
+  run `profile set`, `backup create`, and `backup verify`;
+- post-install guidance: run `arcwell service install` on macOS only when the
+  user wants the worker LaunchAgent.
+
+Ready inputs for GitHub Releases once CI exists:
+
+- archives per supported target, each containing `arcwell`, `LICENSE`, and
+  install notes;
+- SHA-256 checksums for every archive;
+- release notes naming schema version, backup expectations, service restart
+  steps, plugin reload expectations, and known blockers;
+- smoke evidence from `scripts/release-readiness-smoke` and platform-specific
+  service smokes.
+
 ## Codex Plugin
 
 Codex should receive `arcwell` as a plugin, not a pile of loose manual setup.
@@ -172,6 +321,50 @@ codex plugin add arcwell-codex@arcwell-local
 
 After install, start a new Codex thread so skills and MCP tools are loaded.
 
+## Codex Plugin Live Development
+
+Use the generated development plugin while editing Arcwell from inside Codex:
+
+```sh
+scripts/arcwell-dev install
+```
+
+This creates `.arcwell-dev/plugins/arcwell-codex-dev` from the stable plugin,
+creates `.arcwell-dev/bin/arcwell-dev`, builds `target/debug/arcwell`, and
+installs `arcwell-codex-dev@arcwell-local` through the repo marketplace.
+
+Normal inner loop:
+
+```sh
+scripts/arcwell-dev sync
+```
+
+Continuous loop:
+
+```sh
+scripts/arcwell-dev watch
+```
+
+Smoke check:
+
+```sh
+scripts/arcwell-dev smoke
+```
+
+Reload expectations:
+
+- Rust/CLI behavior changes apply after rebuild.
+- MCP implementation changes apply after Codex reconnects the MCP server; a new
+  thread is the reliable path.
+- Skill text can usually be reloaded with **Cmd+K -> Force Reload Skills**.
+- New or removed slash commands, tools, schemas, hooks, and plugin manifest
+  changes should be tested in a new Codex thread.
+
+The generated `.arcwell-dev` directory is intentionally gitignored. The stable
+plugin remains `plugins/arcwell-codex`; the dev plugin is a generated local
+copy with a different plugin name and an MCP command pointed at the local debug
+binary wrapper.
+
 The complete slash-command and `$skill` catalog is in [codex-plugin-commands.md](codex-plugin-commands.md).
 
 ## Codex MCP Config
@@ -195,6 +388,41 @@ The plugin MCP config should be:
 ```
 
 For development only, `hosts/codex/mcp.json` may still point at `cargo run`. The packaged plugin should never do that.
+
+## Claude MCP Config
+
+Claude Desktop and Claude Code should use the same installed binary shape as
+the packaged Codex plugin:
+
+```json
+{
+  "mcpServers": {
+    "arcwell": {
+      "type": "stdio",
+      "command": "arcwell",
+      "args": ["mcp"],
+      "env": {
+        "ARCWELL_HOME": "/Users/chabotc/.arcwell"
+      }
+    }
+  }
+}
+```
+
+If a GUI host cannot find `arcwell`, replace the command with the absolute path
+returned by `which arcwell`. The development checkout can be inspected with:
+
+```sh
+cargo build -p arcwell
+ARCWELL_HOME="$(mktemp -d)" npx -y @modelcontextprotocol/inspector \
+  /Users/chabotc/Projects/arcwell/target/debug/arcwell mcp
+scripts/claude-mcp-smoke
+```
+
+`scripts/claude-mcp-smoke` is the repeatable local validation for Claude-shaped
+stdio behavior. It does not claim that an authenticated Claude Desktop/Code UI
+session has loaded Arcwell; use `scripts/claude-mcp-smoke --require-host-config`
+plus a real Claude Desktop/Code session for that host-level proof.
 
 ## Skills Versus Services
 
@@ -247,11 +475,20 @@ Minimum service reliability:
 - `arcwell doctor` reports health and warnings
 - `arcwell ops` or `arcwell://ops` reports jobs, cursors, dead letters, and watch source counts
 
+Implemented reliability checks:
+
+- `arcwell service status` inspects macOS launchd and recent heartbeat state.
+- `arcwell service logs` reports explicit per-stream read status.
+- `arcwell doctor --strict` fails nonzero on missing service plist, corrupt
+  service metadata, missing binary, stale worker heartbeat, excessive dead
+  letters, stale or unverifiable backups, schema drift, and missing required
+  directories.
+- The worker writes a heartbeat row in SQLite.
+
 Future reliability upgrades:
 
-- `arcwell service status` should inspect launchd/systemd and recent logs
-- `arcwell doctor --strict` should fail nonzero on missing service, stale worker heartbeat, or excessive dead letters
-- worker heartbeat row in SQLite
+- Implement the same status/restart/log/uninstall contract for Linux systemd
+  user services after a Linux user-service runner is available.
 - backpressure limits per adapter kind
 - per-source health table
 
@@ -271,13 +508,45 @@ Cloudflare secrets remain in Wrangler/Cloudflare, not local SQLite.
 Upgrades should be boring:
 
 ```sh
+arcwell backup create
 brew upgrade arcwell
-arcwell migrate
-arcwell doctor
-launchctl kickstart -k gui/$UID/com.chrischabot.arcwell.worker
+arcwell backup verify
+arcwell doctor --strict
+arcwell service restart
 ```
 
-The binary should preserve backward-compatible SQLite migrations. Destructive migrations must require an explicit backup.
+The binary should preserve backward-compatible SQLite migrations. Destructive
+migrations must require an explicit backup, a migration command or restore
+drill, and a release note that names the old/new schema versions.
+
+Package installers should replace the binary atomically:
+
+1. download or build the new candidate into a staging file;
+2. verify checksum or local build provenance;
+3. move the staging file over the installed `arcwell` only after it is complete;
+4. run `arcwell --help`, `arcwell backup verify`, and `arcwell doctor --strict`;
+5. restart the worker service if installed.
+
+Rollback expectations:
+
+- restore the previous package version through the package manager when
+  possible;
+- if a migration changed durable data, restore a backup into a fresh
+  `ARCWELL_HOME` first instead of guessing;
+- keep the stable Codex plugin unchanged as long as it still invokes
+  `arcwell` on `PATH`;
+- after rollback, run `arcwell doctor --strict` and restart the worker service.
+
+Uninstall expectations:
+
+```sh
+arcwell service uninstall
+codex plugin remove arcwell-codex@arcwell-local  # when installed through Codex
+```
+
+Then remove the packaged binary through the package manager. Do not delete
+`~/.arcwell` by default. If the user explicitly requests data removal, create
+or verify a backup first and then remove `ARCWELL_HOME` as a separate action.
 
 ## Roadmap
 

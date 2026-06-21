@@ -2,6 +2,8 @@
 
 **Status:** Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Consentful conversation history import.
 
 Current implementation:

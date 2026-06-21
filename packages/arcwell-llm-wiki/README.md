@@ -2,6 +2,8 @@
 
 **Status:** Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Local source-backed Markdown wiki.
 
 Current implementation:

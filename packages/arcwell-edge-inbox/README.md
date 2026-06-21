@@ -2,6 +2,8 @@
 
 **Status:** Partial/Risk. Local worker code, severe tests, deploy, remote D1 reachability, and authenticated deployed ingress/drain smoke pass against `https://arcwell-edge-inbox.chabotc.workers.dev`. The live smoke proves current/next secret rotation, D1 persistence, duplicate idempotency, lease expiry/retry, ack/nack behavior, local Rust drain sync, local-persistence-failure nack without ack, and source rate limiting.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Cloudflare edge inbox package for short-lived always-on event capture.
 
 Purpose:

@@ -3,6 +3,8 @@
 **Status:** Partial/Risk. Local drain/send/auth behavior exists in code and
 tests; real Telegram bot/webhook behavior is still unproven.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Telegram channel package.
 
 Current implementation:

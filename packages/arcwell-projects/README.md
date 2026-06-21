@@ -3,6 +3,8 @@
 **Status:** Partial. Manual/local project state, evidence-backed work-run
 consolidation, and an explicit verified host-sync protocol exist. Live Codex/Claude thread inventory is missing because Codex and Claude host inventory/read adapters are not connected.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Project and thread meta-controller package.
 
 Current first-pass implementation:

@@ -456,9 +456,11 @@ Current blocker:
 
 Status: local adversarial mapper fixtures, edge Email Routing enqueue tests,
 Rust poll/drain/send tests, deployed Worker redeploy, active dashboard route
-confirmation, and empty-queue local poll pass. A real author-originated message
-through Cloudflare Email Routing and provider-side outbound delivery are not
-yet proven.
+confirmation, empty-queue local poll, controlled author-originated live ingress,
+and Cloudflare Email Service outbound smoke pass. Real local agent/author
+addresses were used only in ignored local config and are intentionally redacted
+from tracked docs; examples below use `agent@example.com` and
+`user@example.com`.
 
 Local package smoke:
 
@@ -511,42 +513,65 @@ rule step requires a Cloudflare API token with Email Routing permissions.
 Tracked docs and examples must keep only `agent@example.com` and
 `user@example.com`.
 
-Current route setup note:
+Route setup and live proof notes:
 
 - A dashboard-created live route now sends the locally configured agent address
   to `arcwell-edge-inbox`.
 - `arcwell email poll` against the deployed Worker succeeds on an empty queue.
-- This proves route configuration and drain authentication, not message
-  delivery.
+- A controlled message from the locally configured author address to the locally
+  configured agent address was delivered through Cloudflare Email Routing,
+  enqueued as one `email` edge event, polled through `arcwell email poll`, and
+  drained into one trusted local email channel/source-card record.
+- A Cloudflare Email Service outbound smoke sent a controlled message after
+  recipient authorization.
 
-Live smoke:
+Manual live ingress smoke, using local-only real values in the environment and
+tracked placeholders in docs:
 
 ```sh
 ARCWELL_EDGE_URL="https://<worker-host>" \
 ARCWELL_EDGE_SECRET="..." \
-ARCWELL_EMAIL_LIVE_CONFIRM=disposable \
-scripts/email-live-smoke
+ARCWELL_EMAIL_ROUTE_RECIPIENT=agent@example.com \
+ARCWELL_AUTHOR_EMAILS=user@example.com \
+ARCWELL_AGENT_EMAIL_FROM=agent@example.com \
+arcwell email poll
 ```
 
-Expected result for that future smoke:
+Manual outbound smoke:
 
-- A disposable test address receives one controlled message through Cloudflare
-  Email Routing.
+```sh
+arcwell email authorize user@example.com --send
+ARCWELL_AGENT_EMAIL_FROM=agent@example.com \
+arcwell email send user@example.com \
+  "Arcwell email smoke" \
+  "Controlled outbound smoke" \
+  --from agent@example.com
+```
+
+Expected and recorded result for the completed smoke:
+
+- A controlled author-originated message reached the configured route through
+  Cloudflare Email Routing.
 - The worker enqueues one `email` edge event with a `Message-ID` idempotency
   key and sanitized metadata.
 - `arcwell email poll` persists the edge event locally.
 - The email drain path records exactly one channel message and optional source
   card for an authorized sender/route.
+- The trusted-author path is based on envelope/authenticated sender metadata,
+  not display `From:`.
+- Outbound delivery uses Cloudflare Email Service after recipient authorization
+  and records a provider delivery attempt without printing provider tokens.
 - Re-sending or replaying the same `Message-ID` does not create duplicates.
 - Spoofed `From:`, failed DMARC, unauthorized sender, oversized body,
   attachment bomb, tracking-link, and auto-responder fixtures fail closed.
 
 Current blockers:
 
-- No controlled author-originated live message has been sent through the
-  configured route and drained into a trusted local channel/source-card record.
-- No provider-side live outbound send/reply smoke has been recorded.
+- The live proof is manual; there is no committed `scripts/email-live-smoke`
+  replay harness yet.
 - No librarian digest scheduler has been wired to email delivery yet.
+- No production monitoring/alerting exists for Email Routing or Cloudflare
+  Email Service delivery health.
 
 ## Codex Memory Hook Smoke
 

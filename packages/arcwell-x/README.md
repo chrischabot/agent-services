@@ -2,6 +2,8 @@
 
 **Status:** Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 X import, OAuth, cursor, and reporting package.
 
 Current implementation:

@@ -2,6 +2,8 @@
 
 **Status:** Scaffold/Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Wiki librarian and interestingness package.
 
 Current first-pass implementation:

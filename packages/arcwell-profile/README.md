@@ -2,6 +2,8 @@
 
 **Status:** Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Inspectable personal operating profile.
 
 Current implementation lives in the shared Rust CLI:

@@ -24,7 +24,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 pub const APP_NAME: &str = "arcwell";
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const SOURCE_CARD_SCHEMA_VERSION: u64 = 1;
 const MAX_COST_USD: f64 = 1_000_000.0;
 const SOURCE_CARD_STALE_DAYS: i64 = 180;
@@ -1564,6 +1564,14 @@ impl Store {
             VALUES ('schema_version', '1')
             ON CONFLICT(key) DO NOTHING;
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              destructive INTEGER NOT NULL DEFAULT 0,
+              backup_id TEXT,
+              applied_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS profile_items (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL,
@@ -2344,6 +2352,60 @@ impl Store {
             "ALTER TABLE project_status_snapshots ADD COLUMN stale_after_seconds INTEGER",
         )?;
         self.ensure_wiki_search_index()?;
+        self.apply_schema_migration(1, "initial_core_schema", false, None, |_| Ok(()))?;
+        self.apply_schema_migration(
+            2,
+            "compatibility_columns_deep_research_and_x_provenance",
+            false,
+            None,
+            |_| Ok(()),
+        )?;
+        self.conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn apply_schema_migration<F>(
+        &self,
+        version: i64,
+        name: &str,
+        destructive: bool,
+        backup_id: Option<&str>,
+        apply: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Connection) -> Result<()>,
+    {
+        if destructive && backup_id.is_none() {
+            bail!("destructive migration {version} ({name}) requires a verified backup id");
+        }
+        let already_applied: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = ?1",
+                params![version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if already_applied.is_some() {
+            return Ok(());
+        }
+        apply(&self.conn)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO schema_migrations (version, name, destructive, backup_id, applied_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                version,
+                name,
+                if destructive { 1 } else { 0 },
+                backup_id,
+                now()
+            ],
+        )?;
         Ok(())
     }
 
@@ -5615,6 +5677,9 @@ impl Store {
             )?;
             None
         };
+        if status == "completed" {
+            self.complete_pending_research_tasks_for_report(run_id)?;
+        }
         let report = ResearchReport {
             id: research_report_id(run_id),
             run_id: run_id.to_string(),
@@ -5626,6 +5691,20 @@ impl Store {
         };
         self.insert_research_report(&report)?;
         Ok(report)
+    }
+
+    fn complete_pending_research_tasks_for_report(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE research_tasks
+            SET status = 'completed',
+                notes = COALESCE(notes, 'Completed by research_report_compile.'),
+                updated_at = ?2
+            WHERE run_id = ?1 AND status = 'pending'
+            "#,
+            params![run_id, now()],
+        )?;
+        Ok(())
     }
 
     fn insert_research_report(&self, report: &ResearchReport) -> Result<()> {
@@ -16482,9 +16561,11 @@ fn is_generated_source_card(card: &SourceCard) -> bool {
 fn is_generated_title(title: &str) -> bool {
     let normalized = title.trim_start().to_ascii_lowercase();
     normalized.starts_with("research brief:")
+        || normalized.starts_with("deep research report:")
         || normalized.starts_with("expanded:")
         || normalized.starts_with("source card:")
         || normalized.starts_with("source card: research brief:")
+        || normalized.starts_with("source card: deep research report:")
         || normalized.starts_with("source card: expanded:")
 }
 
@@ -19308,6 +19389,140 @@ mod tests {
     fn test_store(name: &str) -> Store {
         let root = std::env::temp_dir().join(format!("arcwell-test-{name}-{}", Uuid::new_v4()));
         Store::open(AppPaths::new(root)).unwrap()
+    }
+
+    fn test_paths(name: &str) -> AppPaths {
+        let root = std::env::temp_dir().join(format!("arcwell-test-{name}-{}", Uuid::new_v4()));
+        AppPaths::new(root)
+    }
+
+    #[test]
+    fn severe_schema_migration_records_versions_and_preserves_fixture_rows() {
+        // CLAIM: opening a pre-ledger v1 database records explicit numbered migrations,
+        // upgrades schema_version, adds compatibility columns, and preserves durable rows.
+        // ORACLE: a hand-built v1 fixture that lacks newer columns must still contain
+        // its original x item after Store::open migrates it.
+        // SEVERITY: Severe because silent schema drift can corrupt local durable truth.
+        let paths = test_paths("schema-fixture-v1");
+        paths.ensure().unwrap();
+        let conn = Connection::open(&paths.db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            CREATE TABLE x_items (
+              id TEXT PRIMARY KEY,
+              x_id TEXT NOT NULL UNIQUE,
+              author TEXT NOT NULL,
+              text TEXT NOT NULL,
+              url TEXT NOT NULL,
+              created_at TEXT,
+              imported_at TEXT NOT NULL,
+              source_card_id TEXT,
+              wiki_page_id TEXT
+            );
+            INSERT INTO x_items
+              (id, x_id, author, text, url, created_at, imported_at, source_card_id, wiki_page_id)
+            VALUES
+              ('fixture', '123', '@source', 'fixture body', 'https://x.com/source/status/123', NULL, '2026-01-01T00:00:00Z', NULL, NULL);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(paths).unwrap();
+        assert_eq!(store.stored_schema_version().unwrap(), SCHEMA_VERSION);
+
+        let migrated_text: String = store
+            .conn
+            .query_row("SELECT text FROM x_items WHERE x_id = '123'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(migrated_text, "fixture body");
+
+        let new_columns = ["retrieved_at", "metrics_json", "raw_json"];
+        let mut stmt = store.conn.prepare("PRAGMA table_info(x_items)").unwrap();
+        let columns = rows(stmt.query_map([], |row| row.get::<_, String>(1)).unwrap()).unwrap();
+        for column in new_columns {
+            assert!(
+                columns.iter().any(|existing| existing == column),
+                "missing migrated x_items column {column}"
+            );
+        }
+
+        let migration_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(migration_count >= 2);
+        let schema_names: Vec<String> = {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT name FROM schema_migrations ORDER BY version ASC")
+                .unwrap();
+            rows(stmt.query_map([], |row| row.get::<_, String>(0)).unwrap()).unwrap()
+        };
+        assert!(
+            schema_names
+                .iter()
+                .any(|name| name == "initial_core_schema")
+        );
+        assert!(
+            schema_names
+                .iter()
+                .any(|name| name == "compatibility_columns_deep_research_and_x_provenance")
+        );
+    }
+
+    #[test]
+    fn severe_destructive_schema_migration_requires_verified_backup_id() {
+        // CLAIM: destructive migrations cannot run unless the caller supplies a
+        // verified backup id, and the migration body is not executed on refusal.
+        // ORACLE: a refused migration must leave no side-effect table; the same
+        // migration with a backup id records destructive=1 and applies once.
+        // SEVERITY: Severe because destructive local migrations can otherwise erase
+        // user-owned durable assistant state.
+        let store = test_store("destructive-migration-guard");
+        let refused = store.apply_schema_migration(999, "drop_old_truth", true, None, |conn| {
+            conn.execute("CREATE TABLE destructive_side_effect (id TEXT)", [])?;
+            Ok(())
+        });
+        assert!(refused.is_err());
+        let side_effect_exists: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'destructive_side_effect'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(side_effect_exists.is_none());
+
+        store
+            .apply_schema_migration(
+                999,
+                "drop_old_truth",
+                true,
+                Some("backup-fixture"),
+                |conn| {
+                    conn.execute("CREATE TABLE destructive_side_effect (id TEXT)", [])?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let recorded: (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT destructive, backup_id FROM schema_migrations WHERE version = 999",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recorded, (1, "backup-fixture".to_string()));
     }
 
     fn write_policy(store: &Store, body: &str) {
@@ -26251,6 +26466,10 @@ ARXIV=( "cat:cs.AI" )
         let run = store.research_run_status(&workflow.run.id).unwrap();
         assert_eq!(run.run.status, "completed");
         assert_eq!(run.run.result_page_id, report.wiki_page_id);
+        assert_eq!(run.pending_task_count, 0);
+        assert_eq!(run.completed_task_count, 7);
+        let audit_after_report = store.audit_research_run(&workflow.run.id).unwrap();
+        assert_eq!(audit_after_report.audit.local_source_count, 0);
     }
 
     #[test]

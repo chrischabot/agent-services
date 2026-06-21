@@ -1022,7 +1022,7 @@ Adversarial/severe gate:
 
 - [x] Add status badges to README package section.
 - [x] Add status badge to every package README.
-- [ ] Link each package README to `STATUS.md` and `TODO.md`.
+- [x] Link each package README to `STATUS.md` and `TODO.md`.
 - [x] Remove or qualify product prose that says "watches", "tracks", or
       "Telegram" where the capability is still partial.
 - [x] Add "known missing" sections where needed.
@@ -1133,9 +1133,9 @@ Adversarial/severe gate:
 - [x] Create live Cloudflare Email Routing rule to the Arcwell edge Worker for
       the locally configured agent address without committing real addresses.
 - [x] Run empty-queue local poll against the deployed Worker after route setup.
-- [ ] Run controlled author-originated live ingress smoke and prove one trusted
+- [x] Run controlled author-originated live ingress smoke and prove one trusted
       local channel/source-card record.
-- [ ] Run provider-side outbound email delivery smoke.
+- [x] Run provider-side outbound email delivery smoke.
 
 Description:
 Email is part of the desired proactive assistant loop. The current slice is a
@@ -1148,8 +1148,13 @@ selected-thread work. Tracked defaults stay as `agent@example.com` and
 `user@example.com`; real agent/author addresses belong in ignored local config
 or secrets. A dashboard-created live Email Routing rule now targets the Arcwell
 edge Worker for the locally configured agent address, and local poll against
-the deployed Worker succeeds on an empty queue. An actual author-originated
-message and provider-side outbound delivery are not yet proven.
+the deployed Worker succeeds on an empty queue. A controlled author-originated
+live message was routed through Cloudflare Email Routing, polled from the
+deployed edge inbox, and drained into one trusted local email
+channel/source-card record. Cloudflare Email Service outbound delivery was also
+smoke-tested through `arcwell email send` after recipient authorization. The
+live proof used local-only real addresses and secrets; tracked docs
+intentionally retain only placeholders.
 
 How to test:
 - Package-local severe fixtures:
@@ -1164,15 +1169,19 @@ How to test:
 - Setup script dry/safe gate:
   `scripts/setup-email-route` must refuse without
   `ARCWELL_EMAIL_SETUP_CONFIRM=configure`.
-- Live smoke with a controlled message from the configured author address to
-  the configured narrow agent address, followed by `arcwell email poll`.
+- Manual live smoke with a controlled message from the configured author
+  address to the configured narrow agent address, followed by
+  `arcwell email poll`.
+- Manual outbound smoke after recipient authorization:
+  `arcwell email authorize user@example.com --send` and
+  `arcwell email send user@example.com "Arcwell email smoke" "Controlled outbound smoke" --from agent@example.com`.
 
 Success looks like:
 - Normalized important inbound email metadata can become a safe event/source
   card/channel message draft without treating email body as instructions.
-- The docs make clear that local email ingestion/send paths exist, while live
-  Cloudflare message delivery and live provider delivery remain unclaimed until
-  smoked.
+- The docs make clear that local email ingestion/send paths exist, while the
+  completed live Cloudflare ingress and provider outbound smoke are bounded
+  manual proofs, not a long-running scheduler or production monitoring claim.
 
 Adversarial/severe gate:
 - Local fixtures test spoofed From, malicious HTML, attachment bombs, tracking
@@ -1180,19 +1189,23 @@ Adversarial/severe gate:
   auto-responder loops, and unauthorized routing.
 - Worker tests prove MIME normalization, duplicate idempotency, route/sender
   rejection, raw-size rejection, and durable edge enqueue.
+- Leak-scan tracked docs so real local-only email addresses never replace
+  `agent@example.com` and `user@example.com`.
 
 ## Cross-Cutting Required Work
 
 ### 24. Schema And Migration Discipline
 
-- [ ] Add explicit migration table with numbered migrations.
-- [ ] Add migration tests from fixture DBs.
-- [ ] Require backup before destructive migrations.
+- [x] Add explicit migration table with numbered migrations.
+- [x] Add migration tests from fixture DBs.
+- [x] Require backup before destructive migrations.
 - [x] Add schema drift check in doctor.
 
 How to test:
 - Fixture DB from schema version 1 migrates cleanly.
 - Corrupt/unknown future schema fails safely.
+- Destructive migration helper refuses to run without a verified backup id and
+  leaves no side effects on refusal.
 
 Success looks like:
 - Upgrades are boring and reversible enough to trust.

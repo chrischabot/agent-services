@@ -7,6 +7,8 @@ Wrangler state, node modules, private seed SQL, and live-remote severe scripts.
 Deploy config contains placeholder D1/KV ids and must be provisioned before a
 new Arcwell-owned deployment is claimed live.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Garderobe is a single-user wardrobe inventory and outfit-planning MCP server
 backed by Cloudflare Workers, D1, KV, Durable Objects, and the Agents SDK.
 

@@ -6,8 +6,11 @@ inbox Worker now has a bounded Cloudflare Email Routing handler that normalizes
 raw MIME into durable `email` edge events under configured route/sender policy.
 The Rust core can poll the edge inbox, drain those events into local email
 channel messages/source cards, and send/reply through Cloudflare Email Service
-with rich HTML after recipient authorization. It does not yet have a proven
-live Cloudflare Email Routing rule or live provider-side outbound smoke.
+with rich HTML after recipient authorization. Controlled live smoke has proven
+one author-originated Cloudflare Email Routing ingress and one Cloudflare Email
+Service outbound send with real addresses kept only in ignored local config.
+
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
 
 Email channel and ingestion package.
 
@@ -123,6 +126,12 @@ That command uses `ARCWELL_EDGE_URL`/`ARCWELL_EDGE_SECRET` or matching Arcwell
 secrets, leases remote edge events, and then runs the local email drain. Use
 tracked examples only with `agent@example.com` and `user@example.com`; real
 addresses belong in ignored local config.
+
+The 2026-06-21 manual live smoke used local-only real addresses to prove the
+configured author-to-agent route, then scrubbed tracked documentation back to
+`agent@example.com` and `user@example.com`. The remaining live gap is
+repeatability and operations: no committed replay script, scheduler/digest
+delivery, or production monitoring is claimed yet.
 
 ## Local Severe Tests
 

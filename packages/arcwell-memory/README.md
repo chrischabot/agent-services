@@ -2,6 +2,8 @@
 
 **Status:** Partial.
 
+Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
+
 Personal memory service.
 
 Current implementation has two paths:

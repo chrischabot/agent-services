@@ -1,7 +1,10 @@
 # arcwell-telegram
 
 **Status:** Partial/Risk. Local drain/send/auth behavior exists in code and
-tests; real Telegram bot/webhook behavior is still unproven.
+tests. Deployed Arcwell webhook auth, D1 persistence, remote drain, and local
+recording have been proved with a signed synthetic Telegram-shaped update; a
+fresh real Telegram client-message delivery still needs exact live proof. In
+short, real Telegram bot/webhook behavior is still unproven.
 
 Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
 
@@ -25,7 +28,7 @@ Current implementation:
 - Local `arcwell telegram deliveries [--message-id <id>]` lists persisted delivery attempts.
 - MCP tools `telegram_drain_edge_events` and `telegram_send_message` expose the same behavior to agents.
 - Project-aware routing can bind an explicit `projectId` in payloads only for authorized subjects. Authorized chats can also auto-bind a Telegram message to a uniquely resolved project from the message text. Ambiguous or missing matches remain unbound.
-- `scripts/telegram-live-smoke` runs local authorization checks in a preserved smoke home and, when live credentials are supplied, sets the Telegram webhook, sends a safe outgoing reply, drains Cloudflare edge events locally, and asserts the exact incoming message is recorded exactly once. Failure artifacts and mismatch/duplicate diagnostics are kept under the smoke home.
+- `scripts/telegram-live-smoke` runs local authorization checks in a preserved smoke home and, when live credentials are supplied, sets the Telegram webhook, sends a safe outgoing reply, drains Cloudflare edge events locally, and asserts the exact incoming message is recorded exactly once. The smoke derives the webhook URL from `ARCWELL_EDGE_URL`; use `ARCWELL_TELEGRAM_WEBHOOK_URL` only for an intentional Arcwell-specific override. Failure artifacts and mismatch/duplicate diagnostics are kept under the smoke home.
 
 Channel safety rules:
 

@@ -24,7 +24,7 @@ ARTIFACT_DIR="${ARCWELL_SMOKE_ARTIFACT_DIR:-$ARCWELL_HOME/artifacts/$RUN_ID}"
 mkdir -p "$ARTIFACT_DIR"
 tmp="$ARTIFACT_DIR"
 
-CHAT_ID="${TELEGRAM_TEST_CHAT_ID:-123456789}"
+CHAT_ID="${TELEGRAM_TEST_CHAT_ID:-${TELEGRAM_OWNER_CHAT_ID:-123456789}}"
 LOCAL_CHAT_ID="${TELEGRAM_LOCAL_SMOKE_CHAT_ID:-local-$RUN_ID}"
 OUTGOING_TEXT="Arcwell Telegram outgoing smoke $RUN_ID"
 INCOMING_TEXT="${TELEGRAM_SMOKE_EXPECT_TEXT:-Arcwell Telegram incoming smoke $RUN_ID}"
@@ -133,11 +133,14 @@ fi
 echo "Local authorization smoke passed."
 
 missing=()
-for name in TELEGRAM_BOT_TOKEN TELEGRAM_TEST_CHAT_ID TELEGRAM_WEBHOOK_SECRET ARCWELL_EDGE_SECRET ARCWELL_EDGE_URL; do
+for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ARCWELL_EDGE_SECRET ARCWELL_EDGE_URL; do
   if [ -z "${!name:-}" ]; then
     missing+=("$name")
   fi
 done
+if [ -z "${TELEGRAM_TEST_CHAT_ID:-${TELEGRAM_OWNER_CHAT_ID:-}}" ]; then
+  missing+=("TELEGRAM_TEST_CHAT_ID or TELEGRAM_OWNER_CHAT_ID")
+fi
 
 if [ "${ARCWELL_TELEGRAM_LIVE_CONFIRM:-}" != "disposable" ]; then
   missing+=("ARCWELL_TELEGRAM_LIVE_CONFIRM=disposable")
@@ -149,7 +152,10 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 2
 fi
 
-WEBHOOK_URL="${TELEGRAM_WEBHOOK_URL:-${ARCWELL_EDGE_URL%/}/telegram/webhook}"
+if [ -n "${TELEGRAM_WEBHOOK_URL:-}" ] && [ -z "${ARCWELL_TELEGRAM_WEBHOOK_URL:-}" ]; then
+  echo "WARN: ignoring TELEGRAM_WEBHOOK_URL for Arcwell live smoke; use ARCWELL_TELEGRAM_WEBHOOK_URL to override intentionally." >&2
+fi
+WEBHOOK_URL="${ARCWELL_TELEGRAM_WEBHOOK_URL:-${ARCWELL_EDGE_URL%/}/telegram/webhook}"
 
 echo "Checking Telegram bot token with getMe."
 node - "$tmp/get-me.json" <<'NODE'
@@ -217,13 +223,13 @@ request.write(body);
 request.end();
 NODE
 
-"$ARCWELL_BIN" telegram authorize "telegram:chat:$TELEGRAM_TEST_CHAT_ID" \
+"$ARCWELL_BIN" telegram authorize "telegram:chat:$CHAT_ID" \
   --read-projects \
   --write-projects \
   --send >"$tmp/live-auth.json"
 
 echo "Sending outgoing Telegram smoke message."
-"$ARCWELL_BIN" telegram send "$TELEGRAM_TEST_CHAT_ID" "$OUTGOING_TEXT" \
+"$ARCWELL_BIN" telegram send "$CHAT_ID" "$OUTGOING_TEXT" \
   --bot-token "$TELEGRAM_BOT_TOKEN" >"$tmp/live-send.json"
 node - "$tmp/live-send.json" <<'NODE'
 const fs = require("fs");
@@ -293,5 +299,5 @@ if [ "$diagnostic_status" -ne 0 ]; then
   exit 1
 fi
 
-echo "PASS: real Telegram webhook drained exactly once and outgoing delivery was recorded."
+echo "PASS: Telegram webhook drained exactly once and outgoing delivery was recorded."
 echo "Artifacts preserved at: $ARTIFACT_DIR"

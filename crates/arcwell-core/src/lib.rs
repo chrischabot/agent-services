@@ -703,6 +703,7 @@ pub struct WorkerRunReport {
     pub failed: usize,
     pub dead_lettered: usize,
     pub jobs: Vec<WikiJob>,
+    pub watch_poll: Option<WatchSourcePollEnqueueReport>,
     pub telegram_retry: Option<TelegramRetryReport>,
     pub warnings: Vec<String>,
 }
@@ -6489,6 +6490,12 @@ impl Store {
 
     pub fn run_worker_once(&self, max_jobs: usize) -> Result<WorkerRunReport> {
         let max_jobs = max_jobs.clamp(1, 100);
+        let watch_poll = self.enqueue_due_watch_source_jobs(max_jobs)?;
+        let watch_poll = if watch_poll.inspected > 0 {
+            Some(watch_poll)
+        } else {
+            None
+        };
         let mut jobs = Vec::new();
         for _ in 0..max_jobs {
             let Some(job) = self.claim_next_pending_job()? else {
@@ -6510,6 +6517,7 @@ impl Store {
             failed,
             dead_lettered,
             jobs,
+            watch_poll,
             telegram_retry,
             warnings,
         })
@@ -25412,6 +25420,63 @@ ARXIV=( "cat:cs.AI" )
             jobs[0].input_json.get("url").and_then(Value::as_str),
             Some("https://example.com/feed.xml")
         );
+    }
+
+    #[test]
+    fn severe_resident_worker_polls_due_watch_sources_before_network_execution() {
+        // CLAIM: The resident worker path enqueues due watch-source jobs itself
+        // and still applies provider policy before any network execution.
+        // ORACLE: run_worker_once reports a watch poll, creates/processes one job,
+        // fails it with policy denial, and writes no source cards.
+        // SEVERITY: Severe because a worker that only drains pre-existing jobs is
+        // not a resident poller, and stale policy must stop newly scheduled jobs.
+        let store = test_store("resident-worker-watch-poll");
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "enqueue is allowed for resident poll test"
+
+[[rules]]
+id = "deny-url-ingest"
+effect = "deny"
+action = "provider.network"
+provider = "web"
+source = "url_ingest"
+reason = "network blocked for resident poll test"
+"#,
+        );
+        store
+            .upsert_watch_source(WatchSourceInput {
+                source_kind: "blog".to_string(),
+                locator: "https://example.com/agent-blog".to_string(),
+                label: "Agent Blog".to_string(),
+                cadence: "hot".to_string(),
+                status: "active".to_string(),
+                metadata: Value::Null,
+            })
+            .unwrap();
+
+        let report = store.run_worker_once(1).unwrap();
+        let watch_poll = report.watch_poll.expect("worker should poll watch sources");
+        assert_eq!(watch_poll.inspected, 1);
+        assert_eq!(watch_poll.enqueued, 1);
+        assert_eq!(report.processed, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.jobs[0].kind, "ingest_url");
+        assert!(
+            report.jobs[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("policy denied provider.network"),
+            "{:?}",
+            report.jobs[0]
+        );
+        assert!(store.list_source_cards().unwrap().is_empty());
     }
 
     #[test]

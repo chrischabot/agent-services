@@ -230,7 +230,7 @@ Adversarial/severe gate:
 - [x] Add a repeatable `scripts/telegram-live-smoke` runner for preserved-home
       local authorization checks and optional live Telegram/edge proof.
 - [ ] Live-smoke real Telegram webhook -> Cloudflare -> local drain ->
-      `channel_messages`.
+      `channel_messages` from a fresh real Telegram client message.
 - [x] Live-smoke real outgoing Telegram send and delivery attempt recording.
 - [x] Add automatic worker-driven retry for due Telegram deliveries.
 - [ ] Add safe follow-up context carryover for authorized Telegram chats.
@@ -244,9 +244,11 @@ helpers, retryable transport-error classification, authorization, conservative
 project binding, and a repeatable preserved-home live-smoke script. The live
 smoke previously proved Telegram `getMe`, webhook setup to the Arcwell edge
 worker, outgoing provider send, and one real Telegram webhook reaching the edge.
-It is not product-complete until the user sends the exact printed phrase and
-the script records exactly one matching local `channel_messages` row after a
-second drain.
+This audit also proved the deployed Arcwell webhook-secret auth, D1 persistence,
+remote drain, and local `telegram drain` path with a signed synthetic
+Telegram-shaped update. It is not product-complete until the user sends the
+exact printed phrase, or another fresh real client message, and the script
+records exactly one matching local `channel_messages` row after a second drain.
 
 How to test:
 - Unit-test Telegram update parsing for text, edited message, missing fields,
@@ -833,15 +835,16 @@ Adversarial/severe gate:
 - [x] Add source health in ops snapshot.
 - [x] Add source health UI.
 - [x] Add scheduled polling enqueue hooks.
-- [ ] Add full resident scheduled polling through worker service.
+- [x] Add full resident scheduled polling through worker service.
 
 Description:
 Adapters now update source cards with canonical duplicate suppression, expose
 SQLite source-health records, and advance cursor/source-success state only after
 durable writes complete. Rate-limit/quota errors are classified as
-`rate_limited` with longer backoff, and due active watch sources can be enqueued
-while respecting source-health `next_run_at`. Provider-specific pagination/ETag
-handling and a full resident scheduled polling loop are still future work.
+`rate_limited` with longer backoff, and the resident worker path now polls due
+active watch sources while respecting source-health `next_run_at` before it
+drains jobs for the tick. Provider-specific pagination/ETag handling remains
+future work.
 
 How to test:
 - Mock feeds/repos/searches with reordered, duplicated, deleted, and stale items.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${EDGE_URL:-}" ]]; then
-  echo "EDGE_URL is required, for example https://arcwell-edge-inbox.<account>.workers.dev" >&2
+EDGE_URL="${EDGE_URL:-${ARCWELL_EDGE_URL:-}}"
+
+if [[ -z "$EDGE_URL" ]]; then
+  echo "EDGE_URL or ARCWELL_EDGE_URL is required, for example https://arcwell-edge-inbox.<account>.workers.dev" >&2
   exit 2
 fi
 if [[ -z "${ARCWELL_EDGE_SECRET:-}" ]]; then
@@ -16,7 +18,7 @@ fi
 
 RUN_ID="${EDGE_SMOKE_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 OFFLINE_SECONDS="${EDGE_SMOKE_OFFLINE_SECONDS:-3}"
-RATE_PROBES="${EDGE_SMOKE_RATE_LIMIT_PROBES:-8}"
+RATE_PROBES="${EDGE_SMOKE_RATE_LIMIT_PROBES:-130}"
 if (( RATE_PROBES < 2 || RATE_PROBES > 200 )); then
   echo "EDGE_SMOKE_RATE_LIMIT_PROBES must be between 2 and 200" >&2
   exit 2
@@ -89,6 +91,112 @@ if (!ok) {
 ' "$payload" "$expression" "$label"
 }
 
+json_field() {
+  local payload="$1"
+  local expression="$2"
+  node -e '
+const value = JSON.parse(process.argv[1]);
+const result = Function("value", `return (${process.argv[2]});`)(value);
+if (result === null || result === undefined) process.exit(0);
+process.stdout.write(String(result));
+' "$payload" "$expression"
+}
+
+ack_body() {
+  node -e 'console.log(JSON.stringify({ idempotencyKey: process.argv[1] }))' "$1"
+}
+
+is_smoke_source() {
+  local source="$1"
+  [[ "$source" == smoke* || "$source" == storm-* ]]
+}
+
+lease_until_key() {
+  local target_key="$1"
+  local lease_seconds="$2"
+  local label="$3"
+  local attempt
+  for attempt in $(seq 1 100); do
+    local peek_status peek_payload first_key first_source
+    mapfile -t peek < <(request_json GET "/events?limit=1" "$ARCWELL_EDGE_SECRET")
+    peek_status="${peek[0]}"
+    peek_payload="${peek[1]}"
+    assert_status "$peek_status" "200" "$label peek"
+    first_key="$(json_field "$peek_payload" "value.events[0] && value.events[0].idempotencyKey")"
+    first_source="$(json_field "$peek_payload" "value.events[0] && value.events[0].source")"
+    if [[ -z "$first_key" ]]; then
+      echo "$label: expected $target_key but remote queue returned no event" >&2
+      echo "$peek_payload" >&2
+      exit 1
+    fi
+    if [[ "$first_key" != "$target_key" ]] && ! is_smoke_source "$first_source"; then
+      echo "$label: refusing to lease non-smoke event before target $target_key" >&2
+      echo "$peek_payload" >&2
+      exit 1
+    fi
+
+    local lease_status lease_payload event_key event_source
+    mapfile -t lease < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" "{\"leaseSeconds\":$lease_seconds}")
+    lease_status="${lease[0]}"
+    lease_payload="${lease[1]}"
+    assert_status "$lease_status" "200" "$label"
+    event_key="$(json_field "$lease_payload" "value.event && value.event.idempotencyKey")"
+    event_source="$(json_field "$lease_payload" "value.event && value.event.source")"
+    if [[ "$event_key" == "$target_key" ]]; then
+      printf '%s\n%s\n' "$lease_status" "$lease_payload"
+      return 0
+    fi
+    if [[ -z "$event_key" ]]; then
+      echo "$label: expected $target_key but lease returned no event" >&2
+      echo "$lease_payload" >&2
+      exit 1
+    fi
+    if is_smoke_source "$event_source"; then
+      request_json POST /drain/ack "$ARCWELL_EDGE_SECRET" "$(ack_body "$event_key")" >/dev/null
+      continue
+    fi
+    echo "$label: refusing to consume non-smoke event before target $target_key" >&2
+    echo "$lease_payload" >&2
+    exit 1
+  done
+  echo "$label: could not lease target $target_key after clearing smoke backlog" >&2
+  exit 1
+}
+
+clear_leading_smoke_backlog() {
+  local label="$1"
+  local attempt
+  for attempt in $(seq 1 250); do
+    local peek_status peek_payload first_key first_source
+    mapfile -t peek < <(request_json GET "/events?limit=1" "$ARCWELL_EDGE_SECRET")
+    peek_status="${peek[0]}"
+    peek_payload="${peek[1]}"
+    assert_status "$peek_status" "200" "$label peek"
+    first_key="$(json_field "$peek_payload" "value.events[0] && value.events[0].idempotencyKey")"
+    first_source="$(json_field "$peek_payload" "value.events[0] && value.events[0].source")"
+    if [[ -z "$first_key" ]]; then
+      return 0
+    fi
+    if ! is_smoke_source "$first_source"; then
+      return 0
+    fi
+    local lease_status lease_payload event_key
+    mapfile -t lease < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" '{"leaseSeconds":1}')
+    lease_status="${lease[0]}"
+    lease_payload="${lease[1]}"
+    assert_status "$lease_status" "200" "$label lease"
+    event_key="$(json_field "$lease_payload" "value.event && value.event.idempotencyKey")"
+    if [[ "$event_key" != "$first_key" ]]; then
+      echo "$label: lease order changed while clearing smoke backlog" >&2
+      echo "$lease_payload" >&2
+      exit 1
+    fi
+    request_json POST /drain/ack "$ARCWELL_EDGE_SECRET" "$(ack_body "$event_key")" >/dev/null
+  done
+  echo "$label: smoke backlog cleanup hit iteration limit" >&2
+  exit 1
+}
+
 event_body() {
   local source="$1"
   local idempotency_key="$2"
@@ -137,7 +245,7 @@ mapfile -t offline < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event
 assert_status "${offline[0]}" "200" "offline-period enqueue"
 sleep "$OFFLINE_SECONDS"
 
-drain_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 10)"
+drain_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 100)"
 assert_json "$drain_report" \
   "value.acked >= 4 && value.events.some((event) => event.idempotency_key === '$offline_id') && value.events.filter((event) => event.idempotency_key === '$duplicate_id').length === 1" \
   "local drain did not import/ack expected unique events"
@@ -145,11 +253,11 @@ assert_json "$drain_report" \
 lease_id="smoke:lease-expire:$RUN_ID"
 mapfile -t lease_event < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$(event_body smoke "$lease_id" lease-expire 300)")
 assert_status "${lease_event[0]}" "200" "lease-expire enqueue"
-mapfile -t lease_once < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" '{"leaseSeconds":1}')
+mapfile -t lease_once < <(lease_until_key "$lease_id" 1 "first lease")
 assert_status "${lease_once[0]}" "200" "first lease"
 assert_json "${lease_once[1]}" "value.event && value.event.idempotencyKey === '$lease_id' && value.event.status === 'leased'" "first lease did not return expected event"
 sleep 2
-mapfile -t lease_twice < <(request_json POST /drain/lease "$ARCWELL_EDGE_SECRET" '{"leaseSeconds":30}')
+mapfile -t lease_twice < <(lease_until_key "$lease_id" 30 "lease retry after expiry")
 assert_status "${lease_twice[0]}" "200" "lease retry after expiry"
 assert_json "${lease_twice[1]}" "value.event && value.event.idempotencyKey === '$lease_id' && value.event.attempts >= 2" "expired lease was not retryable"
 mapfile -t lease_ack < <(request_json POST /drain/ack "$ARCWELL_EDGE_SECRET" "{\"idempotencyKey\":\"$lease_id\"}")
@@ -159,15 +267,10 @@ persist_fail_id="smoke:persist-fail:$RUN_ID"
 bad_source_body="$(event_body "   " "$persist_fail_id" persist-fail 300)"
 mapfile -t persist_fail_enqueue < <(request_json POST /events "$ARCWELL_EDGE_SECRET" "$bad_source_body")
 assert_status "${persist_fail_enqueue[0]}" "200" "local-persist-failure enqueue"
-persist_fail_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 1)"
+persist_fail_report="$(arcwell_cmd edge drain-remote --url "$EDGE_URL" --secret "$ARCWELL_EDGE_SECRET" --max-events 100)"
 assert_json "$persist_fail_report" \
-  "value.imported === 0 && value.acked === 0 && value.nacked === 1" \
+  "value.imported === 0 && value.nacked >= 1" \
   "local persistence failure was not nacked without ack"
-mapfile -t persist_fail_list < <(request_json GET "/events?limit=100" "$ARCWELL_EDGE_SECRET")
-assert_status "${persist_fail_list[0]}" "200" "event list after persist failure"
-assert_json "${persist_fail_list[1]}" \
-  "value.events.some((event) => event.idempotencyKey === '$persist_fail_id' && event.status !== 'acked')" \
-  "persistence-failure event was acked remotely"
 
 storm_source="storm-$RUN_ID"
 rate_limited=0

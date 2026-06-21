@@ -421,6 +421,11 @@ ARCWELL_TELEGRAM_LIVE_CONFIRM=disposable \
 scripts/telegram-live-smoke
 ```
 
+If a non-Arcwell project also sets `TELEGRAM_WEBHOOK_URL`, leave it alone; the
+Arcwell smoke derives the webhook from `ARCWELL_EDGE_URL`. Use
+`ARCWELL_TELEGRAM_WEBHOOK_URL` only for an intentional Arcwell-specific
+override.
+
 Expected result:
 
 - The local preflight proves an unauthorised chat and a read/write-only chat

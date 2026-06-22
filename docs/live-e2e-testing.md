@@ -340,6 +340,13 @@ Status: package-local severe integration checks exist; a fresh Arcwell-owned
 Cloudflare deployment and live Claude/host MCP handshake have not been recorded
 from this package.
 
+Arcwell may own Garderobe read/write, but do not break the existing MCP
+connector while another agent is attached. Preserve the host-facing contract:
+`/mcp`, `/authorize`, `/token`, `/register`, S256 PKCE, scopes
+`wardrobe.read` / `wardrobe.write`, and MCP server name `garderobe`. Real live
+Wrangler ids, owner identity, secrets, and route values must live in ignored
+local config such as `wrangler.live.jsonc` or `wrangler.production.jsonc`.
+
 Private inventory sync is opt-in. Live tests must use disposable fixture rows or
 an explicitly approved private wardrobe deployment. Do not copy `.dev.vars`,
 seed SQL, live login codes, or real wardrobe CSV exports into this repository or
@@ -372,6 +379,10 @@ npm run db:migrate:remote
 npm run deploy
 ```
 
+For the current connected deployment, use an ignored live Wrangler config and an
+explicit migration window; do not deploy the placeholder `arcwell-garderobe`
+config over the existing connector by accident.
+
 Then use MCP Inspector or a host connector with OAuth/DCR to verify:
 
 - auth bypass: unauthenticated `/mcp` and invalid/forged bearer calls fail
@@ -392,6 +403,9 @@ Then use MCP Inspector or a host connector with OAuth/DCR to verify:
 Current blockers:
 
 - `wrangler.jsonc` contains placeholder D1/KV ids for a new Arcwell deployment.
+- Existing live MCP connector continuity has not been proven from this package;
+  the first read/write proof must use disposable rows without clearing OAuth KV
+  or forcing re-authorization.
 - The adjacent source project had no explicit top-level license file at
   integration time, so public redistribution remains blocked until provenance is
   settled.

@@ -40,6 +40,8 @@ function listFiles(dir) {
 
 const packageJson = JSON.parse(read("packages/arcwell-garderobe/package.json"));
 const readme = read("packages/arcwell-garderobe/README.md");
+const design = read("packages/arcwell-garderobe/wardrobe-mcp-design.md");
+const packageGitignore = read("packages/arcwell-garderobe/.gitignore");
 const indexTs = read("packages/arcwell-garderobe/src/index.ts");
 const authTs = read("packages/arcwell-garderobe/src/auth.ts");
 const functionalityDocs = read("docs/functionality-and-packages.md");
@@ -74,9 +76,10 @@ for (const forbidden of [".dev.vars"]) {
   assert(!exists(`packages/arcwell-garderobe/${forbidden}`), `${forbidden} must not be copied into arcwell-garderobe`);
 }
 assert(exists("packages/arcwell-garderobe/.gitignore"), "package .gitignore must protect local validation artifacts");
-const gitignore = read("packages/arcwell-garderobe/.gitignore");
-assert(/^node_modules\/$/m.test(gitignore), "package .gitignore must ignore locally installed node_modules");
-assert(/^\.wrangler\/$/m.test(gitignore), "package .gitignore must ignore local Wrangler state");
+assert(/^node_modules\/$/m.test(packageGitignore), "package .gitignore must ignore locally installed node_modules");
+assert(/^\.wrangler\/$/m.test(packageGitignore), "package .gitignore must ignore local Wrangler state");
+assert(/^wrangler\.live\.jsonc$/m.test(packageGitignore), "package .gitignore must ignore live Wrangler config");
+assert(/^wrangler\.production\.jsonc$/m.test(packageGitignore), "package .gitignore must ignore production Wrangler config");
 assert(!allPackageFiles.some((file) => /^seed[\\/].*\.sql$/i.test(file)), "private seed SQL must not be copied into arcwell-garderobe");
 assert(!allPackageFiles.some((file) => /severe-rotation-tests\.ts$/.test(file)), "live-remote severe test must not be copied into arcwell-garderobe");
 assert(!allPackageFiles.some((file) => /seed-rotation\.ts$/.test(file)), "private rotation seed script must not be copied into arcwell-garderobe");
@@ -116,6 +119,14 @@ assert(indexTs.includes("allowPlainPKCE: false"), "Worker must reject plain PKCE
 assert(indexTs.includes('"wardrobe.read"') && indexTs.includes('"wardrobe.write"'), "Worker must expose explicit wardrobe scopes");
 assert(authTs.includes("validateCsrf") && authTs.includes("WARDROBE_LOGIN_CODE"), "authorization flow must require CSRF and the single-user login code");
 
+assert(/existing live MCP connector contract must keep working/i.test(readme), "README must preserve connected-host MCP compatibility");
+assert(/MCP server identity `garderobe`/i.test(readme), "README must preserve MCP server identity");
+assert(/\/mcp/.test(readme) && /\/authorize/.test(readme) && /\/token/.test(readme) && /\/register/.test(readme), "README must preserve MCP/OAuth endpoint names");
+assert(/wardrobe\.read/.test(readme) && /wardrobe\.write/.test(readme), "README must preserve read/write scopes");
+assert(/wrangler\.live\.jsonc/.test(readme) && /wrangler\.production\.jsonc/.test(readme), "README must keep real deployment config in ignored local files");
+assert(/Ownership And Compatibility/.test(design), "design must define ownership and compatibility");
+assert(/MCP server name remains `garderobe`/.test(design), "design must keep server name stable until migration");
+assert(/Existing D1\/KV bindings are not replaced/i.test(design), "design must protect live bindings during handoff");
 assert(/do not receive raw wardrobe inventory/i.test(readme), "README must say Arcwell memory/profile/wiki do not receive raw inventory by default");
 assert(/untrusted data/i.test(readme), "README must mark wardrobe metadata as untrusted data");
 assert(/weather lookup fails/i.test(readme) && /manual temperature\/conditions fallback/i.test(readme), "README must require manual fallback when weather lookup fails");
@@ -125,9 +136,12 @@ assert(/Do not put tokens or login codes in connector URLs/i.test(readme), "READ
 
 assert(/Package: `arcwell-garderobe`/.test(functionalityDocs), "functionality docs must include the arcwell-garderobe package");
 assert(/private wardrobe source of truth/i.test(functionalityDocs), "functionality docs must define Garderobe as the private source of truth");
+assert(/Existing host connector compatibility is a hard boundary/i.test(functionalityDocs), "functionality docs must preserve host connector compatibility");
 assert(/hostile wardrobe metadata/i.test(functionalityDocs), "functionality docs must cover hostile wardrobe metadata");
 assert(/weather lookup fails/i.test(functionalityDocs), "functionality docs must cover weather failure fallback");
 assert(/Private inventory sync is opt-in/i.test(liveDocs), "live E2E docs must state inventory sync is opt-in");
+assert(/do not break the existing MCP\s+connector/i.test(liveDocs), "live E2E docs must preserve existing connected MCP host");
+assert(/without clearing OAuth KV/i.test(liveDocs), "live E2E docs must forbid connected-host token reset during smoke");
 assert(/auth bypass/i.test(liveDocs) && /inventory leakage/i.test(liveDocs), "live E2E docs must include severe Garderobe abuse cases");
 
 console.log("arcwell-garderobe severe integration tests passed");

@@ -66,6 +66,25 @@ items returned by Garderobe tools. After drafting options, hosts with write
 access should call `log_suggestions`; after the user confirms what they wore,
 they should call `confirm_wear`.
 
+## Ownership And Compatibility
+
+Arcwell can own Garderobe as a read/write package. Ownership does not mean the
+existing remote MCP connector can be broken while another agent is connected.
+
+The stable host-facing contract is:
+
+- Streamable HTTP MCP remains at `/mcp`.
+- OAuth/DCR endpoints remain `/authorize`, `/token`, and `/register`.
+- PKCE remains S256-only; no bearer tokens or login codes are placed in URLs.
+- Scopes remain `wardrobe.read` and `wardrobe.write`.
+- MCP server name remains `garderobe` until every connected host is migrated and
+  re-authorized.
+- Existing D1/KV bindings are not replaced on the live deployment without a
+  backup, rollback path, and disposable-row smoke.
+
+The tracked `wrangler.jsonc` is a placeholder/staging template. Any config that
+targets the current live connector must stay in ignored local files.
+
 ## Host Context Contract
 
 Weather, profile, and style context can shape a request, but none of those

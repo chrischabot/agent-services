@@ -2,5 +2,7 @@ node_modules/
 .wrangler/
 .dev.vars
 .env
+wrangler.live.jsonc
+wrangler.production.jsonc
 seed/wardrobe-import.sql
 worker-configuration.d.ts

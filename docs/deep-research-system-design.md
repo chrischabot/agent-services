@@ -672,20 +672,23 @@ scope changes, or caveats lost from the source material.
 
 ### Implementation Tasks
 
-1. Add role-run and artifact tables with migrations, Rust models, CLI/MCP
-   read/write helpers, and ops visibility.
-2. Add `research role-start`, `research role-complete`, and
+1. Done locally: add role-run and artifact tables with migrations, Rust models,
+   CLI/MCP read/write helpers, and severe validation.
+2. Done locally: add `research role-start`, `research role-finish`,
+   `research role-runs`, `research artifact-add`, `research artifacts`, and
    `research artifact-read` CLI/MCP surfaces for the Codex host to record
    actual role execution.
-3. Update `$deep-research` skill text so the main agent performs capability
+3. Done locally: update `$deep-research` skill text so the main agent records
+   role phases, captures artifacts, and keeps subagents read-heavy by default.
+4. Remaining: wire the runtime host loop so the main agent performs capability
    discovery, launches real subagents when available, and records degraded
    sequential mode when not.
-4. Add fixture tests where simulated role artifacts attempt prompt injection,
-   invented source ids, caveat deletion, unsupported claims, and durable-write
-   escalation.
-5. Run a fresh Codex thread smoke in the app with the dev plugin installed,
-   using a disposable `ARCWELL_HOME`, and preserve the run id, role-run records,
-   artifacts, report, and audit output.
+5. Done locally: add fixture tests where simulated role artifacts attempt
+   prompt injection, invented source ids, caveat deletion, unsupported claims,
+   and durable-write escalation.
+6. Remaining: run a fresh Codex thread smoke in the app with the dev plugin
+   installed, using a disposable `ARCWELL_HOME`, and preserve the run id,
+   role-run records, artifacts, report, and audit output.
 
 ### Adversarial Review Gate
 
@@ -755,15 +758,15 @@ The command should:
 
 ### Implementation Tasks
 
-1. Add host-search tables, migrations, Rust models, and CLI/MCP record/read
-   commands.
-2. Keep `research web-search --provider host-native` fail-closed inside core
+1. Done locally: add host-search tables, migrations, Rust models, and CLI/MCP
+   record/read commands.
+2. Done locally: keep `research web-search --provider host-native` fail-closed inside core
    unless it is invoked through the host recording path.
-3. Update role prompts so scouts and corpus builders record every host-native
+3. Done locally: update role prompts so scouts and corpus builders record every host-native
    search before using discovered URLs.
-4. Add severe tests for forged host labels, malformed URLs, duplicate results,
+4. Done locally: add severe tests for forged host labels, malformed URLs, duplicate results,
    secret-bearing query strings, zero-linked proof, and single-domain saturation.
-5. Run a fresh Codex host-search smoke where the agent uses the actual in-app
+5. Remaining: run a fresh Codex host-search smoke where the agent uses the actual in-app
    search surface, records results, ingests selected sources, and passes audit.
 
 ## Direct PDF And Table Extraction
@@ -833,18 +836,23 @@ Implement extractors in stages:
 
 ### Implementation Tasks
 
-1. Add document/table/span schema, migrations, models, and CLI/MCP read surfaces.
-2. Add CSV/TSV extractor first with severe tests for formula injection, huge
-   files, bad encodings, duplicate headers, multiline cells, and unit parsing.
-3. Add XLSX extractor with tests for hidden sheets, formulas, merged cells,
-   dates, numbers, and sheet selection.
-4. Add PDF text extraction with tests for encrypted, malformed, huge, scanned,
-   rotated, and multi-page documents.
-5. Add PDF table candidate extraction only after fixtures demonstrate acceptable
-   precision. Until then, PDF tables must be caveated.
-6. Extend claim ingestion so claims can link to document spans and table cells.
-7. Extend report rendering and audit so numeric/table claims require table-cell
-   or span evidence and warnings are surfaced.
+1. Done locally: add document/table/span/cell schema, migrations, models, and
+   CLI/MCP read surfaces.
+2. Done locally: add CSV/TSV extractor with severe tests for formula injection,
+   malformed CSV, multiline cells, unsupported inputs, and numeric parsing.
+3. Done locally: add XLSX extractor with formula-preservation and malformed
+   workbook tests. Hidden sheets, merged cells, date display, and broader sheet
+   selection fixtures still need expansion.
+4. Partially done: add bounded PDF text extraction with malformed-PDF
+   fail-closed coverage. Encrypted, huge, scanned, rotated, and multi-page
+   fixture coverage still needs to be added.
+5. Done locally: add PDF layout table candidate extraction with confidence and
+   warnings. Until difficult fixtures prove stronger precision, PDF tables must
+   remain caveated.
+6. Done locally: extend claim ingestion so claims can link to document spans,
+   tables, and table cells after same-run artifact validation.
+7. Done locally: extend report rendering and audit so document anchors are
+   surfaced and warned/low-confidence extractions become audit findings.
 
 ### Adversarial Review Gate
 
@@ -937,47 +945,69 @@ A model-backed report may be marked complete only when:
 
 ### Implementation Tasks
 
-1. Add editorial-run/artifact schema, prompt versions, and cost/policy records.
-2. Build deterministic evidence-pack generation with size bounds and redaction.
-3. Add model-backed editorial drafter behind explicit provider config and test
-   with mock providers by default.
-4. Add citation verifier over report sentences, claim ids, source cards, spans,
-   and table cells.
-5. Add adversarial evaluator prompts and fixture mutation tests.
-6. Wire final report status to editorial/eval/audit gates.
-7. Run live editorial/eval smokes only after deterministic fixtures pass.
+1. Done locally: add editorial-run/artifact schema, prompt-version fields, and
+   automated invocation with cost/policy records.
+2. Done locally: build deterministic evidence-pack generation with redaction.
+3. Done locally: add model-backed editorial drafter behind explicit provider
+   config and test with mock providers by default.
+4. Partially done: citation-verifier records and audit score gates exist.
+   Sentence-level claim/source-card/span/table validation is still pending.
+5. Partially done: adversarial-evaluator records, mock invocation, severe
+   malformed-provider tests, OpenAI Responses API envelope parsing, and one live
+   provider fail-closed invocation exist. Live model eval over a saturated
+   corpus is still pending.
+6. Partially done: `research_audit_run` gates completed drafts on verifier and
+   evaluator acceptance. Final report status wiring is still pending.
+7. Remaining: run live editorial/eval quality smokes over a real saturated
+   corpus after deterministic fixtures pass.
 
 ## Production Rollout Milestones
 
 ### Milestone 8: Subagent Trace And Proof
 
-- Add role-run/artifact tables and CLI/MCP surfaces.
-- Update Codex skill prompts for capability discovery and role-run recording.
-- Add severe artifact validation tests.
-- Prove one fresh in-app Codex run with real role fan-out or explicitly record
-  unavailable subagent support.
+- Done: role-run/artifact tables and CLI/MCP surfaces.
+- Done: Codex skill prompts for role-run and artifact recording.
+- Done: severe artifact validation tests.
+- Done: recorded one fresh disposable in-app Codex proof with two real subagent
+  role runs and artifacts.
+- Remaining: prove the full role suite inside a completed fresh deep report.
 
 ### Milestone 9: Host Search Proof
 
-- Add host-search proof tables and recording command.
-- Link search results to run sources and source cards.
-- Add audit gates for missing/weak host-search proof.
-- Prove one fresh Codex host-native search run.
+- Done: host-search proof tables and recording command.
+- Done: selected search results link to run sources.
+- Done: audit gates for missing/weak host-search proof.
+- Done: recorded one fresh Codex host-native `web.run` proof with selected NIST
+  results linked to run sources.
+- Remaining: prove host search inside a full fresh completed deep report.
 
 ### Milestone 10: Documents And Tables
 
-- Add document/span/table/cell schema.
-- Ship CSV/TSV and XLSX extraction first.
-- Ship bounded PDF text extraction.
-- Add PDF table candidates only with warnings until fixture precision is strong.
-- Link document/table anchors into claims, reports, and audits.
+- Done: document/span/table/cell schema.
+- Done: CSV/TSV extraction.
+- Done: XLSX extraction with sheet/table/cell artifacts, formula preservation as
+  untrusted text, cached-value metadata, and malformed-workbook fail-closed
+  tests.
+- Done: bounded PDF text extraction.
+- Done: PDF layout table candidates with explicit heuristic warnings and cell
+  anchors. Difficult PDF precision remains caveated until richer fixtures pass.
+- Done: document/table/cell anchors in claim ingestion, reports, evidence packs,
+  and run audit warnings.
 
 ### Milestone 11: Editorial And Eval Loop
 
-- Add evidence packs and editorial-run records.
-- Add model-backed drafter, citation verifier, adversarial evaluator, and final
-  deterministic audit gate.
-- Add mutation evals and live smoke under explicit provider/cost config.
+- Done: evidence packs and editorial-run records.
+- Done: deterministic audit gates for completed drafter, citation-verifier, and
+  adversarial-evaluator records.
+- Done: automated mock/OpenAI editorial invocation with policy/cost records,
+  inspectable output artifacts, and malformed-provider fail-closed tests.
+- Done: live OpenAI editorial invocation reached the provider, parsed the nested
+  Responses API output envelope, recorded a cost decision, and rejected an
+  insufficient evidence pack instead of drafting unsupported prose.
+- Remaining: live provider editorial/eval quality smoke over a saturated corpus,
+  richer citation-quality scoring,
+  final report status wiring, mutation eval expansion, and live smoke under
+  explicit provider/cost config.
 
 ### Milestone 12: Saturated Production Proof
 

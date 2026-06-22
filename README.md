@@ -127,7 +127,11 @@ Incoming channel text is treated as user/content data. It is never blindly promo
 `packages/arcwell-garderobe` vendors the Garderobe Cloudflare Worker/D1/OAuth
 remote MCP package for private wardrobe and outfit planning. It is a separate
 source of truth: Arcwell memory/wiki do not ingest private wardrobe inventory by
-default.
+default. Arcwell can own the package read/write, but the existing remote MCP
+connector contract must remain stable while another host is connected: `/mcp`,
+`/authorize`, `/token`, `/register`, `wardrobe.read`, `wardrobe.write`, and MCP
+server name `garderobe` are compatibility boundaries until a deliberate
+migration/re-authorization is complete.
 
 ### Projects / Meta-Controller
 
@@ -140,8 +144,10 @@ Projects have names, aliases, summaries, and status. Agents can resolve natural 
 Ambiguous project references fail instead of guessing.
 
 Project status reports distinguish durable snapshots from freshness-bounded
-verified host sync. Native live Codex/Claude thread inventory is still missing;
-manual snapshots and forged host-live source labels are not treated as live.
+verified host sync. A resident Codex plugin adapter can use Codex app thread
+tools to write verified sync rows, but native headless Codex/Claude thread
+inventory is still missing; manual snapshots and forged host-live source labels
+are not treated as live.
 
 ### Librarian And Digest Candidates
 
@@ -367,6 +373,8 @@ $arcwell-codex:deep-research
 $arcwell-codex:research-audit
 $arcwell-codex:research-brief
 $arcwell-codex:x-research
+$arcwell-codex:tidal-control
+$arcwell-codex:lumin-control
 $arcwell-codex:project-control
 $arcwell-codex:channel-control
 $arcwell-codex:ops-control
@@ -383,6 +391,8 @@ Intent:
 - `$deep-research`: plan, gather, audit, and brief multi-source research.
 - `$research-audit`: adversarially check sources and claims.
 - `$x-research`: import/search/report X evidence.
+- `$tidal-control`: manage TIDAL playlists and favorites from an existing TIDAL desktop session.
+- `$lumin-control`: discover/inspect LUMIN/OpenHome renderers and send explicit LUMIN UDP/SOAP control commands.
 - `$ops-control`: inspect health, jobs, cursors, queues, and errors.
 - `$project-control`: resolve and manage project context.
 - `$channel-control`: handle Telegram/future chat channels safely.

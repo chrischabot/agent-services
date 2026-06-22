@@ -1,7 +1,11 @@
 # arcwell-projects
 
 **Status:** Partial. Manual/local project state, evidence-backed work-run
-consolidation, and an explicit verified host-sync protocol exist. Live Codex/Claude thread inventory is missing because Codex and Claude host inventory/read adapters are not connected.
+consolidation, an explicit verified host-sync protocol, and a resident Codex
+app adapter prompt exist. live Codex/Claude thread inventory is missing from
+the Rust core/daemon because Codex app thread tools are available only inside a
+resident Codex host session, and Claude inventory/read adapters are not
+connected.
 
 Repository tracking: [STATUS.md](../../STATUS.md) and [TODO.md](../../TODO.md).
 
@@ -24,9 +28,11 @@ Current first-pass implementation:
 - `project_status_get` returns a status report envelope with the project,
   latest snapshot, timestamp/source/confidence provenance, and a live-state
   availability matrix. Fresh explicit host sync can be marked available until
-  its freshness window expires. Native Codex and Claude inventory/read adapters
-  are still reported unavailable; ordinary thread refs are provenance only, not
-  verified live handles.
+  its freshness window expires. Native Rust-core Codex and Claude
+  inventory/read adapters are still reported unavailable; ordinary thread refs
+  are provenance only, not verified live handles. The Codex plugin has a
+  resident host-adapter skill that can use Codex app thread tools and then write
+  explicit verified sync rows.
 - Work-memory consolidation can record project status snapshots from trace
   evidence, including validation and work-run provenance. Generated summaries
   alone cannot support consolidation.
@@ -45,7 +51,7 @@ Degraded live-state capability matrix:
 
 | Host | Live inventory | Live thread read | Manual snapshot | Current blocker |
 | --- | --- | --- | --- | --- |
-| Codex | Unavailable | Unavailable | Supported via CLI/MCP/plugin prompt; explicit verified sync is freshness-bounded | No stable Arcwell-owned Codex thread inventory/read API is wired into the Rust core. |
+| Codex | Resident host only | Resident host only | Supported via CLI/MCP/plugin prompt; explicit verified sync is freshness-bounded | Codex app thread tools are available inside Codex, but no stable Arcwell-owned daemon API is wired into the Rust core. |
 | Claude | Unavailable | Unavailable | Supported via CLI/MCP | Claude lifecycle/thread inventory hooks are unavailable or unproven. |
 
 MCP tools:
@@ -63,8 +69,7 @@ MCP tools:
 
 Remaining work:
 
-- Integrate with Codex thread inventory APIs when exposed; local tool discovery
-  in this audit did not expose usable Codex `list_threads`/`read_thread` tools
-  to Arcwell.
+- Live-smoke the resident Codex host-adapter skill against a disposable Codex
+  thread and record verified sync evidence.
 - Add automatic project status summaries from live thread/task state.
 - Add channel context carryover for follow-up messages like "and the video project?" from real chat history.

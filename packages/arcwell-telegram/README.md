@@ -17,7 +17,10 @@ Current implementation:
   package. Photos, videos, documents, stickers, reactions, edits, callbacks,
   polls, joins/leaves, and other update kinds are rejected as unsupported
   instead of being partially interpreted.
-- Local `arcwell telegram drain` leases Telegram edge events, records them with `channel_record`, and acks/nacks the source event.
+- Local `arcwell telegram drain` leases Telegram edge events, records them with
+  `channel_record`, routes each recorded message through
+  `controller_route_text`, and acks/nacks the source event. Route failures such
+  as unauthorized project reads are reported separately from record/ack success.
 - Local `arcwell telegram send <chat-id> <text>` requires an explicit `telegram:chat:<chat-id>` authorization with `--send`, sends through Telegram `sendMessage`, escapes MarkdownV2 for the API call, records the outgoing channel message, and persists a delivery attempt with provider response, failed status, and retry hint when applicable.
 - The resident worker path (`arcwell worker run` / `worker run-once`) retries
   due failed Telegram deliveries when `TELEGRAM_BOT_TOKEN` is available as a
@@ -27,7 +30,7 @@ Current implementation:
 - Local `arcwell telegram authorize <subject> --write-projects --send` grants project-write/binding and send rights to subjects such as `telegram:chat:123`, `telegram:user:456`, or `telegram:@username`.
 - Local `arcwell telegram deliveries [--message-id <id>]` lists persisted delivery attempts.
 - MCP tools `telegram_drain_edge_events` and `telegram_send_message` expose the same behavior to agents.
-- Project-aware routing can bind an explicit `projectId` in payloads only for authorized subjects. Authorized chats can also auto-bind a Telegram message to a uniquely resolved project from the message text. Ambiguous or missing matches remain unbound.
+- Project-aware routing can bind an explicit `projectId` in payloads only for authorized subjects. Authorized chats can also auto-bind a Telegram message to a uniquely resolved project from the message text. Ambiguous or missing matches remain unbound. The controller route report now carries authorized status/create/stop intent into pending Codex host-adapter work where needed.
 - `scripts/telegram-live-smoke` runs local authorization checks in a preserved smoke home and, when live credentials are supplied, sets the Telegram webhook, sends a safe outgoing reply, drains Cloudflare edge events locally, and asserts the exact incoming message is recorded exactly once. The smoke derives the webhook URL from `ARCWELL_EDGE_URL`; use `ARCWELL_TELEGRAM_WEBHOOK_URL` only for an intentional Arcwell-specific override. Failure artifacts and mismatch/duplicate diagnostics are kept under the smoke home.
 
 Channel safety rules:

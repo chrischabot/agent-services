@@ -16,9 +16,10 @@ question, scope constraints, current `research_status`, relevant output from
 default: they may search, inspect, classify, and draft structured proposals, but
 the main thread performs durable writes with `research_source_add`,
 `research_source_card_link`, `source_card_add`, `research_claims_ingest`,
-`research_skeptic_pass`, `research_report_compile`, `research_task_complete`,
-and `research_audit_run` unless the user explicitly authorizes a write-capable
-subagent.
+`research_skeptic_pass`, `research_document_extract`,
+`research_report_compile`, `research_editorial_invoke`,
+`research_task_complete`, and `research_audit_run` unless the user explicitly
+authorizes a write-capable subagent.
 
 All roles must follow the same evidence rules:
 
@@ -57,12 +58,18 @@ unless explicitly authorized in this prompt.
 
 The orchestrator should mark each role task complete with
 `research_task_complete` only after its output is inspected for these rules.
+When a role runs as a Codex subagent or as a sequential manual phase, record the
+phase with `research_role_start`, store accepted or rejected outputs with
+`research_artifact_add`, and close it with `research_role_finish`.
 
 ## research-orchestrator
 
 Own the run.
 
 - Start `research_run` and keep `research_status`/`research_read` current.
+- Record every role or manual phase with `research_role_start`,
+  `research_artifact_add`, and `research_role_finish` so the final report can
+  distinguish live subagent work from sequential fallback.
 - Maintain scope, assumptions, source-family targets, budget/policy constraints,
   and stop conditions.
 - Use subagents or phase prompts when available, but keep durable writes in the main thread unless write permission is explicit.
@@ -169,6 +176,11 @@ Turn sources into wiki-ready source cards.
 - Preserve uncertainty and temporal scope.
 - Use `research_extraction_prompt` as the bounded extraction contract and feed
   validated output to `research_claims_ingest` from the main thread.
+- When a local CSV/TSV/XLSX/PDF artifact grounds a claim, propose
+  `document_anchors` using the exact same-run `document_id` plus `span_id`,
+  `table_id`, or `table_id` with `row_index`/`column_index`. Do not invent
+  anchors; missing, cross-run, or stale table-cell anchors must be rejected by
+  the main thread.
 - Reject malformed output, hostile source ids, invented citations, missing
   temporal scope for current claims, and uncertainty loss.
 - Preserve source-local anchors, retrieval date, publication/update date,
@@ -194,6 +206,7 @@ source_card_proposals:
     temporal_scope:
     entities:
     evidence_span_or_anchor:
+    document_anchors:
     confidence:
     caveats:
     uncertainty_preserved:
@@ -248,12 +261,17 @@ Create the final report.
 - Include methodology, source coverage, confidence labels, and saturation notes.
 - Write the report with `research_report_compile`; use legacy brief rendering only as an interim artifact.
 - Preserve links and wiki page ids so future agents can inspect the evidence chain.
+- Preserve document/span/table/cell anchors for numeric or table-backed claims;
+  do not smooth away extractor warnings or low-confidence PDF table caveats.
 - Separate confirmed facts, interpretations, recommendations, open questions,
   and unresolved contradictions.
 - Do not introduce new factual claims in prose unless they already trace to
   source cards, claims, clusters, skeptic notes, or named local pages.
 - Mark the report incomplete when coverage, skeptic, audit, provider, cost, or
   policy limits prevent a comprehensive answer.
+- Use `research_editorial_invoke` for drafter/verifier/evaluator loops when a
+  provider or mock path is explicitly allowed; otherwise record externally run
+  stages with `research_editorial_record`.
 
 Return shape:
 
@@ -284,6 +302,8 @@ Check the final report against the evidence base.
 - Use `research_audit_run` as the authoritative run audit and supplement it
   with adversarial spot checks against source cards, claims, clusters, skeptic
   notes, and report text.
+- Check document anchors for same-run provenance, missing cells/spans, warned
+  extractors, and low-confidence PDF/XLSX table evidence.
 - Fail any important factual claim that cannot be traced to inspectable
   evidence, any high-confidence claim grounded only in low-reliability sources,
   and any current claim without an exact date or retrieval context.

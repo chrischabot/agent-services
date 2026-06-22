@@ -496,6 +496,10 @@ Current package shape:
 - OAuth 2.1 with Dynamic Client Registration is preserved through
   `@cloudflare/workers-oauth-provider`.
 - Plain PKCE is disabled; connector auth must use S256.
+- Existing host connector compatibility is a hard boundary while another agent
+  is connected: keep `/mcp`, `/authorize`, `/token`, `/register`,
+  `wardrobe.read`, `wardrobe.write`, and MCP server name `garderobe` stable
+  until a deliberate migration/re-authorization is complete.
 - Private seed SQL, `.dev.vars`, local Wrangler state, node modules, and live
   remote severe scripts are intentionally excluded from the monorepo package.
 

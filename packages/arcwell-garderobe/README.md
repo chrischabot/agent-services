@@ -2,7 +2,9 @@
 
 **Status:** Partial/Risk. The Garderobe Worker, D1 schema, OAuth/DCR MCP server,
 admin UI, and outfit-planning tools are vendored as a first-class Arcwell
-package boundary. The copied package intentionally excludes local secrets,
+package boundary. Arcwell may own Garderobe as a read/write package, but the
+existing live MCP connector contract must keep working while another agent is
+connected to it. The copied package intentionally excludes local secrets,
 Wrangler state, node modules, private seed SQL, and live-remote severe scripts.
 Deploy config contains placeholder D1/KV ids and must be provisioned before a
 new Arcwell-owned deployment is claimed live.
@@ -66,7 +68,7 @@ PKCE. Do not put tokens or login codes in connector URLs.
 
 ## Deployment Notes
 
-Before deploying from this package:
+Before deploying a new Arcwell-owned staging instance from this package:
 
 1. Create a Cloudflare D1 database and KV namespace for the Arcwell deployment.
 2. Replace the placeholder ids in `wrangler.jsonc`.
@@ -77,6 +79,39 @@ Before deploying from this package:
 The adjacent source project did not include an explicit top-level license file
 at integration time. Keep this package private until provenance/publication
 licensing is settled.
+
+## Ownership And MCP Compatibility
+
+The adjacent Garderobe deployment may already be connected to Claude or another
+host as a remote MCP connector. Taking ownership in Arcwell must preserve that
+connector until it is deliberately migrated or re-authorized.
+
+Compatibility invariant:
+
+- Keep the public MCP path `/mcp`, OAuth endpoints `/authorize`, `/token`, and
+  `/register`, S256 PKCE, and scopes `wardrobe.read` / `wardrobe.write`.
+- Keep the MCP server identity `garderobe` unless every connected host has been
+  migrated and re-authorized.
+- Do not clear OAuth KV, rotate `COOKIE_SECRET` or `WARDROBE_LOGIN_CODE`, rename
+  the Worker, move the route, or replace D1/KV bindings on the live deployment
+  without an explicit migration window and rollback.
+- Do not run migrations, imports, seeds, or write-capable MCP/admin actions
+  against the live deployment until a backup and a disposable-row smoke have
+  passed.
+- Put real live Wrangler ids and owner values in ignored local config such as
+  `wrangler.live.jsonc` or `wrangler.production.jsonc`, not in tracked files.
+
+Safe handoff path:
+
+1. Keep the tracked `wrangler.jsonc` as the placeholder/staging template.
+2. Create an ignored live config from the currently working deployment config.
+3. Run `npm run typecheck`, `npm test`, and `npm run cf:check` against the
+   package before any deploy.
+4. Run the read-only smoke against the existing base URL.
+5. Use disposable fixture rows for the first authenticated read/write MCP
+   smoke.
+6. Only after the connected host is confirmed working should Arcwell treat the
+   live deployment as owned.
 
 ## Read-Only Live Smoke
 

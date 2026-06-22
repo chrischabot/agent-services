@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
     AppPaths, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
-    ResearchArtifactInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
+    ResearchArtifactInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
+    ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
     ResearchRoleRunStart, ResearchSourceInput, SourceCardInput, Store, WebSearchConfig,
     personal_memory_eval_corpus,
 };
@@ -924,6 +925,12 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
     ),
     ("channel-list", SlashAliasTarget::Mcp("channel_list")),
     ("channel-record", SlashAliasTarget::Mcp("channel_record")),
+    (
+        "codex-host-adapter",
+        SlashAliasTarget::HostOnly(
+            "it needs the resident Codex app thread tools to list/read/create/send/stop threads",
+        ),
+    ),
     ("cost-add", SlashAliasTarget::Cli(&["cost", "add"])),
     ("cost-check", SlashAliasTarget::Cli(&["cost", "check"])),
     (
@@ -1786,6 +1793,71 @@ enum ResearchSubcommand {
     HostSearchRead {
         id: String,
     },
+    DocumentExtract {
+        run_id: String,
+        path: PathBuf,
+        #[arg(long)]
+        media_type: Option<String>,
+        #[arg(long)]
+        research_source_id: Option<String>,
+        #[arg(long)]
+        source_card_id: Option<String>,
+    },
+    Documents {
+        run_id: String,
+    },
+    DocumentRead {
+        id: String,
+    },
+    EvidencePack {
+        run_id: String,
+    },
+    EditorialInvoke {
+        run_id: String,
+        stage: String,
+        #[arg(long, default_value = "openai")]
+        model_provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long, default_value = "v1")]
+        prompt_version: String,
+        #[arg(long)]
+        input_artifact_id: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+    },
+    EditorialRecord {
+        run_id: String,
+        stage: String,
+        #[arg(long, default_value = "openai")]
+        model_provider: String,
+        #[arg(long)]
+        model_name: String,
+        #[arg(long, default_value = "v1")]
+        prompt_version: String,
+        #[arg(long)]
+        input_artifact_id: Option<String>,
+        #[arg(long)]
+        output_artifact_id: Option<String>,
+        #[arg(long)]
+        cost_decision_id: Option<String>,
+        #[arg(long, default_value = "completed")]
+        status: String,
+        #[arg(long, default_value = "{}")]
+        score_json: String,
+        #[arg(long)]
+        error_message: Option<String>,
+    },
+    EditorialRuns {
+        run_id: String,
+    },
+    EditorialRead {
+        id: String,
+    },
     CompleteTask {
         task_id: String,
         notes: String,
@@ -1939,6 +2011,9 @@ enum ControllerSubcommand {
         #[arg(long, default_value_t = 25)]
         limit: usize,
     },
+    ThreadGet {
+        id: String,
+    },
     RunCreate {
         #[arg(long)]
         thread_id: Option<String>,
@@ -1963,6 +2038,15 @@ enum ControllerSubcommand {
         status: Option<String>,
         #[arg(long, default_value_t = 25)]
         limit: usize,
+    },
+    RunGet {
+        id: String,
+    },
+    RunUpdate {
+        run_id: String,
+        status: String,
+        #[arg(long)]
+        host_run_id: Option<String>,
     },
     Stop {
         run_id: String,
@@ -1995,6 +2079,14 @@ enum ControllerSubcommand {
         status: Option<String>,
         #[arg(long, default_value_t = 25)]
         limit: usize,
+    },
+    PendingResolve {
+        id: String,
+        status: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
 }
 
@@ -2858,6 +2950,87 @@ fn research(store: Store, args: ResearchCommand) -> Result<()> {
         ResearchSubcommand::HostSearchRead { id } => {
             print_json(&store.read_research_host_search(&id)?)
         }
+        ResearchSubcommand::DocumentExtract {
+            run_id,
+            path,
+            media_type,
+            research_source_id,
+            source_card_id,
+        } => print_json(
+            &store.extract_research_document_file(ResearchDocumentInput {
+                run_id,
+                research_source_id,
+                source_card_id,
+                path,
+                media_type,
+            })?,
+        ),
+        ResearchSubcommand::Documents { run_id } => {
+            print_json(&store.list_research_documents(&run_id)?)
+        }
+        ResearchSubcommand::DocumentRead { id } => print_json(&store.read_research_document(&id)?),
+        ResearchSubcommand::EvidencePack { run_id } => {
+            print_json(&store.build_research_evidence_pack(&run_id)?)
+        }
+        ResearchSubcommand::EditorialInvoke {
+            run_id,
+            stage,
+            model_provider,
+            model_name,
+            prompt_version,
+            input_artifact_id,
+            endpoint,
+            api_key,
+            timeout_seconds,
+        } => print_json(
+            &store.invoke_research_editorial(ResearchEditorialInvokeInput {
+                run_id,
+                stage,
+                model_provider,
+                model_name,
+                prompt_version,
+                input_artifact_id,
+                endpoint,
+                api_key,
+                timeout_seconds,
+            })?,
+        ),
+        ResearchSubcommand::EditorialRecord {
+            run_id,
+            stage,
+            model_provider,
+            model_name,
+            prompt_version,
+            input_artifact_id,
+            output_artifact_id,
+            cost_decision_id,
+            status,
+            score_json,
+            error_message,
+        } => {
+            let score = serde_json::from_str(&score_json).context("parsing --score-json")?;
+            print_json(
+                &store.record_research_editorial_run(ResearchEditorialRunInput {
+                    run_id,
+                    stage,
+                    model_provider,
+                    model_name,
+                    prompt_version,
+                    input_artifact_id,
+                    output_artifact_id,
+                    cost_decision_id,
+                    status,
+                    score,
+                    error_message,
+                })?,
+            )
+        }
+        ResearchSubcommand::EditorialRuns { run_id } => {
+            print_json(&store.list_research_editorial_runs(&run_id)?)
+        }
+        ResearchSubcommand::EditorialRead { id } => {
+            print_json(&store.get_research_editorial_run(&id)?)
+        }
         ResearchSubcommand::CompleteTask { task_id, notes } => {
             print_json(&store.complete_research_task(&task_id, &notes)?)
         }
@@ -3264,6 +3437,11 @@ fn controller(store: Store, args: ControllerCommand) -> Result<()> {
             status.as_deref(),
             limit,
         )?),
+        ControllerSubcommand::ThreadGet { id } => print_json(
+            &store
+                .get_controller_thread(&id)?
+                .with_context(|| format!("controller thread not found: {id}"))?,
+        ),
         ControllerSubcommand::RunCreate {
             thread_id,
             project_id,
@@ -3291,6 +3469,20 @@ fn controller(store: Store, args: ControllerCommand) -> Result<()> {
             project_id.as_deref(),
             status.as_deref(),
             limit,
+        )?),
+        ControllerSubcommand::RunGet { id } => print_json(
+            &store
+                .get_controller_run(&id)?
+                .with_context(|| format!("controller run not found: {id}"))?,
+        ),
+        ControllerSubcommand::RunUpdate {
+            run_id,
+            status,
+            host_run_id,
+        } => print_json(&store.update_controller_run_status(
+            &run_id,
+            &status,
+            host_run_id.as_deref(),
         )?),
         ControllerSubcommand::Stop { run_id, reason } => {
             print_json(&store.request_controller_stop(&run_id, &reason)?)
@@ -3327,6 +3519,17 @@ fn controller(store: Store, args: ControllerCommand) -> Result<()> {
         ControllerSubcommand::Pending { status, limit } => {
             print_json(&store.list_controller_pending_actions(status.as_deref(), limit)?)
         }
+        ControllerSubcommand::PendingResolve {
+            id,
+            status,
+            thread_id,
+            run_id,
+        } => print_json(&store.resolve_controller_pending_action(
+            &id,
+            &status,
+            thread_id.as_deref(),
+            run_id.as_deref(),
+        )?),
     }
 }
 
@@ -6610,6 +6813,109 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             let id = required_string(&arguments, "id")?;
             Ok(json!(store.read_research_host_search(&id)?))
         }
+        "research_document_extract" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let path = required_string(&arguments, "path")?;
+            Ok(json!(
+                store.extract_research_document_file(ResearchDocumentInput {
+                    run_id,
+                    research_source_id: arguments
+                        .get("research_source_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    source_card_id: arguments
+                        .get("source_card_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    path: PathBuf::from(path),
+                    media_type: arguments
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })?
+            ))
+        }
+        "research_documents" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.list_research_documents(&run_id)?))
+        }
+        "research_document_read" => {
+            let id = required_string(&arguments, "id")?;
+            Ok(json!(store.read_research_document(&id)?))
+        }
+        "research_evidence_pack" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.build_research_evidence_pack(&run_id)?))
+        }
+        "research_editorial_invoke" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let stage = required_string(&arguments, "stage")?;
+            Ok(json!(
+                store.invoke_research_editorial(ResearchEditorialInvokeInput {
+                    run_id,
+                    stage,
+                    model_provider: optional_string(&arguments, "model_provider", "openai"),
+                    model_name: arguments
+                        .get("model_name")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    prompt_version: optional_string(&arguments, "prompt_version", "v1"),
+                    input_artifact_id: arguments
+                        .get("input_artifact_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    endpoint: arguments
+                        .get("endpoint")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    api_key: arguments
+                        .get("api_key")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    timeout_seconds: arguments.get("timeout_seconds").and_then(Value::as_u64),
+                },)?
+            ))
+        }
+        "research_editorial_record" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let stage = required_string(&arguments, "stage")?;
+            let model_name = required_string(&arguments, "model_name")?;
+            Ok(json!(
+                store.record_research_editorial_run(ResearchEditorialRunInput {
+                    run_id,
+                    stage,
+                    model_provider: optional_string(&arguments, "model_provider", "openai"),
+                    model_name,
+                    prompt_version: optional_string(&arguments, "prompt_version", "v1"),
+                    input_artifact_id: arguments
+                        .get("input_artifact_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    output_artifact_id: arguments
+                        .get("output_artifact_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    cost_decision_id: arguments
+                        .get("cost_decision_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    status: optional_string(&arguments, "status", "completed"),
+                    score: arguments.get("score").cloned().unwrap_or_else(|| json!({})),
+                    error_message: arguments
+                        .get("error_message")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })?
+            ))
+        }
+        "research_editorial_runs" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.list_research_editorial_runs(&run_id)?))
+        }
+        "research_editorial_read" => {
+            let id = required_string(&arguments, "id")?;
+            Ok(json!(store.get_research_editorial_run(&id)?))
+        }
         "research_task_complete" => {
             let task_id = required_string(&arguments, "task_id")?;
             let notes = required_string(&arguments, "notes")?;
@@ -6736,6 +7042,12 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             arguments.get("status").and_then(Value::as_str),
             optional_usize(&arguments, "limit", 25),
         )?)),
+        "controller_thread_get" => {
+            let id = required_string(&arguments, "id")?;
+            Ok(json!(store.get_controller_thread(&id)?.with_context(
+                || format!("controller thread not found: {id}")
+            )?))
+        }
         "controller_run_create" => {
             let host = optional_string(&arguments, "host", "codex");
             let kind = optional_string(&arguments, "kind", "work");
@@ -6761,6 +7073,21 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             arguments.get("status").and_then(Value::as_str),
             optional_usize(&arguments, "limit", 25),
         )?)),
+        "controller_run_get" => {
+            let id = required_string(&arguments, "id")?;
+            Ok(json!(store.get_controller_run(&id)?.with_context(
+                || format!("controller run not found: {id}")
+            )?))
+        }
+        "controller_run_update" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let status = required_string(&arguments, "status")?;
+            Ok(json!(store.update_controller_run_status(
+                &run_id,
+                &status,
+                arguments.get("host_run_id").and_then(Value::as_str),
+            )?))
+        }
         "controller_stop" => {
             let run_id = required_string(&arguments, "run_id")?;
             let reason = required_string(&arguments, "reason")?;
@@ -6790,6 +7117,16 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             arguments.get("status").and_then(Value::as_str),
             optional_usize(&arguments, "limit", 25),
         )?)),
+        "controller_pending_resolve" => {
+            let id = required_string(&arguments, "id")?;
+            let status = required_string(&arguments, "status")?;
+            Ok(json!(store.resolve_controller_pending_action(
+                &id,
+                &status,
+                arguments.get("thread_id").and_then(Value::as_str),
+                arguments.get("run_id").and_then(Value::as_str),
+            )?))
+        }
         "work_run_start" => {
             let goal = required_string(&arguments, "goal")?;
             let project_id = arguments.get("project_id").and_then(Value::as_str);
@@ -7812,6 +8149,68 @@ fn mcp_tools() -> Vec<Value> {
             [("id", "string", "Host search id.")],
         ),
         tool(
+            "research_document_extract",
+            "Extract a local CSV, TSV, PDF, or supported document into auditable research document/table/span artifacts.",
+            [
+                ("run_id", "string", "Research run id."),
+                ("path", "string", "Local document path."),
+            ],
+        ),
+        tool(
+            "research_documents",
+            "List extracted document/table/span artifacts for one deep research run.",
+            [("run_id", "string", "Research run id.")],
+        ),
+        tool(
+            "research_document_read",
+            "Read one extracted research document artifact by id.",
+            [("id", "string", "Research document id.")],
+        ),
+        tool(
+            "research_evidence_pack",
+            "Build a deterministic evidence-pack artifact for model-backed editorial drafting and evaluation.",
+            [("run_id", "string", "Research run id.")],
+        ),
+        tool(
+            "research_editorial_invoke",
+            "Invoke a live or mock model-backed editorial/eval stage and record its inspectable output artifact.",
+            [
+                ("run_id", "string", "Research run id."),
+                (
+                    "stage",
+                    "string",
+                    "editorial_drafter, citation_verifier, adversarial_evaluator, final_audit, or evidence_pack.",
+                ),
+            ],
+        ),
+        tool(
+            "research_editorial_record",
+            "Record one model-backed editorial, citation-verifier, or adversarial-evaluator run.",
+            [
+                ("run_id", "string", "Research run id."),
+                (
+                    "stage",
+                    "string",
+                    "evidence_pack, editorial_drafter, citation_verifier, adversarial_evaluator, or final_audit.",
+                ),
+                (
+                    "model_name",
+                    "string",
+                    "Model name used for the editorial/eval stage.",
+                ),
+            ],
+        ),
+        tool(
+            "research_editorial_runs",
+            "List model-backed editorial/eval run records for one deep research run.",
+            [("run_id", "string", "Research run id.")],
+        ),
+        tool(
+            "research_editorial_read",
+            "Read one model-backed editorial/eval run record by id.",
+            [("id", "string", "Editorial run id.")],
+        ),
+        tool(
             "research_task_complete",
             "Complete a daemon-tracked research task with notes.",
             [
@@ -7896,6 +8295,11 @@ fn mcp_tools() -> Vec<Value> {
             [],
         ),
         tool(
+            "controller_thread_get",
+            "Read one known controller host-thread row by Arcwell controller thread id.",
+            [("id", "string", "Arcwell controller thread id.")],
+        ),
+        tool(
             "controller_run_create",
             "Register a controller run for a requested host action.",
             [("requested_action", "string", "Requested action text.")],
@@ -7904,6 +8308,19 @@ fn mcp_tools() -> Vec<Value> {
             "controller_run_list",
             "List controller runs, optionally filtered by project or status.",
             [],
+        ),
+        tool(
+            "controller_run_get",
+            "Read one controller run row by id.",
+            [("id", "string", "Controller run id.")],
+        ),
+        tool(
+            "controller_run_update",
+            "Update a controller run status after a host adapter creates, sends, stops, or observes work.",
+            [
+                ("run_id", "string", "Controller run id."),
+                ("status", "string", "New controller run status."),
+            ],
         ),
         tool(
             "controller_stop",
@@ -7930,6 +8347,14 @@ fn mcp_tools() -> Vec<Value> {
             "controller_pending_list",
             "List queued controller actions waiting for a host adapter or approval.",
             [],
+        ),
+        tool(
+            "controller_pending_resolve",
+            "Mark a queued controller action processing, completed, failed, cancelled, expired, or deferred.",
+            [
+                ("id", "string", "Controller pending action id."),
+                ("status", "string", "New pending action status."),
+            ],
         ),
         tool(
             "work_run_start",
@@ -9319,7 +9744,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 105);
+        assert_eq!(command_names.len(), 106);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -10335,9 +10760,13 @@ reason = "MCP secret writes are denied for this token"
         for expected in [
             "controller_route_text",
             "controller_thread_upsert",
+            "controller_thread_get",
             "controller_run_create",
+            "controller_run_get",
+            "controller_run_update",
             "controller_stop",
             "controller_pending_list",
+            "controller_pending_resolve",
         ] {
             assert!(tool_names.contains(expected), "missing tool {expected}");
         }
@@ -10436,6 +10865,62 @@ reason = "MCP secret writes are denied for this token"
         assert_eq!(
             stopped.get("cancel_requested").and_then(Value::as_bool),
             Some(true)
+        );
+        let updated = call_mcp_tool(
+            &paths,
+            "controller_run_update",
+            json!({
+                "run_id": run_id,
+                "status": "cancelled",
+                "host_run_id": "codex-stop-delivered"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            updated.get("status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            updated.get("host_run_id").and_then(Value::as_str),
+            Some("codex-stop-delivered")
+        );
+
+        let queued = call_mcp_tool(
+            &paths,
+            "controller_route_text",
+            json!({
+                "channel": "telegram",
+                "conversation_id": "chat:123",
+                "sender": "chat:123",
+                "text": "Implement another feature in arcwell"
+            }),
+        )
+        .unwrap();
+        let pending_id = queued
+            .pointer("/pending_action/id")
+            .and_then(Value::as_str)
+            .unwrap();
+        let resolved = call_mcp_tool(
+            &paths,
+            "controller_pending_resolve",
+            json!({
+                "id": pending_id,
+                "status": "completed",
+                "thread_id": thread_id,
+                "run_id": run_id
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            resolved
+                .get("resolved_at")
+                .and_then(Value::as_str)
+                .is_some(),
+            true
         );
 
         let resource = dispatch_mcp(

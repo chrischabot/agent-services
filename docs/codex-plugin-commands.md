@@ -200,6 +200,13 @@ typing part of the name. Use the displayed command name from the picker.
   them, then records a freshness-bounded verified snapshot with
   `project_status_sync_record` or `arcwell project status-sync-record`. It must
   report unavailable host tools instead of pretending live state exists.
+- `/codex-host-adapter` uses resident Codex app thread tools plus
+  `controller_pending_list`, `controller_pending_resolve`,
+  `controller_thread_get`, `controller_thread_upsert`, `controller_run_get`,
+  `controller_run_create`, `controller_run_update`, `controller_event_record`,
+  `project_status_get`, and `project_status_sync_record` to process queued
+  controller actions. Stops are cooperative unless a future hard-stop host API
+  is exposed.
 - `/channel-list` uses `channel_list`.
 - `/channel-record` uses `channel_record`.
 - `/channel-authorize` uses `channel_authorize`.
@@ -247,8 +254,11 @@ Skills are the primary reusable behavior surface. In Codex they appear as `$...`
 - `$arcwell-codex:research-audit`: adversarially check sources, claims, provenance, and uncertainty.
 - `$arcwell-codex:research-brief`: render concise artifacts from already-collected wiki/source-card evidence.
 - `$arcwell-codex:x-research`: import, search, report, and evaluate X evidence safely.
+- `$arcwell-codex:tidal-control`: list, inspect, create, and update TIDAL playlists, add resolved tracks, and favorite tracks/playlists from an existing authenticated TIDAL desktop session.
+- `$arcwell-codex:lumin-control`: discover/inspect LUMIN/OpenHome renderers, send official LUMIN UDP playback/volume commands, and run explicit SOAP actions against verified service URLs.
 - `$arcwell-codex:project-control`: resolve and manage project context across threads and channels.
 - `$arcwell-codex:channel-control`: handle Telegram and future channel messages without prompt-injection leakage.
+- `$arcwell-codex:codex-host-adapter`: process Arcwell controller pending actions with resident Codex app thread tools.
 - `$arcwell-codex:ops-control`: inspect jobs, queues, cursors, edge events, and service health.
 - `$arcwell-codex:worker-control`: drain workers safely and interpret job failures.
 - `$arcwell-codex:competence-respect`: use enough reasoning, consult memory/tools, and avoid wasting the user’s time.

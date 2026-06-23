@@ -162,14 +162,15 @@ validated profiles, run local radar passes over existing source cards and
 source-card-backed RSS/GitHub/arXiv/X selectors, normalize source cards into
 `radar_items`, index them with FTS, apply transparent heuristic interestingness
 scores, record exact canonical-URL/source-native dedupe groups without deleting
-source evidence, read run stages, rebuild radar FTS, and audit for drift,
+source evidence, write deterministic Markdown summaries over selected scored
+items, read run stages and summaries, rebuild radar FTS, and audit for drift,
 missing provenance, unscored rows, corrupt dedupe groups, empty output, and
 unsupported selectors.
 
 This is copied-home production-data proof over existing Arcwell source-card
 outputs. Radar-owned live RSS/GitHub/arXiv/X fetching, HN, Reddit, semantic
-dedupe, enrichment, summaries, delivery, and scheduled operation remain future
-work.
+dedupe, enrichment/model-backed synthesis, delivery, and scheduled operation
+remain future work.
 
 ### Worker And Ops
 

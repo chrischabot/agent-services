@@ -188,18 +188,23 @@ PR, implementation note, or final report:
       inspection, unsafe-member and unsupported-slice warnings, and MCP
       round-trip coverage. Import reports now list unsupported slice counts and
       sample files without reading private/unsupported payload bytes. Remaining
-      work is old/new archive fixture corpus breadth and account identity
-      conflict failure. Current tests also prove reimport idempotency for the
+      work is old/new archive fixture corpus breadth and archive account-slice
+      identity validation. Current tests also prove reimport idempotency for the
       local tweet archive path, fail malformed selected slices before writes,
       reject compressed archive bombs plus nested archives before earlier rows
-      survive, and skip unselected malformed/private slices without reading
-      their payload text.
+      survive, skip unselected malformed/private slices without reading their
+      payload text, and reject same-handle/different-author identity conflicts
+      before tweet rows are written.
 - [ ] Add X archive apply coverage for authored tweets, note tweets, profiles,
       followers, following, media metadata, malformed slices, richer selected
       import fixtures, and explicit proof that no secret values are read.
       Likes/bookmarks/tweets have a first local fixture path only, and selected
       tweet imports now prove unselected malformed/private slices are skipped
       without payload reads.
+- [x] Add canonical X profile identity alias/conflict storage: same immutable
+      `x_author_id` across handle renames preserves one profile with alias
+      history, while same-handle/different-author imports record a conflict and
+      reject the item before tweet/source-card/projection writes.
 - [ ] Extend the implemented X URL/link index beyond the current local
       extraction and explicit expansion layers. `x extract-links` /
       `x_extract_links` index safe URL occurrences without fetching; `x links`
@@ -308,10 +313,12 @@ PR, implementation note, or final report:
       evidence, duplicate score statuses, audit drift checks, schema-migration
       coverage, severe local tests, and copied-home production-data proof over
       2,500 real source cards.
+- [x] Add deterministic radar Markdown summary artifacts over selected scored
+      items, CLI/MCP/slash surfaces, no-delivery/no-source-evidence boundaries,
+      severe tests, and copied-home production-data proof.
 - [ ] Add radar semantic dedupe, score freshness, source-quality windows,
-      category/source balancing, summaries, delivery attempts, ops UI
-      visibility, slash prompts, and MCP docs/status promotion only after
-      real-data gates pass.
+      category/source balancing, model-backed synthesis, delivery attempts, ops
+      UI visibility, and status promotion only after real-data gates pass.
 - [ ] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; keep real local agent/author addresses only in ignored
       env or secret config.

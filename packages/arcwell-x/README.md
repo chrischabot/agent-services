@@ -96,6 +96,10 @@ Boundary:
   tweets, source edges, bookmark collections, source-card projections, and FTS
   search. `arcwell x list` remains the compatibility listing surface;
   `arcwell x search-tweets` and `x_search_tweets` search canonical local rows.
+- Canonical profile identity uses immutable `x_author_id` / `x_user_id` when
+  present. Handle renames are preserved as alias history, and same-handle /
+  different-user conflicts are recorded and rejected before tweet rows are
+  written.
 - `arcwell x stats` and `x_stats` report compatibility/canonical row counts,
   FTS drift, projection/sync-run status, source-health status, and X watch
   source status; sync-run errors are redacted before display.

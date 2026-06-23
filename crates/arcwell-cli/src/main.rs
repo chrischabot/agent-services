@@ -2217,6 +2217,8 @@ enum RadarSubcommand {
         profile: String,
         #[arg(long)]
         window_hours: Option<i64>,
+        #[arg(long)]
+        fetch_live: bool,
     },
     Runs,
     Stage {
@@ -3630,7 +3632,12 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
         RadarSubcommand::Run {
             profile,
             window_hours,
-        } => print_json(&store.run_radar_profile(&profile, window_hours)?),
+            fetch_live,
+        } => print_json(&store.run_radar_profile_with_options(
+            &profile,
+            window_hours,
+            fetch_live,
+        )?),
         RadarSubcommand::Runs => print_json(&store.list_radar_runs()?),
         RadarSubcommand::Stage { run_id } => print_json(&store.read_radar_stage(&run_id)?),
         RadarSubcommand::Summarize {
@@ -8462,7 +8469,12 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
         "radar_run" => {
             let profile = required_string(&arguments, "profile")?;
             let window_hours = arguments.get("window_hours").and_then(Value::as_i64);
-            Ok(json!(store.run_radar_profile(&profile, window_hours)?))
+            let fetch_live = optional_bool(&arguments, "fetch_live", false);
+            Ok(json!(store.run_radar_profile_with_options(
+                &profile,
+                window_hours,
+                fetch_live,
+            )?))
         }
         "radar_runs" => Ok(json!(store.list_radar_runs()?)),
         "radar_stage_read" => {
@@ -9887,8 +9899,12 @@ fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "radar_run",
-            "Run a radar profile through the locally proven source-card projection, FTS, and heuristic scoring stages.",
-            [("profile", "string", "Radar profile id or name.")],
+            "Run a radar profile. By default this uses the locally proven source-card projection, FTS, and heuristic scoring stages; fetch_live=true first invokes existing Arcwell RSS/GitHub/arXiv/X adapters and records adapter jobs/source health.",
+            [
+                ("profile", "string", "Radar profile id or name."),
+                ("window_hours", "integer", "Optional run window override in hours."),
+                ("fetch_live", "boolean", "Opt in to live adapter fetches before source-card projection."),
+            ],
         ),
         tool("radar_runs", "List radar runs.", []),
         tool(

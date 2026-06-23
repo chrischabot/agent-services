@@ -142,6 +142,12 @@ Evidence:
   `selected`, 26 `duplicate_url`, and 2,424 `over_profile_limit` score rows;
   `radar stage` preserved all 2,500 item rows and listed the 26
   `canonical_url` dedupe groups.
+- The same copied-home run wrote deterministic Markdown summary
+  `radar-summary-95b92c60cf9bd0c214a2d3864edbf7b4` with `arcwell radar
+  summarize`. It covered 50 selected items and 50 source cards, carried forward
+  the 26 dedupe groups and score-status counts in metadata, stored
+  `not_delivery=true`, advanced `summary_count=1`, kept `delivery_count=0`, and
+  `arcwell radar summary` read back the same artifact.
 
 Still not proven by this slice:
 
@@ -149,7 +155,7 @@ Still not proven by this slice:
   Telegram/OSS/OpenBB fetch.
 - Cursor/source-health advancement for radar-owned live adapters.
 - Semantic dedupe, category/source balancing, source-quality decay.
-- Model-backed interestingness, enrichment, summaries, and delivery attempts.
+- Model-backed interestingness, enrichment/synthesis, and delivery attempts.
 - Scheduled worker operation, retry/recovery, ops UI controls, and full
   production multi-source proof.
 
@@ -1007,13 +1013,13 @@ Report sections:
 
 Checklist:
 
-- [ ] Implement Markdown renderer over `radar_summaries`.
+- [x] Implement deterministic Markdown renderer over `radar_summaries`.
 - [ ] Implement compact Telegram renderer with safe Markdown and length caps.
 - [ ] Implement email renderer with inert Markdown/HTML conversion policy.
 - [ ] Implement JSON renderer for programmatic consumers.
-- [ ] Include source-card ids and URLs for each item.
-- [ ] Include dedupe and rejection stats.
-- [ ] Include score distribution and category quotas.
+- [x] Include source-card ids and URLs for each selected item.
+- [x] Include dedupe and rejection/status stats.
+- [ ] Include full score distribution and category quotas.
 - [ ] Include source-health status at time of run.
 - [ ] Include stale/failed/missing source warnings in the executive caveats.
 - [ ] Add no-write mode that renders but writes no summary rows.
@@ -1416,7 +1422,7 @@ Exit gate:
 
 - [ ] Evidence-grounded enrichment.
 - [ ] Citation verification.
-- [ ] Markdown summaries.
+- [x] Deterministic Markdown summaries over selected scored items.
 - [ ] Detailed reports.
 - [ ] Telegram/email renderers.
 - [ ] Report audit.

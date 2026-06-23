@@ -219,6 +219,30 @@ Indexes:
 - `last_seen_at TEXT NOT NULL`
 - primary key `(profile_id, kind, value, source)`
 
+`x_profile_aliases`
+
+- `profile_id TEXT NOT NULL`
+- `handle TEXT NOT NULL`
+- `normalized_handle TEXT NOT NULL`
+- `x_user_id TEXT`
+- `source TEXT NOT NULL`
+- `first_seen_at TEXT NOT NULL`
+- `last_seen_at TEXT NOT NULL`
+- `is_current INTEGER NOT NULL DEFAULT 0`
+- `raw_json TEXT NOT NULL DEFAULT '{}'`
+- primary key `(profile_id, normalized_handle)`
+
+`x_profile_identity_conflicts`
+
+- `id TEXT PRIMARY KEY`
+- `conflict_kind TEXT NOT NULL`
+- `handle TEXT NOT NULL`
+- `normalized_handle TEXT NOT NULL`
+- existing/incoming profile ids and X user ids
+- `source TEXT NOT NULL`
+- `raw_json TEXT NOT NULL DEFAULT '{}'`
+- `created_at TEXT NOT NULL`
+
 Purpose:
 
 - identity lookup such as "the Blacksmith person"
@@ -5760,6 +5784,13 @@ implementation it should catch.
 - [ ] `severe_x_archive_account_mismatch_aborts_before_write`
       - Refutes: wrong user's archive merges into current account.
       - Oracle: no durable row deltas.
+- [x] `severe_x_profile_identity_survives_handle_rename_with_alias_history`
+      - Refutes: handle rename creates two canonical identities.
+      - Oracle: same `x_author_id` creates one profile and two alias rows.
+- [x] `severe_x_profile_identity_conflict_blocks_handle_reuse_before_writes`
+      - Refutes: reused handle with different author id merges into prior owner.
+      - Oracle: conflict row exists and incoming tweet/source/projection rows do
+        not.
 - [ ] `severe_x_archive_selected_tweets_preserve_collections`
       - Refutes: selected slice delete/rewrite drops existing bookmarks.
       - Oracle: collection rows unchanged.

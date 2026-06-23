@@ -26,7 +26,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 pub const APP_NAME: &str = "arcwell";
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 pub const SOURCE_CARD_SCHEMA_VERSION: u64 = 1;
 const MAX_COST_USD: f64 = 1_000_000.0;
 const SOURCE_CARD_STALE_DAYS: i64 = 180;
@@ -717,6 +717,7 @@ pub struct RadarFetchReport {
     pub items_inserted: usize,
     pub scores_inserted: usize,
     pub selected_items: usize,
+    pub adapter_jobs: Vec<WikiJob>,
     pub unsupported_selectors: Vec<Value>,
     pub warnings: Vec<String>,
 }
@@ -4243,6 +4244,10 @@ impl Store {
         })?;
         self.apply_schema_migration(9, "radar_dedup_groups", false, None, |conn| {
             ensure_radar_schema_on(conn)?;
+            Ok(())
+        })?;
+        self.apply_schema_migration(10, "x_profile_identity_events", false, None, |conn| {
+            ensure_x_canonical_schema_on(conn)?;
             Ok(())
         })?;
         self.conn.execute(
@@ -18570,6 +18575,15 @@ impl Store {
         profile_id_or_name: &str,
         window_hours_override: Option<i64>,
     ) -> Result<RadarFetchReport> {
+        self.run_radar_profile_with_options(profile_id_or_name, window_hours_override, false)
+    }
+
+    pub fn run_radar_profile_with_options(
+        &self,
+        profile_id_or_name: &str,
+        window_hours_override: Option<i64>,
+        fetch_live: bool,
+    ) -> Result<RadarFetchReport> {
         let profile = self
             .read_radar_profile(profile_id_or_name)?
             .with_context(|| format!("radar profile not found: {profile_id_or_name}"))?;
@@ -18582,6 +18596,17 @@ impl Store {
         let started_at = now();
         let run_id = Uuid::new_v4().to_string();
         let unsupported_selectors = unsupported_radar_selectors(&profile.source_selectors);
+        let mut run_metadata = json!({
+            "proof_level": if fetch_live { "Live Adapter Attempt" } else { "Local Fixture Proof" },
+            "source_family": if fetch_live { "live_adapter_then_source_card_projection" } else { "source_card_projection" },
+            "unsupported_selectors": unsupported_selectors,
+            "fetch_live": fetch_live,
+            "warning": if fetch_live {
+                "This run invokes existing Arcwell source adapters before projecting source cards; enrichment, model synthesis, delivery, and scheduling are not proven by this stage."
+            } else {
+                "This run projects existing Arcwell source cards only; live network adapters, enrichment, summaries, and delivery are not proven by this stage."
+            }
+        });
         self.conn.execute(
             r#"
             INSERT INTO radar_runs
@@ -18595,12 +18620,7 @@ impl Store {
                 window_start.to_rfc3339(),
                 window_end.to_rfc3339(),
                 serde_json::to_string(&profile.source_selectors)?,
-                serde_json::to_string(&json!({
-                    "proof_level": "Local Fixture Proof",
-                    "source_family": "source_card_query",
-                    "unsupported_selectors": unsupported_selectors,
-                    "warning": "This run projects existing Arcwell source cards only; live network adapters, enrichment, summaries, and delivery are not proven by this stage."
-                }))?,
+                serde_json::to_string(&run_metadata)?,
                 started_at
             ],
         )?;
@@ -18611,6 +18631,28 @@ impl Store {
                 "{} unsupported selector(s) were recorded and skipped",
                 unsupported_selectors.len()
             ));
+        }
+        let mut adapter_jobs = Vec::new();
+        let mut live_pre_job_failed = false;
+        if fetch_live {
+            let (jobs, live_warnings, pre_job_failed) =
+                self.run_radar_live_fetches_for_selectors(&profile.source_selectors)?;
+            adapter_jobs = jobs;
+            live_pre_job_failed = pre_job_failed;
+            warnings.extend(live_warnings);
+            run_metadata["adapter_jobs"] = json!(
+                adapter_jobs
+                    .iter()
+                    .map(|job| json!({
+                        "id": job.id,
+                        "kind": job.kind,
+                        "status": job.status,
+                        "error": job.error,
+                        "result": job.result_json
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            run_metadata["live_fetch_warnings"] = json!(warnings);
         }
         let mut source_cards = Vec::new();
         let selectors = profile
@@ -18640,18 +18682,30 @@ impl Store {
         let selected_items = self.count_radar_selected_scores(&run_id)?;
         let raw_count = source_cards.len() as i64;
         let now = now();
-        let status = if raw_count == 0 && !unsupported_selectors.is_empty() {
+        let live_failed =
+            live_pre_job_failed || adapter_jobs.iter().any(|job| job.status != "completed");
+        let status = if raw_count == 0 && (live_failed || !unsupported_selectors.is_empty()) {
             "blocked"
         } else if raw_count == 0 {
             "empty"
+        } else if live_failed {
+            "partial"
         } else {
             "scored"
         };
-        let error = if raw_count == 0 && !unsupported_selectors.is_empty() {
+        let error = if raw_count == 0 && live_failed {
+            Some(
+                "live adapter fetch failed and no supported selectors produced radar items"
+                    .to_string(),
+            )
+        } else if raw_count == 0 && !unsupported_selectors.is_empty() {
             Some("no supported selectors produced radar items".to_string())
         } else {
             None
         };
+        run_metadata["live_fetch_failed"] = json!(live_failed);
+        run_metadata["live_fetch_pre_job_failed"] = json!(live_pre_job_failed);
+        run_metadata["adapter_job_count"] = json!(adapter_jobs.len());
         self.conn.execute(
             r#"
             UPDATE radar_runs
@@ -18664,7 +18718,8 @@ impl Store {
                 filtered_count = ?8,
                 error = ?9,
                 finished_at = ?10,
-                updated_at = ?10
+                updated_at = ?10,
+                metadata_json = ?11
             WHERE id = ?1
             "#,
             params![
@@ -18677,7 +18732,8 @@ impl Store {
                 scores_inserted as i64,
                 selected_items as i64,
                 error,
-                now
+                now,
+                serde_json::to_string(&run_metadata)?
             ],
         )?;
 
@@ -18689,9 +18745,136 @@ impl Store {
             items_inserted,
             scores_inserted,
             selected_items,
+            adapter_jobs,
             unsupported_selectors,
             warnings,
         })
+    }
+
+    fn run_radar_live_fetches_for_selectors(
+        &self,
+        source_selectors: &Value,
+    ) -> Result<(Vec<WikiJob>, Vec<String>, bool)> {
+        let mut jobs = Vec::new();
+        let mut warnings = Vec::new();
+        let mut pre_job_failed = false;
+        for selector in source_selectors.as_array().cloned().unwrap_or_default() {
+            let Some(kind) = radar_selector_kind(&selector) else {
+                continue;
+            };
+            let Some(locator) = radar_selector_locator(&selector) else {
+                continue;
+            };
+            let limit = selector
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .clamp(1, 30) as usize;
+            let job = match kind.as_str() {
+                "source_card_query" => continue,
+                "rss" => self.run_rss_fetch_job(&locator),
+                "github_owner" => self.run_github_owner_job(&locator, limit),
+                "github_release" | "github" => {
+                    if let Some((owner, repo)) = parse_github_repo_locator(&locator) {
+                        self.run_github_repo_job(&owner, &repo, "releases", limit)
+                    } else if kind == "github" {
+                        self.run_github_owner_job(&locator, limit)
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "github_release radar selector requires locator owner/repo"
+                        ))
+                    }
+                }
+                "arxiv" => self.run_arxiv_search_job(&locator, limit),
+                "x" | "x_handle" => {
+                    let handle = locator.trim().trim_start_matches('@');
+                    self.run_x_recent_search_job(&format!("from:{handle}"), limit.max(10))
+                }
+                _ => continue,
+            };
+            match job {
+                Ok(job) => {
+                    if job.status != "completed" {
+                        self.record_radar_live_fetch_failure_for_selector(
+                            &kind,
+                            &locator,
+                            job.error.as_deref().unwrap_or("live adapter job failed"),
+                        )?;
+                        warnings.push(format!(
+                            "live adapter job {} ({}) ended with status {}{}",
+                            job.id,
+                            job.kind,
+                            job.status,
+                            job.error
+                                .as_deref()
+                                .map(|error| format!(": {error}"))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    jobs.push(job);
+                }
+                Err(error) => {
+                    pre_job_failed = true;
+                    self.record_radar_live_fetch_failure_for_selector(
+                        &kind,
+                        &locator,
+                        &error.to_string(),
+                    )?;
+                    warnings.push(format!(
+                        "live adapter {kind}:{locator} failed before job record: {error}"
+                    ));
+                }
+            }
+        }
+        Ok((jobs, warnings, pre_job_failed))
+    }
+
+    fn record_radar_live_fetch_failure_for_selector(
+        &self,
+        kind: &str,
+        locator: &str,
+        error: &str,
+    ) -> Result<()> {
+        match kind {
+            "rss" => {
+                let key = format!(
+                    "rss:{}",
+                    canonical_source_url(locator).unwrap_or_else(|_| locator.to_string())
+                );
+                self.record_source_failure(&key, "rss", "rss", locator, error)?;
+            }
+            "github_owner" => {
+                let key = format!("github-owner:{locator}");
+                self.record_source_failure(&key, "github", "github_owner", locator, error)?;
+            }
+            "github_release" | "github" => {
+                if let Some((owner, repo)) = parse_github_repo_locator(locator) {
+                    let key = format!("github:{owner}/{repo}:releases");
+                    self.record_source_failure(
+                        &key,
+                        "github",
+                        "github_repo",
+                        &format!("{owner}/{repo}:releases"),
+                        error,
+                    )?;
+                } else {
+                    let key = format!("github-owner:{locator}");
+                    self.record_source_failure(&key, "github", "github_owner", locator, error)?;
+                }
+            }
+            "arxiv" => {
+                let key = format!("arxiv:{locator}");
+                self.record_source_failure(&key, "arxiv", "arxiv_query", locator, error)?;
+            }
+            "x" | "x_handle" => {
+                let handle = locator.trim().trim_start_matches('@');
+                let query = format!("from:{handle}");
+                let key = format!("x:recent-search:{query}");
+                self.record_source_failure(&key, "x", "x_recent_search", &query, error)?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn list_radar_runs(&self) -> Result<Vec<RadarRun>> {
@@ -19093,6 +19276,27 @@ impl Store {
                 message: "Radar scores mark duplicate items without auditable dedupe groups."
                     .to_string(),
                 evidence: format!("duplicate_scores={duplicate_score_count} dedup_groups=0"),
+            });
+        }
+        if run
+            .metadata
+            .get("live_fetch_failed")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let severity = if item_count == 0 { "high" } else { "medium" };
+            findings.push(RadarAuditFinding {
+                severity: severity.to_string(),
+                code: "radar_live_fetch_failed".to_string(),
+                message: "One or more opt-in live radar adapters failed before or during fetch."
+                    .to_string(),
+                evidence: serde_json::to_string(&json!({
+                    "status": run.status,
+                    "items": item_count,
+                    "adapter_job_count": run.metadata.get("adapter_job_count"),
+                    "warnings": run.metadata.get("live_fetch_warnings"),
+                    "pre_job_failed": run.metadata.get("live_fetch_pre_job_failed")
+                }))?,
             });
         }
         let item_ids = self
@@ -21821,6 +22025,12 @@ impl Store {
 
     fn insert_x_item(&self, input: XItemInput) -> Result<Option<XItem>> {
         validate_x_item_input(&input)?;
+        let x_author_id = input
+            .source_metadata
+            .get("x_author_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        resolve_x_profile_id_on(&self.conn, &input.author, x_author_id, &input)?;
         let existing: Option<String> = self
             .conn
             .query_row(
@@ -26268,6 +26478,33 @@ fn ensure_x_canonical_schema_on(conn: &Connection) -> Result<()> {
           PRIMARY KEY(profile_id, kind, value, source)
         );
 
+        CREATE TABLE IF NOT EXISTS x_profile_aliases (
+          profile_id TEXT NOT NULL,
+          handle TEXT NOT NULL,
+          normalized_handle TEXT NOT NULL,
+          x_user_id TEXT,
+          source TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 0,
+          raw_json TEXT NOT NULL DEFAULT '{}',
+          PRIMARY KEY(profile_id, normalized_handle)
+        );
+
+        CREATE TABLE IF NOT EXISTS x_profile_identity_conflicts (
+          id TEXT PRIMARY KEY,
+          conflict_kind TEXT NOT NULL,
+          handle TEXT NOT NULL,
+          normalized_handle TEXT NOT NULL,
+          existing_profile_id TEXT,
+          incoming_profile_id TEXT,
+          existing_x_user_id TEXT,
+          incoming_x_user_id TEXT,
+          source TEXT NOT NULL,
+          raw_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS x_tweets (
           id TEXT PRIMARY KEY,
           x_id TEXT NOT NULL UNIQUE,
@@ -26388,6 +26625,8 @@ fn ensure_x_canonical_schema_on(conn: &Connection) -> Result<()> {
         USING fts5(x_id UNINDEXED, author_handle, text, url_text);
 
         CREATE INDEX IF NOT EXISTS idx_x_profiles_handle ON x_profiles(handle);
+        CREATE INDEX IF NOT EXISTS idx_x_profile_aliases_handle ON x_profile_aliases(normalized_handle);
+        CREATE INDEX IF NOT EXISTS idx_x_profile_identity_conflicts_created ON x_profile_identity_conflicts(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_x_tweets_author_created ON x_tweets(author_profile_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_x_tweets_created ON x_tweets(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_x_tweets_conversation ON x_tweets(conversation_id, created_at ASC);
@@ -26666,9 +26905,14 @@ fn upsert_x_canonical_on(
     wiki_page_id: Option<&str>,
 ) -> Result<()> {
     ensure_x_default_account_on(conn)?;
-    let profile_id = x_profile_id(&input.author);
     let seen_at = input.retrieved_at.clone().unwrap_or_else(now);
     let now_value = now();
+    let x_author_id = input
+        .source_metadata
+        .get("x_author_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let profile_id = resolve_x_profile_id_on(conn, &input.author, x_author_id, input)?;
     let metrics_json = canonical_json(&input.metrics)?;
     let raw_json = canonical_json(&input.raw)?;
     let entities_json = canonical_json(&x_item_entities(input))?;
@@ -26702,6 +26946,8 @@ fn upsert_x_canonical_on(
           (id, x_user_id, handle, display_name, description, raw_json, first_seen_at, last_seen_at, updated_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
         ON CONFLICT(id) DO UPDATE SET
+          handle = excluded.handle,
+          x_user_id = COALESCE(x_profiles.x_user_id, excluded.x_user_id),
           display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE x_profiles.display_name END,
           description = CASE WHEN excluded.description != '' THEN excluded.description ELSE x_profiles.description END,
           raw_json = CASE WHEN excluded.raw_json != '{}' THEN excluded.raw_json ELSE x_profiles.raw_json END,
@@ -26710,10 +26956,7 @@ fn upsert_x_canonical_on(
         "#,
         params![
             profile_id,
-            input
-                .source_metadata
-                .get("x_author_id")
-                .and_then(Value::as_str),
+            x_author_id,
             input.author,
             display_name,
             description,
@@ -26721,6 +26964,15 @@ fn upsert_x_canonical_on(
             seen_at,
             now_value
         ],
+    )?;
+    upsert_x_profile_alias_on(
+        conn,
+        &profile_id,
+        &input.author,
+        x_author_id,
+        &input.source_kind,
+        &seen_at,
+        &profile_raw_json,
     )?;
     let snapshot_hash = sha256(
         format!(
@@ -26925,10 +27177,195 @@ fn rebuild_x_tweets_fts_on(conn: &Connection) -> Result<usize> {
     Ok(inserted)
 }
 
+fn resolve_x_profile_id_on(
+    conn: &Connection,
+    handle: &str,
+    x_author_id: Option<&str>,
+    input: &XItemInput,
+) -> Result<String> {
+    let normalized_handle = normalize_x_handle_for_identity(handle);
+    if let Some(x_user_id) = x_author_id {
+        if let Some(existing_profile_id) = conn
+            .query_row(
+                "SELECT id FROM x_profiles WHERE x_user_id = ?1",
+                params![x_user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(existing_profile_id);
+        }
+
+        let handle_profile_id = x_profile_id(handle);
+        if let Some((existing_profile_id, existing_x_user_id)) = conn
+            .query_row(
+                "SELECT id, x_user_id FROM x_profiles WHERE id = ?1",
+                params![handle_profile_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        {
+            if let Some(existing_x_user_id) = existing_x_user_id {
+                if existing_x_user_id != x_user_id {
+                    record_x_profile_identity_conflict_on(
+                        conn,
+                        "handle_reuse",
+                        handle,
+                        &normalized_handle,
+                        Some(&existing_profile_id),
+                        Some(&x_profile_user_id(x_user_id)),
+                        Some(&existing_x_user_id),
+                        Some(x_user_id),
+                        input,
+                    )?;
+                    bail!(
+                        "X profile identity conflict for handle @{normalized_handle}: existing user id differs from incoming user id"
+                    );
+                }
+            }
+            return Ok(existing_profile_id);
+        }
+        if let Some((existing_profile_id, existing_x_user_id)) = conn
+            .query_row(
+                r#"
+                SELECT id, x_user_id FROM x_profiles
+                WHERE lower(handle) = ?1 AND x_user_id IS NOT NULL
+                UNION
+                SELECT profile_id, x_user_id FROM x_profile_aliases
+                WHERE normalized_handle = ?1 AND x_user_id IS NOT NULL
+                LIMIT 1
+                "#,
+                params![normalized_handle],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_x_user_id != x_user_id {
+                record_x_profile_identity_conflict_on(
+                    conn,
+                    "handle_reuse",
+                    handle,
+                    &normalized_handle,
+                    Some(&existing_profile_id),
+                    Some(&x_profile_user_id(x_user_id)),
+                    Some(&existing_x_user_id),
+                    Some(x_user_id),
+                    input,
+                )?;
+                bail!(
+                    "X profile identity conflict for handle @{normalized_handle}: existing user id differs from incoming user id"
+                );
+            }
+            return Ok(existing_profile_id);
+        }
+
+        return Ok(x_profile_user_id(x_user_id));
+    }
+    Ok(x_profile_id(handle))
+}
+
+fn upsert_x_profile_alias_on(
+    conn: &Connection,
+    profile_id: &str,
+    handle: &str,
+    x_user_id: Option<&str>,
+    source: &str,
+    seen_at: &str,
+    raw_json: &str,
+) -> Result<()> {
+    let normalized_handle = normalize_x_handle_for_identity(handle);
+    conn.execute(
+        "UPDATE x_profile_aliases SET is_current = 0 WHERE profile_id = ?1 AND normalized_handle != ?2",
+        params![profile_id, normalized_handle],
+    )?;
+    conn.execute(
+        r#"
+        INSERT INTO x_profile_aliases
+          (profile_id, handle, normalized_handle, x_user_id, source, first_seen_at, last_seen_at, is_current, raw_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1, ?7)
+        ON CONFLICT(profile_id, normalized_handle) DO UPDATE SET
+          handle = excluded.handle,
+          x_user_id = COALESCE(x_profile_aliases.x_user_id, excluded.x_user_id),
+          source = excluded.source,
+          last_seen_at = excluded.last_seen_at,
+          is_current = 1,
+          raw_json = excluded.raw_json
+        "#,
+        params![
+            profile_id,
+            handle.trim_start_matches('@'),
+            normalized_handle,
+            x_user_id,
+            source,
+            seen_at,
+            raw_json
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_x_profile_identity_conflict_on(
+    conn: &Connection,
+    conflict_kind: &str,
+    handle: &str,
+    normalized_handle: &str,
+    existing_profile_id: Option<&str>,
+    incoming_profile_id: Option<&str>,
+    existing_x_user_id: Option<&str>,
+    incoming_x_user_id: Option<&str>,
+    input: &XItemInput,
+) -> Result<()> {
+    let created_at = now();
+    let raw_json = canonical_json(&json!({
+        "tweet_x_id": input.x_id,
+        "source_kind": input.source_kind,
+        "source_detail": input.source_detail,
+        "source_metadata": input.source_metadata,
+    }))?;
+    let stable = format!(
+        "{conflict_kind}\n{normalized_handle}\n{}\n{}\n{}",
+        existing_x_user_id.unwrap_or(""),
+        incoming_x_user_id.unwrap_or(""),
+        input.x_id
+    );
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO x_profile_identity_conflicts
+          (id, conflict_kind, handle, normalized_handle, existing_profile_id,
+           incoming_profile_id, existing_x_user_id, incoming_x_user_id, source,
+           raw_json, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "#,
+        params![
+            format!("xconf-{}", &sha256(stable.as_bytes())[..32]),
+            conflict_kind,
+            handle.trim_start_matches('@'),
+            normalized_handle,
+            existing_profile_id,
+            incoming_profile_id,
+            existing_x_user_id,
+            incoming_x_user_id,
+            input.source_kind,
+            raw_json,
+            created_at
+        ],
+    )?;
+    Ok(())
+}
+
 fn x_profile_id(handle: &str) -> String {
-    let normalized = handle.trim_start_matches('@').to_ascii_lowercase();
+    let normalized = normalize_x_handle_for_identity(handle);
     let hash = sha256(normalized.as_bytes());
     format!("xprof-{}", &hash[..32])
+}
+
+fn x_profile_user_id(x_user_id: &str) -> String {
+    let hash = sha256(format!("user:{x_user_id}").as_bytes());
+    format!("xprof-{}", &hash[..32])
+}
+
+fn normalize_x_handle_for_identity(handle: &str) -> String {
+    handle.trim().trim_start_matches('@').to_ascii_lowercase()
 }
 
 fn cursor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CursorState> {
@@ -27599,6 +28036,27 @@ fn radar_selector_kind(selector: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(|kind| kind.trim().to_ascii_lowercase())
         .filter(|kind| !kind.is_empty())
+}
+
+fn radar_selector_locator(selector: &Value) -> Option<String> {
+    selector
+        .get("query")
+        .or_else(|| selector.get("locator"))
+        .or_else(|| selector.get("handle"))
+        .and_then(Value::as_str)
+        .map(|locator| locator.trim().to_string())
+        .filter(|locator| !locator.is_empty())
+}
+
+fn parse_github_repo_locator(locator: &str) -> Option<(String, String)> {
+    let trimmed = locator.trim().trim_matches('/');
+    let mut parts = trimmed.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
 }
 
 fn unsupported_radar_selectors(source_selectors: &Value) -> Vec<Value> {
@@ -33399,6 +33857,7 @@ fn x_archive_record_to_import_item(
             "origin": "x_archive",
             "archive_path": source_path,
             "record_kind": record_kind,
+            "x_author_id": first_string(payload, &["x_author_id", "author_id", "user_id", "userId", "userIdStr"]),
             "network_fetch": false
         }
     }))
@@ -38292,6 +38751,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(migration_name, "radar_dedup_groups");
+    }
+
+    #[test]
+    fn severe_schema_migration_adds_x_profile_identity_events_after_v9() {
+        // CLAIM: schema version 10 upgrades existing v9 homes with X profile alias
+        // and identity-conflict tables instead of only working for fresh databases.
+        // ORACLE: a hand-built schema_version=9 database with migration 9 recorded
+        // gains both identity tables and records migration 10 after Store::open.
+        // SEVERITY: Severe because identity safety must exist in upgraded local homes
+        // before future X imports run.
+        let paths = test_paths("schema-fixture-x-profile-identity-v9");
+        paths.ensure().unwrap();
+        let conn = Connection::open(&paths.db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '9');
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              destructive INTEGER NOT NULL DEFAULT 0,
+              backup_id TEXT,
+              applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations
+              (version, name, destructive, backup_id, applied_at)
+            VALUES
+              (9, 'radar_dedup_groups', 0, NULL, '2026-06-23T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(paths).unwrap();
+        assert_eq!(store.stored_schema_version().unwrap(), SCHEMA_VERSION);
+        for table in ["x_profile_aliases", "x_profile_identity_conflicts"] {
+            let table_count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 1, "missing migrated table {table}");
+        }
+        let migration_name: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM schema_migrations WHERE version = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration_name, "x_profile_identity_events");
     }
 
     #[test]
@@ -45162,6 +45676,161 @@ reason = "network blocked for resident poll test"
         assert_eq!(stats.latest_sync_runs[0].seen, 2);
         assert_eq!(stats.latest_sync_runs[0].inserted, 1);
         assert_eq!(stats.latest_sync_runs[0].skipped_duplicates, 1);
+    }
+
+    #[test]
+    fn severe_x_profile_identity_survives_handle_rename_with_alias_history() {
+        // CLAIM: immutable X author ids, when present, own canonical identity across
+        // handle changes; handles are aliases, not primary identity.
+        // ORACLE: two imports with the same x_author_id and different handles create
+        // one profile, two aliases, no conflicts, and both tweets point to the same
+        // profile id.
+        // SEVERITY: Severe because handle-derived identity silently corrupts history
+        // when accounts rename.
+        let store = test_store("x-profile-handle-rename");
+        let report = store
+            .import_x_json_value(&json!([
+                {
+                    "id": "identity-old",
+                    "author": "oldhandle",
+                    "text": "Old handle tweet.",
+                    "url": "https://x.com/oldhandle/status/identity-old",
+                    "source_metadata": { "x_author_id": "user-123", "author_name": "Identity Person" }
+                },
+                {
+                    "id": "identity-new",
+                    "author": "newhandle",
+                    "text": "New handle tweet.",
+                    "url": "https://x.com/newhandle/status/identity-new",
+                    "source_metadata": { "x_author_id": "user-123", "author_name": "Identity Person" }
+                }
+            ]))
+            .unwrap();
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.rejected, 0);
+
+        let profile_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_profiles WHERE x_user_id = 'user-123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_count, 1);
+        let distinct_author_profiles: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT author_profile_id) FROM x_tweets WHERE x_id IN ('identity-old', 'identity-new')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct_author_profiles, 1);
+        let aliases: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_profile_aliases WHERE x_user_id = 'user-123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(aliases, 2);
+        let current_alias: String = store
+            .conn
+            .query_row(
+                "SELECT normalized_handle FROM x_profile_aliases WHERE x_user_id = 'user-123' AND is_current = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_alias, "newhandle");
+        let conflicts: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_profile_identity_conflicts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conflicts, 0);
+    }
+
+    #[test]
+    fn severe_x_profile_identity_conflict_blocks_handle_reuse_before_writes() {
+        // CLAIM: if the same handle arrives with a different immutable X author id,
+        // Arcwell records an identity conflict and rejects that item before any tweet,
+        // compatibility, source-card, or projection rows are written for it.
+        // ORACLE: the second import is counted as rejected, creates a conflict row,
+        // and leaves no durable rows for the incoming tweet id.
+        // SEVERITY: Severe because handle reuse can attach another person's history
+        // to the wrong profile if we merge by handle.
+        let store = test_store("x-profile-handle-conflict");
+        store
+            .import_x_json_value(&json!([
+                {
+                    "id": "identity-owner",
+                    "author": "sharedhandle",
+                    "text": "Original owner.",
+                    "url": "https://x.com/sharedhandle/status/identity-owner",
+                    "source_metadata": { "x_author_id": "user-original" }
+                }
+            ]))
+            .unwrap();
+
+        let report = store
+            .import_x_json_value(&json!([
+                {
+                    "id": "identity-intruder",
+                    "author": "sharedhandle",
+                    "text": "Different account using the same handle.",
+                    "url": "https://x.com/sharedhandle/status/identity-intruder",
+                    "source_metadata": { "x_author_id": "user-different" }
+                }
+            ]))
+            .unwrap();
+        assert_eq!(report.imported, 0);
+        assert_eq!(report.rejected, 1);
+
+        let conflict: (String, String, String) = store
+            .conn
+            .query_row(
+                "SELECT conflict_kind, existing_x_user_id, incoming_x_user_id FROM x_profile_identity_conflicts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict.0, "handle_reuse");
+        assert_eq!(conflict.1, "user-original");
+        assert_eq!(conflict.2, "user-different");
+
+        let leaked_items: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_items WHERE x_id = 'identity-intruder'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let leaked_tweets: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_tweets WHERE x_id = 'identity-intruder'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let leaked_projections: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_projections WHERE entity_id = 'identity-intruder'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked_items, 0);
+        assert_eq!(leaked_tweets, 0);
+        assert_eq!(leaked_projections, 0);
     }
 
     #[test]

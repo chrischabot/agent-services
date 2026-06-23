@@ -40914,7 +40914,8 @@ reason = "RSS live fetch denied for radar test"
             finding.code == "radar_live_fetch_failed" && finding.severity == "high"
         }));
         assert!(
-            store.get_cursor("rss:https://example.com/feed.xml")
+            store
+                .get_cursor("rss:https://example.com/feed.xml")
                 .unwrap()
                 .is_none()
         );

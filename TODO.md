@@ -185,12 +185,13 @@ PR, implementation note, or final report:
       calls, `import_archive` sync runs, canonical writes/FTS/projections, and
       MCP round-trip tests. `x discover-archives` / `x_discover_archives` now
       performs no-write, shallow candidate discovery with bounded ZIP member
-      inspection, unsafe-member warnings, and MCP round-trip coverage. Remaining
+      inspection, unsafe-member and unsupported-slice warnings, and MCP
+      round-trip coverage. Import reports now list unsupported slice counts and
+      sample files without reading private/unsupported payload bytes. Remaining
       work is old/new archive fixture corpus breadth, decompression-bomb
-      fixture, account identity conflict failure, broader selected-slice
-      preservation, and operator reporting for unsupported slices. Current tests
-      also prove reimport idempotency for the local tweet archive path and fail
-      malformed selected slices before writes.
+      fixture, account identity conflict failure, and broader selected-slice
+      preservation. Current tests also prove reimport idempotency for the local
+      tweet archive path and fail malformed selected slices before writes.
 - [ ] Add X archive apply coverage for authored tweets, note tweets, profiles,
       followers, following, media metadata, malformed slices, selected imports
       preserving unselected state, and explicit proof that no secret values are
@@ -288,6 +289,18 @@ PR, implementation note, or final report:
       explicit config, policy, cost gates, and eval coverage.
 - [ ] Add delivery routing for X/watch-source digest candidates through the same
       email/Telegram delivery-attempt infrastructure.
+- [x] Add Horizon-inspired radar substrate with durable profiles, runs,
+      normalized source-card-backed items, radar FTS, heuristic score overlays,
+      CLI/MCP run/stage/audit surfaces, and severe local-proof tests for
+      unsupported selectors, FTS drift, unscored items, provenance links, and
+      prompt-injection source text.
+- [ ] Extend radar fetch from local source-card query into real RSS, GitHub,
+      arXiv, and X watch-source projections with source-health/cursor safety
+      and copied/disposable-home production-data proof.
+- [ ] Add radar exact/semantic dedupe, score freshness, source-quality windows,
+      category/source balancing, summaries, delivery attempts, ops UI visibility,
+      slash prompts, and MCP docs/status promotion only after real-data gates
+      pass.
 - [ ] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; keep real local agent/author addresses only in ignored
       env or secret config.

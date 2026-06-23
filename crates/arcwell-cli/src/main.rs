@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
     AppPaths, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
-    ResearchActiveFactCheckInput, ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
-    ResearchConvergenceProviderSearchInput, ResearchConvergenceStartInput,
-    ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
-    ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
-    ResearchRoleRunStart, ResearchSourceInput, SourceCardInput, Store, WebSearchConfig,
-    XStatsReport, personal_memory_eval_corpus,
+    RadarProfileInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
+    ResearchConvergenceCloseLoopInput, ResearchConvergenceProviderSearchInput,
+    ResearchConvergenceStartInput, ResearchConvergenceStepInput, ResearchDocumentInput,
+    ResearchEditorialInvokeInput, ResearchEditorialRunInput, ResearchHostSearchInput,
+    ResearchHostSearchResultInput, ResearchRoleRunStart, ResearchSourceInput, SourceCardInput,
+    Store, WebSearchConfig, XStatsReport, personal_memory_eval_corpus,
 };
 use axum::{
     Json, Router,
@@ -54,6 +54,7 @@ enum Command {
     Wiki(WikiCommand),
     SourceCard(SourceCardCommand),
     Research(ResearchCommand),
+    Radar(RadarCommand),
     X(XCommand),
     Telegram(TelegramCommand),
     Email(EmailCommand),
@@ -954,6 +955,26 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
         "digest-candidates",
         SlashAliasTarget::Mcp("digest_candidate_list"),
     ),
+    (
+        "radar-profile-create",
+        SlashAliasTarget::Mcp("radar_profile_create"),
+    ),
+    (
+        "radar-profile-read",
+        SlashAliasTarget::Mcp("radar_profile_read"),
+    ),
+    (
+        "radar-profiles",
+        SlashAliasTarget::Mcp("radar_profile_list"),
+    ),
+    ("radar-run", SlashAliasTarget::Mcp("radar_run")),
+    ("radar-runs", SlashAliasTarget::Mcp("radar_runs")),
+    ("radar-stage", SlashAliasTarget::Mcp("radar_stage_read")),
+    ("radar-audit", SlashAliasTarget::Mcp("radar_audit_run")),
+    (
+        "radar-repair-fts",
+        SlashAliasTarget::Mcp("radar_rebuild_fts"),
+    ),
     ("edge-ack", SlashAliasTarget::Mcp("edge_event_ack")),
     (
         "edge-dead-letter",
@@ -1236,6 +1257,7 @@ fn run(store: Store, command: Command) -> Result<()> {
         Command::Wiki(args) => wiki(store, args),
         Command::SourceCard(args) => source_card(store, args),
         Command::Research(args) => research(store, args),
+        Command::Radar(args) => radar(store, args),
         Command::X(args) => x_command(store, args),
         Command::Telegram(args) => telegram(store, args),
         Command::Email(args) => email(store, args),
@@ -2175,6 +2197,61 @@ fn research_convergence_close_loop_input(
         editorial_endpoint: args.editorial_endpoint,
         editorial_timeout_seconds: args.editorial_timeout_seconds,
     }
+}
+
+#[derive(Args)]
+struct RadarCommand {
+    #[command(subcommand)]
+    command: RadarSubcommand,
+}
+
+#[derive(Subcommand)]
+enum RadarSubcommand {
+    Profile {
+        #[command(subcommand)]
+        command: RadarProfileSubcommand,
+    },
+    Run {
+        profile: String,
+        #[arg(long)]
+        window_hours: Option<i64>,
+    },
+    Runs,
+    Stage {
+        run_id: String,
+    },
+    Audit {
+        run_id: String,
+    },
+    RepairFts {
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RadarProfileSubcommand {
+    Create {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long, default_value_t = 24)]
+        window_hours: i64,
+        #[arg(long, default_value_t = 5.0)]
+        min_score: f64,
+        #[arg(long)]
+        max_items: Option<i64>,
+        #[arg(long, value_delimiter = ',', default_value = "en")]
+        language: Vec<String>,
+        #[arg(long = "source-card-query")]
+        source_card_query: Vec<String>,
+        #[arg(long = "selector-json")]
+        selector_json: Vec<String>,
+    },
+    List,
+    Read {
+        profile: String,
+    },
 }
 
 #[derive(Args)]
@@ -3488,6 +3565,62 @@ fn research(store: Store, args: ResearchCommand) -> Result<()> {
         }
         ResearchSubcommand::Audit { query } => print_json(&store.audit_research_output(&query)?),
         ResearchSubcommand::Runs => print_json(&store.list_research_runs()?),
+    }
+}
+
+fn radar(store: Store, args: RadarCommand) -> Result<()> {
+    match args.command {
+        RadarSubcommand::Profile { command } => match command {
+            RadarProfileSubcommand::Create {
+                name,
+                description,
+                window_hours,
+                min_score,
+                max_items,
+                language,
+                source_card_query,
+                selector_json,
+            } => {
+                let mut selectors: Vec<Value> = source_card_query
+                    .into_iter()
+                    .map(|query| json!({ "kind": "source_card_query", "query": query }))
+                    .collect();
+                for raw in selector_json {
+                    let selector: Value = serde_json::from_str(&raw)
+                        .with_context(|| format!("invalid selector JSON: {raw}"))?;
+                    selectors.push(selector);
+                }
+                if selectors.is_empty() {
+                    bail!("radar profile requires at least one selector");
+                }
+                print_json(&store.create_radar_profile(RadarProfileInput {
+                    name,
+                    description,
+                    window_hours,
+                    min_score,
+                    max_items,
+                    languages: language,
+                    source_selectors: Value::Array(selectors),
+                    delivery_policy: json!({ "delivery": "manual_only" }),
+                    model_policy: json!({ "model_scoring": "disabled" }),
+                    metadata: json!({ "created_from": "cli" }),
+                })?)
+            }
+            RadarProfileSubcommand::List => print_json(&store.list_radar_profiles()?),
+            RadarProfileSubcommand::Read { profile } => {
+                print_json(&store.read_radar_profile(&profile)?)
+            }
+        },
+        RadarSubcommand::Run {
+            profile,
+            window_hours,
+        } => print_json(&store.run_radar_profile(&profile, window_hours)?),
+        RadarSubcommand::Runs => print_json(&store.list_radar_runs()?),
+        RadarSubcommand::Stage { run_id } => print_json(&store.read_radar_stage(&run_id)?),
+        RadarSubcommand::Audit { run_id } => print_json(&store.audit_radar_run(&run_id)?),
+        RadarSubcommand::RepairFts { run_id } => {
+            print_json(&json!({ "rebuilt": store.rebuild_radar_fts(run_id.as_deref())? }))
+        }
     }
 }
 
@@ -6746,6 +6879,8 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                 { "uri": "arcwell://secret-health", "name": "Secret Health", "mimeType": "application/json" },
                 { "uri": "arcwell://x-items", "name": "X Items", "mimeType": "application/json" },
                 { "uri": "arcwell://research", "name": "Research Runs", "mimeType": "application/json" },
+                { "uri": "arcwell://radar", "name": "Radar Runs", "mimeType": "application/json" },
+                { "uri": "arcwell://radar-profiles", "name": "Radar Profiles", "mimeType": "application/json" },
                 { "uri": "arcwell://edge-events", "name": "Edge Inbox Events", "mimeType": "application/json" },
                 { "uri": "arcwell://channels", "name": "Channel Messages", "mimeType": "application/json" },
                 { "uri": "arcwell://projects", "name": "Projects", "mimeType": "application/json" },
@@ -6777,6 +6912,8 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                 "arcwell://secret-health" => json!(store.secret_health()?),
                 "arcwell://x-items" => json!(store.list_x_items(None)?),
                 "arcwell://research" => json!(store.list_research_runs()?),
+                "arcwell://radar" => json!(store.list_radar_runs()?),
+                "arcwell://radar-profiles" => json!(store.list_radar_profiles()?),
                 "arcwell://edge-events" => json!(store.list_edge_events()?),
                 "arcwell://channels" => json!(store.list_channel_messages()?),
                 "arcwell://projects" => json!(store.list_projects()?),
@@ -8256,6 +8393,64 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             ))
         }
         "digest_candidate_list" => Ok(json!(store.list_digest_candidates()?)),
+        "radar_profile_create" => {
+            let name = required_string(&arguments, "name")?;
+            let description = optional_string(&arguments, "description", "");
+            let window_hours = optional_i64_arg(&arguments, "window_hours").unwrap_or(24);
+            let min_score = optional_f64_arg(&arguments, "min_score").unwrap_or(5.0);
+            let max_items = arguments.get("max_items").and_then(Value::as_i64);
+            let languages = string_array_argument(&arguments, "languages")?;
+            let source_selectors = arguments
+                .get("source_selectors")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            Ok(json!(
+                store.create_radar_profile(RadarProfileInput {
+                    name,
+                    description,
+                    window_hours,
+                    min_score,
+                    max_items,
+                    languages,
+                    source_selectors,
+                    delivery_policy: arguments
+                        .get("delivery_policy")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "delivery": "manual_only" })),
+                    model_policy: arguments
+                        .get("model_policy")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "model_scoring": "disabled" })),
+                    metadata: arguments
+                        .get("metadata")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "created_from": "mcp" })),
+                })?
+            ))
+        }
+        "radar_profile_list" => Ok(json!(store.list_radar_profiles()?)),
+        "radar_profile_read" => {
+            let profile = required_string(&arguments, "profile")?;
+            Ok(json!(store.read_radar_profile(&profile)?))
+        }
+        "radar_run" => {
+            let profile = required_string(&arguments, "profile")?;
+            let window_hours = arguments.get("window_hours").and_then(Value::as_i64);
+            Ok(json!(store.run_radar_profile(&profile, window_hours)?))
+        }
+        "radar_runs" => Ok(json!(store.list_radar_runs()?)),
+        "radar_stage_read" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.read_radar_stage(&run_id)?))
+        }
+        "radar_audit_run" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.audit_radar_run(&run_id)?))
+        }
+        "radar_rebuild_fts" => {
+            let run_id = arguments.get("run_id").and_then(Value::as_str);
+            Ok(json!({ "rebuilt": store.rebuild_radar_fts(run_id)? }))
+        }
         "librarian_expand_topic" => {
             let topic = required_string(&arguments, "topic")?;
             Ok(json!({ "page_id": store.librarian_expand_topic(&topic)? }))
@@ -9631,6 +9826,45 @@ fn mcp_tools() -> Vec<Value> {
             [],
         ),
         tool(
+            "radar_profile_create",
+            "Create a Horizon-style radar profile over configured selectors.",
+            [
+                ("name", "string", "Profile name."),
+                (
+                    "source_selectors",
+                    "array",
+                    "Selector objects; source_card_query is locally implemented.",
+                ),
+            ],
+        ),
+        tool("radar_profile_list", "List radar profiles.", []),
+        tool(
+            "radar_profile_read",
+            "Read a radar profile by id or name.",
+            [("profile", "string", "Radar profile id or name.")],
+        ),
+        tool(
+            "radar_run",
+            "Run a radar profile through the locally proven source-card projection, FTS, and heuristic scoring stages.",
+            [("profile", "string", "Radar profile id or name.")],
+        ),
+        tool("radar_runs", "List radar runs.", []),
+        tool(
+            "radar_stage_read",
+            "Read normalized radar items and score overlays for a run.",
+            [("run_id", "string", "Radar run id.")],
+        ),
+        tool(
+            "radar_audit_run",
+            "Audit a radar run for FTS drift, missing provenance, unscored items, empty output, and unsupported selectors.",
+            [("run_id", "string", "Radar run id.")],
+        ),
+        tool(
+            "radar_rebuild_fts",
+            "Rebuild radar item FTS rows globally or for one run.",
+            [],
+        ),
+        tool(
             "librarian_expand_topic",
             "Ask the wiki librarian to expand a topic from source cards and wiki pages.",
             [("topic", "string", "Topic to expand.")],
@@ -9759,7 +9993,7 @@ fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_import_archive",
-            "Import supported Twitter/X archive tweets, bookmarks, and likes from a local directory or zip without network access.",
+            "Import supported Twitter/X archive tweets, bookmarks, and likes from a local directory or zip without network access, while reporting unsupported slices without reading them.",
             [
                 (
                     "path",
@@ -11310,7 +11544,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 118);
+        assert_eq!(command_names.len(), 126);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -12601,6 +12835,110 @@ reason = "MCP secret writes are denied for this token"
         let job =
             call_mcp_tool(&paths, "wiki_expand_page", json!({ "topic": "MCP Source" })).unwrap();
         assert_eq!(job.get("status").and_then(Value::as_str), Some("completed"));
+    }
+
+    #[test]
+    fn severe_mcp_radar_surface_round_trips_without_cli_fallback() {
+        // CLAIM: radar is an agent-usable MCP surface, not only a core/CLI implementation.
+        // ORACLE: MCP tools create a profile, run it over a real source card, expose
+        // stage/audit/resources, and advertise the tool names.
+        // SEVERITY: Severe because unadvertised or uncallable agent surfaces create
+        // the "feature looks done but is not actually usable" failure mode.
+        let paths = test_paths("mcp-radar-round-trip");
+        let card = call_mcp_tool(
+            &paths,
+            "source_card_add",
+            json!({
+                "title": "Radar MCP Proof",
+                "url": "https://example.com/radar-mcp-proof",
+                "summary": "Agent infrastructure source card for radar MCP proof.",
+                "claims": [
+                    { "claim": "Radar MCP proof claim", "kind": "fact", "confidence": 0.8 }
+                ]
+            }),
+        )
+        .unwrap();
+        let card_id = card.get("id").and_then(Value::as_str).unwrap();
+
+        let profile = call_mcp_tool(
+            &paths,
+            "radar_profile_create",
+            json!({
+                "name": "mcp-radar-proof",
+                "description": "MCP radar proof profile",
+                "languages": ["en"],
+                "min_score": 1.0,
+                "source_selectors": [
+                    { "kind": "source_card_query", "query": "radar MCP proof" }
+                ]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            profile.get("status").and_then(Value::as_str),
+            Some("local_proof_ready")
+        );
+
+        let run = call_mcp_tool(
+            &paths,
+            "radar_run",
+            json!({ "profile": profile.get("id").and_then(Value::as_str).unwrap() }),
+        )
+        .unwrap();
+        let run_id = run.pointer("/run/id").and_then(Value::as_str).unwrap();
+        assert_eq!(
+            run.pointer("/run/status").and_then(Value::as_str),
+            Some("scored")
+        );
+        assert_eq!(run.get("items_inserted").and_then(Value::as_u64), Some(1));
+
+        let stage = call_mcp_tool(&paths, "radar_stage_read", json!({ "run_id": run_id })).unwrap();
+        assert_eq!(
+            stage
+                .pointer("/items/0/source_card_id")
+                .and_then(Value::as_str),
+            Some(card_id)
+        );
+        assert_eq!(
+            stage.pointer("/scores/0/status").and_then(Value::as_str),
+            Some("selected")
+        );
+
+        let audit = call_mcp_tool(&paths, "radar_audit_run", json!({ "run_id": run_id })).unwrap();
+        assert_eq!(audit.get("ok").and_then(Value::as_bool), Some(true));
+
+        let profiles = dispatch_mcp(
+            &paths,
+            "resources/read",
+            json!({ "uri": "arcwell://radar-profiles" }),
+        )
+        .unwrap();
+        assert_eq!(
+            profiles.pointer("/contents/0/uri").and_then(Value::as_str),
+            Some("arcwell://radar-profiles")
+        );
+        assert!(
+            serde_json::to_string(&profiles)
+                .unwrap()
+                .contains("mcp-radar-proof")
+        );
+
+        let tool_names: BTreeSet<_> = mcp_tools()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect();
+        for expected in [
+            "radar_profile_create",
+            "radar_run",
+            "radar_stage_read",
+            "radar_audit_run",
+        ] {
+            assert!(tool_names.contains(expected), "missing MCP tool {expected}");
+        }
     }
 
     #[test]

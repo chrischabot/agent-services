@@ -150,6 +150,14 @@ typing part of the name. Use the displayed command name from the picker.
 - `/source-card-read` uses `source_card_read`.
 - `/digest-candidate-create` uses `digest_candidate_create`.
 - `/digest-candidates` uses `digest_candidate_list`.
+- `/radar-profile-create` uses `radar_profile_create`.
+- `/radar-profiles` uses `radar_profile_list`.
+- `/radar-profile-read` uses `radar_profile_read`.
+- `/radar-run` uses `radar_run`.
+- `/radar-runs` uses `radar_runs`.
+- `/radar-stage` uses `radar_stage_read`.
+- `/radar-audit` uses `radar_audit_run`.
+- `/radar-repair-fts` uses `radar_rebuild_fts`.
 
 ### Research
 

@@ -190,7 +190,9 @@ Future work:
 - Model-backed interestingness classifier and digest delivery.
 - Archive discovery is no-write and shallow; archive support beyond
   tweets/bookmarks/likes remains intentionally unimplemented for profiles,
-  followers, following, DMs, and media.
+  followers, following, DMs, and media. Discovery and import now report
+  unsupported slices explicitly; import does not read unsupported/private
+  payload bytes.
 - Portable export is implemented for canonical tweet rows. Remaining work is
   scheduled backup integration, richer freshness/ops visibility, and broader X
   entity coverage beyond tweets.

@@ -564,8 +564,8 @@ Outputs:
 
 Checklist:
 
-- [ ] Implement `radar_profiles` migration and structs.
-- [ ] Implement profile CRUD with validation.
+- [x] Implement `radar_profiles` migration and structs.
+- [x] Implement profile create/list/read with validation.
 - [ ] Add profile source selectors for `rss`, `github_release`,
       `github_owner`, `arxiv`, `x_handle`, `source_card_query`, `hackernews`,
       `reddit`, `telegram_public`, `ossinsight`, and `openbb`.
@@ -575,11 +575,11 @@ Checklist:
       cost gate, and schema validation.
 - [ ] Add source recommendation output that proposes watch-source additions but
       does not auto-write them without explicit user action.
-- [ ] Add profile read output showing unsupported or unproven source selectors.
+- [x] Add profile read output showing unsupported or unproven source selectors.
 
 Anti-mirage gate:
 
-- [ ] A profile with unsupported selectors must not appear healthy.
+- [x] A profile with unsupported selectors must not appear healthy.
 - [ ] Source recommendation must distinguish `recommended`, `already_watched`,
       `requires_secret`, `requires_policy`, `unproven_quality`, and
       `unsupported`.
@@ -628,7 +628,7 @@ Checklist:
 - [ ] Define adapter trait returning normalized fetch records plus raw artifact
       references.
 - [ ] Add fetch ledger fields to `radar_runs`.
-- [ ] Implement source-card query adapter first, because it uses existing local
+- [x] Implement source-card query adapter first, because it uses existing local
       durable data and proves the staged shape.
 - [ ] Implement RSS/GitHub/arXiv projection from existing wiki jobs/source
       cards before adding new network adapters.
@@ -706,16 +706,16 @@ Checklist:
       Reddit score/upvote ratio/comments, GitHub repo/tag/event, X metrics,
       RSS feed category/tags, Telegram public message URL, OSS Insight stars,
       OpenBB tickers/provider.
-- [ ] Add FTS indexing for title/content/author/source kind.
-- [ ] Add repair command that rebuilds FTS and missing safe projections.
-- [ ] Add audit command that reports item/source-card/wiki/FTS drift.
+- [x] Add FTS indexing for title/content/author/source kind.
+- [x] Add repair command that rebuilds FTS.
+- [x] Add audit command that reports item/source-card/FTS drift.
 
 Anti-mirage gate:
 
-- [ ] The run is not indexed if `radar_items` exists but FTS rows are missing.
+- [x] The run is not indexed if `radar_items` exists but FTS rows are missing.
 - [ ] The run is not indexed if accepted external items lack source-card or
       explicit no-projection reason.
-- [ ] The run is not indexed if hostile Markdown/HTML is rendered as trusted
+- [x] The run is not indexed if hostile Markdown/HTML is rendered as trusted
       text.
 
 Production-data proof:
@@ -813,9 +813,9 @@ Score layers:
 
 Checklist:
 
-- [ ] Implement score tables and score read APIs.
-- [ ] Implement deterministic heuristic score first.
-- [ ] Add explanation fields that name positive and negative signals.
+- [x] Implement score tables and score read APIs.
+- [x] Implement deterministic heuristic score first.
+- [x] Add explanation fields that name positive and negative signals.
 - [ ] Add stale-score labels when source rows or profile config changed after
       scoring.
 - [ ] Add category quota and max-item selection after scoring.

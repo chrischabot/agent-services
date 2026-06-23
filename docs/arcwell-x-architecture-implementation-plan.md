@@ -4832,7 +4832,7 @@ Done measure:
 - [x] Fixture archive imports expected row counts for the current local
       tweets/bookmarks/likes fixture.
 - [x] Search finds archive-imported tweets/bookmarks.
-- [ ] Import report lists unsupported/skipped slices with enough operator detail.
+- [x] Import report lists unsupported/skipped slices with enough operator detail.
 
 ### `arcwell x expand-thread`
 

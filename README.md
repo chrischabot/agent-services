@@ -155,6 +155,18 @@ The librarian package turns source cards into expanded topic pages and creates d
 
 Current scoring is intentionally transparent and simple. Rich clustering and model-backed synthesis come later.
 
+### Radar
+
+The radar package is the Horizon-inspired staged digest substrate. It can create
+validated profiles, run a local source-card-backed radar pass, normalize source
+cards into `radar_items`, index them with FTS, apply transparent heuristic
+interestingness scores, read run stages, rebuild radar FTS, and audit for drift,
+missing provenance, unscored rows, empty output, and unsupported selectors.
+
+This is local proof over existing Arcwell source cards. Live RSS/GitHub/arXiv/X,
+HN, Reddit, enrichment, summaries, delivery, and production-data gates remain
+future work.
+
 ### Worker And Ops
 
 The local worker drains queued jobs with leases, retry backoff, and dead-lettering. The ops snapshot shows health, jobs, edge events, cursors, projects, and digest candidates.
@@ -291,7 +303,7 @@ The same MCP server can be configured in Claude Desktop/Code.
 
 ## Slash Commands
 
-The Codex plugin includes slash-command prompts under [plugins/arcwell-codex/commands](plugins/arcwell-codex/commands). They expose the whole MCP tool surface: memory, profile, wiki, source cards, research, watch sources, X, projects, channels, edge inbox, workers, ops, cursors, costs, backups, and secrets.
+The Codex plugin includes slash-command prompts under [plugins/arcwell-codex/commands](plugins/arcwell-codex/commands). They expose the whole MCP tool surface: memory, profile, wiki, source cards, research, radar, watch sources, X, projects, channels, edge inbox, workers, ops, cursors, costs, backups, and secrets.
 
 They also expose local-only maintenance CLI actions that are intentionally not MCP tools, such as memory/profile deletion, candidate rejection, manual wiki page creation, immediate adapter runs, backup status, and external secret references.
 
@@ -309,6 +321,8 @@ Common commands:
 /wiki-ingest
 /research-plan
 /research-brief
+/radar-run
+/radar-audit
 /watch-rss
 /watch-github
 /watch-arxiv
@@ -340,6 +354,10 @@ arcwell research status <run-id>
 arcwell research link-source-card <run-id> <source-card-id>
 arcwell research skeptic <run-id>
 arcwell research report <run-id> "coverage satisfied or limit reached"
+arcwell radar profile create ai-infra --source-card-query agent --min-score 3
+arcwell radar run ai-infra
+arcwell radar stage <run-id>
+arcwell radar audit <run-id>
 arcwell project status-sync-record <project-id> active "Fresh Codex thread summary" --host codex --thread-id <thread-id>
 arcwell wiki enqueue-rss https://example.com/feed.xml
 arcwell wiki enqueue-github-owner openai --limit 10

@@ -126,10 +126,18 @@ Evidence:
   horizon-real-source-cards` with `source_card_query=agent` produced 368
   normalized rows, 368 FTS rows, 368 heuristic scores, and 25 selected items.
   `arcwell radar audit` returned `ok=true` with no findings.
+- Broader copied-home proof at
+  `/tmp/arcwell-radar-family-proof-20260623T184644Z` used a SQLite backup of
+  the real local Arcwell home with `rss=*`, `github=*`, `arxiv=*`, and
+  `x_handle=sawyerhood`, plus an intentionally unsupported
+  `hackernews=frontpage` selector. It produced 1,374 normalized rows, 1,374
+  FTS rows, 1,374 heuristic scores, and 50 selected items. `arcwell radar audit`
+  returned `ok=true` with only the expected medium unsupported-HN finding.
 
 Still not proven by this slice:
 
-- Live RSS/GitHub/arXiv/X/Hacker News/Reddit/public Telegram/OSS/OpenBB fetch.
+- Radar-owned live RSS/GitHub/arXiv/X/Hacker News/Reddit/public
+  Telegram/OSS/OpenBB fetch.
 - Cursor/source-health advancement for radar-owned live adapters.
 - Exact/semantic dedupe, category/source balancing, source-quality decay.
 - Model-backed interestingness, enrichment, summaries, and delivery attempts.
@@ -594,9 +602,11 @@ Checklist:
 
 - [x] Implement `radar_profiles` migration and structs.
 - [x] Implement profile create/list/read with validation.
-- [ ] Add profile source selectors for `rss`, `github_release`,
+- [x] Add profile source selectors for `rss`, `github_release`,
       `github_owner`, `arxiv`, `x_handle`, `source_card_query`, `hackernews`,
-      `reddit`, `telegram_public`, `ossinsight`, and `openbb`.
+      `reddit`, `telegram_public`, `ossinsight`, and `openbb`, with currently
+      supported source-card-backed selectors separated from unsupported future
+      live adapters.
 - [ ] Add source preset import from local JSON.
 - [ ] Add Horizon-style keyword/tag source matching.
 - [ ] Add AI source recommendation only behind explicit model config, policy,
@@ -658,9 +668,10 @@ Checklist:
 - [ ] Add fetch ledger fields to `radar_runs`.
 - [x] Implement source-card query adapter first, because it uses existing local
       durable data and proves the staged shape.
-- [ ] Implement RSS/GitHub/arXiv projection from existing wiki jobs/source
+- [x] Implement RSS/GitHub/arXiv projection from existing wiki jobs/source
       cards before adding new network adapters.
-- [ ] Implement X projection from canonical X rows and source-card projections.
+- [x] Implement X projection from source-card projections.
+- [ ] Implement X projection directly from canonical X rows.
 - [ ] Add Hacker News adapter with real Firebase API, comment capture, and
       rate-limit/error classification.
 - [ ] Add Reddit adapter with public JSON, RSS fallback, top-comment capture,

@@ -21599,7 +21599,12 @@ impl Store {
                 summary: item.summary,
                 claims: Vec::new(),
                 retrieved_at: item.published.or_else(|| Some(now())),
-                metadata: json!({ "feed_url": feed_url, "id": item_id }),
+                metadata: json!({
+                    "source_kind": "rss",
+                    "source_detail": feed_url,
+                    "feed_url": feed_url,
+                    "id": item_id
+                }),
             })?;
             card_ids.insert(card.id);
             last_item_id = Some(item_id);
@@ -21831,7 +21836,12 @@ impl Store {
                     summary: item.summary,
                     claims: Vec::new(),
                     retrieved_at: item.published.or_else(|| Some(now())),
-                    metadata: json!({ "id": item_id, "authors": item.authors }),
+                    metadata: json!({
+                        "source_kind": "arxiv",
+                        "source_detail": query,
+                        "id": item_id,
+                        "authors": item.authors
+                    }),
                 })?;
                 card_ids.insert(card.id);
                 last_item_id = Some(item_id);
@@ -36257,7 +36267,14 @@ fn github_release_to_source_card(owner: &str, repo: &str, item: &Value) -> Resul
             .get("published_at")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        metadata: item.clone(),
+        metadata: json!({
+            "source_kind": "github_release",
+            "source_detail": format!("{owner}/{repo}"),
+            "owner": owner,
+            "repo": repo,
+            "tag": tag,
+            "raw": item
+        }),
     })
 }
 
@@ -36287,7 +36304,14 @@ fn github_commit_to_source_card(owner: &str, repo: &str, item: &Value) -> Result
             .pointer("/commit/author/date")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        metadata: item.clone(),
+        metadata: json!({
+            "source_kind": "github_commit",
+            "source_detail": format!("{owner}/{repo}"),
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "raw": item
+        }),
     })
 }
 
@@ -36332,6 +36356,8 @@ fn github_repo_summary_to_source_card(owner: &str, item: &Value) -> Result<Sourc
         }],
         retrieved_at: pushed_at,
         metadata: json!({
+            "source_kind": "github_owner",
+            "source_detail": owner,
             "owner": owner,
             "name": name,
             "description": description,
@@ -40772,6 +40798,200 @@ reason = "X OAuth disabled during policy test"
                 .iter()
                 .any(|finding| finding.code == "radar_unsupported_selectors")
         );
+    }
+
+    #[test]
+    fn severe_radar_fetch_live_is_explicit_and_provider_failures_are_visible() {
+        // CLAIM: radar live fetching is opt-in, and provider failure cannot be
+        // mistaken for a healthy local projection.
+        // PRECONDITIONS: RSS provider network is denied by policy.
+        // POSTCONDITIONS: default run creates no adapter job/source-health row;
+        // fetch_live creates a failed job, blocked run, source-health failure,
+        // and high-severity audit finding.
+        // SEVERITY: Severe because a live-data pipeline that hides policy denial
+        // would look "integrated" while fetching nothing.
+        let store = test_store("radar-fetch-live-policy-deny");
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "deny-radar-rss"
+effect = "deny"
+action = "provider.network"
+provider = "rss"
+source = "rss_fetch"
+reason = "RSS live fetch denied for radar test"
+"#,
+        );
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "rss-live-radar".to_string(),
+                description: "RSS live radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(5),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([
+                    { "kind": "rss", "locator": "https://example.com/feed.xml", "limit": 3 }
+                ]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let local_report = store.run_radar_profile(&profile.id, None).unwrap();
+        assert_eq!(local_report.run.status, "empty");
+        assert_eq!(
+            local_report
+                .run
+                .metadata
+                .get("fetch_live")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(local_report.adapter_jobs.is_empty());
+        assert!(store.list_wiki_jobs().unwrap().is_empty());
+        assert!(
+            store
+                .get_source_health("rss:https://example.com/feed.xml")
+                .unwrap()
+                .is_none()
+        );
+
+        let live_report = store
+            .run_radar_profile_with_options(&profile.id, None, true)
+            .unwrap();
+        assert_eq!(live_report.run.status, "blocked");
+        assert_eq!(live_report.adapter_jobs.len(), 1);
+        assert_eq!(live_report.adapter_jobs[0].kind, "rss_fetch");
+        assert_eq!(live_report.adapter_jobs[0].status, "failed");
+        assert!(
+            live_report.adapter_jobs[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("policy denied provider.network")
+        );
+        assert_eq!(
+            live_report
+                .run
+                .metadata
+                .get("fetch_live")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            live_report
+                .run
+                .metadata
+                .get("live_fetch_failed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            live_report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ended with status failed"))
+        );
+        let health = store
+            .get_source_health("rss:https://example.com/feed.xml")
+            .unwrap()
+            .expect("failed live selector should record source health");
+        assert_ne!(health.status, "healthy");
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("policy denied provider.network")
+        );
+
+        let audit = store.audit_radar_run(&live_report.run.id).unwrap();
+        assert!(!audit.ok);
+        assert!(audit.findings.iter().any(|finding| {
+            finding.code == "radar_live_fetch_failed" && finding.severity == "high"
+        }));
+        assert!(
+            store.get_cursor("rss:https://example.com/feed.xml")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn severe_radar_fetch_live_pre_job_failure_blocks_and_records_source_health() {
+        // CLAIM: selector validation/pre-job failures are not downgraded to
+        // harmless warnings.
+        // ORACLE: an invalid GitHub release locator creates no job but still
+        // marks the run blocked, records live_fetch_failed, writes source-health
+        // failure state, and fails audit.
+        // SEVERITY: Severe because pre-job validation is a classic place for a
+        // fake "live" feature to silently do nothing.
+        let store = test_store("radar-fetch-live-pre-job-failure");
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "bad-github-release-radar".to_string(),
+                description: "Bad GitHub release radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(5),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([
+                    { "kind": "github_release", "locator": "not-a-repo", "limit": 3 }
+                ]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let report = store
+            .run_radar_profile_with_options(&profile.id, None, true)
+            .unwrap();
+        assert_eq!(report.run.status, "blocked");
+        assert!(report.adapter_jobs.is_empty());
+        assert_eq!(
+            report
+                .run
+                .metadata
+                .get("live_fetch_failed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            report
+                .run
+                .metadata
+                .get("live_fetch_pre_job_failed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("failed before job record"))
+        );
+        let health = store
+            .get_source_health("github-owner:not-a-repo")
+            .unwrap()
+            .expect("pre-job failure should still be visible in source health");
+        assert_ne!(health.status, "healthy");
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("requires locator owner/repo")
+        );
+
+        let audit = store.audit_radar_run(&report.run.id).unwrap();
+        assert!(!audit.ok);
+        assert!(audit.findings.iter().any(|finding| {
+            finding.code == "radar_live_fetch_failed" && finding.severity == "high"
+        }));
     }
 
     #[test]

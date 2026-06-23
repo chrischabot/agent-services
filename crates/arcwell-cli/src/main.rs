@@ -3633,11 +3633,9 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
             profile,
             window_hours,
             fetch_live,
-        } => print_json(&store.run_radar_profile_with_options(
-            &profile,
-            window_hours,
-            fetch_live,
-        )?),
+        } => {
+            print_json(&store.run_radar_profile_with_options(&profile, window_hours, fetch_live)?)
+        }
         RadarSubcommand::Runs => print_json(&store.list_radar_runs()?),
         RadarSubcommand::Stage { run_id } => print_json(&store.read_radar_stage(&run_id)?),
         RadarSubcommand::Summarize {
@@ -9897,14 +9895,15 @@ fn mcp_tools() -> Vec<Value> {
             "Read a radar profile by id or name.",
             [("profile", "string", "Radar profile id or name.")],
         ),
-        tool(
+        tool_with_schema(
             "radar_run",
             "Run a radar profile. By default this uses the locally proven source-card projection, FTS, and heuristic scoring stages; fetch_live=true first invokes existing Arcwell RSS/GitHub/arXiv/X adapters and records adapter jobs/source health.",
-            [
-                ("profile", "string", "Radar profile id or name."),
-                ("window_hours", "integer", "Optional run window override in hours."),
-                ("fetch_live", "boolean", "Opt in to live adapter fetches before source-card projection."),
-            ],
+            json!({
+                "profile": string_schema("Radar profile id or name."),
+                "window_hours": integer_schema("Optional run window override in hours."),
+                "fetch_live": boolean_schema("Opt in to live adapter fetches before source-card projection.")
+            }),
+            &["profile"],
         ),
         tool("radar_runs", "List radar runs.", []),
         tool(
@@ -13060,6 +13059,30 @@ reason = "MCP secret writes are denied for this token"
         ] {
             assert!(tool_names.contains(expected), "missing MCP tool {expected}");
         }
+        let radar_run_tool = mcp_tools()
+            .into_iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("radar_run"))
+            .expect("radar_run tool should exist");
+        assert!(
+            radar_run_tool
+                .pointer("/inputSchema/properties/fetch_live")
+                .is_some(),
+            "radar_run should expose fetch_live"
+        );
+        assert!(
+            radar_run_tool
+                .pointer("/inputSchema/properties/window_hours")
+                .is_some(),
+            "radar_run should expose window_hours"
+        );
+        assert_eq!(
+            radar_run_tool
+                .pointer("/inputSchema/required")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("profile")]
+        );
     }
 
     #[test]

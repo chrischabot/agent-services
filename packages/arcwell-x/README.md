@@ -117,6 +117,9 @@ Boundary:
   indexed links through Arcwell's URL-ingest safety path with policy/cost gates,
   redirect validation, content-type and size limits, and untrusted-source
   rendering. This is intentionally separate from extraction/listing.
+- `arcwell x report` / `x_report` includes indexed link provenance for returned
+  items, including expansion status, linked wiki page id, final URL, and escaped
+  expansion errors when present.
 - `arcwell x export-portable` writes canonical local X tweet rows as a
   deterministic Arcwell portable bundle: `manifest.json` plus hashed JSONL
   shards. `validate-portable` checks manifest format/version, safe relative

@@ -169,6 +169,17 @@ Evidence:
   5 items, `radar audit` returned `ok=true`, and
   `radar-summary-7276ea4ad8fd0d8d0ae243f65a0a4eb5` read back with
   `not_delivery=true`.
+- Reddit local-proof slice added JSON listing fetch with bounded top-comment
+  capture, RSS-first unauthenticated fallback that explicitly does not claim
+  comment capture, source-card persistence, cursor/source-health safety,
+  watch-source enqueue support, and severe policy/fallback/source-card tests.
+- Reddit disposable live proof is not yet production-data proof. Preserved
+  attempts under `/tmp/arcwell-radar-reddit-proof-20260624T075239Z` and
+  `/tmp/arcwell-radar-reddit-debug-20260624T075408Z` show the Arcwell binary
+  receives Reddit HTTP 403 for anonymous RSS/JSON access, even though `curl`
+  intermittently read RSS with the same declared User-Agent. Keep Reddit below
+  `Production Data Proof` until OAuth or another sanctioned access path is
+  implemented and passes the source-card/cursor/source-health/radar gates.
 
 Still not proven by this slice:
 
@@ -691,8 +702,9 @@ Source adapters:
 - Source-card query: read existing local source cards.
 - Hacker News: implemented via the official Firebase API with bounded
   top-level comment evidence.
-- Reddit: new adapter inspired by Horizon, including top comments and RSS
-  fallback where appropriate.
+- Reddit: locally proven adapter inspired by Horizon, including JSON top-comment
+  capture and RSS fallback. Production-data proof is blocked until OAuth or
+  another sanctioned access path passes live gates.
 - Public Telegram channels: optional new adapter inspired by Horizon web preview
   scraping. Keep separate from Arcwell's Telegram bot/channel authority.
 - OSS Insight: optional new adapter for trending repos.
@@ -714,8 +726,10 @@ Checklist:
 - [x] Add Hacker News adapter with real Firebase API, bounded top-level comment
       capture, source-card persistence, cursor/source-health safety,
       watch-source enqueue support, and adapter-failure audit visibility.
-- [ ] Add Reddit adapter with public JSON, RSS fallback, top-comment capture,
-      rate-limit/error classification, and user-agent discipline.
+- [x] Add Reddit adapter with JSON listing fetch, RSS-first unauthenticated
+      fallback, bounded top-comment capture, rate-limit/error classification,
+      source-card persistence, cursor/source-health safety, watch-source enqueue
+      support, User-Agent discipline, and severe local tests.
 - [ ] Add public Telegram adapter with explicit `telegram_public` source kind,
       HTML parsing as untrusted evidence, and no confusion with authorized bot
       chats.
@@ -748,6 +762,8 @@ Production-data proof:
       authenticated user-context data is involved.
 - [x] Run against real Hacker News top stories.
 - [ ] Run against real Reddit subreddits/users configured by profile.
+      Current anonymous Arcwell binary attempts are blocked by Reddit HTTP 403;
+      use OAuth or another sanctioned access path before promotion.
 - [ ] Run against at least one real public Telegram channel only if that source
       kind is enabled.
 - [ ] Run against real OSS Insight data if adapter is included.
@@ -1420,7 +1436,8 @@ Exit gate:
 
 - [x] Hacker News foreground adapter for top/new/best/ask/show/jobs feeds with
       bounded top-level comment evidence.
-- [ ] Reddit.
+- [x] Reddit local adapter for JSON listing/comment capture plus RSS fallback.
+- [ ] Reddit production-data proof through OAuth or sanctioned access.
 - [ ] Public Telegram.
 - [ ] OSS Insight.
 - [ ] OpenBB optional.

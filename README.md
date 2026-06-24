@@ -159,9 +159,9 @@ Current scoring is intentionally transparent and simple. Rich clustering and mod
 
 The radar package is the Horizon-inspired staged digest substrate. It can create
 validated profiles, run local radar passes over existing source cards and
-source-card-backed RSS/GitHub/arXiv/Hacker News/X selectors, optionally invoke
-existing RSS/GitHub/arXiv and Hacker News adapters with `--fetch-live` before
-projection, normalize source cards into `radar_items`, index them with FTS,
+source-card-backed RSS/GitHub/arXiv/Hacker News/Reddit/X selectors, optionally
+invoke existing RSS/GitHub/arXiv and Hacker News adapters with `--fetch-live`
+before projection, normalize source cards into `radar_items`, index them with FTS,
 apply transparent heuristic interestingness scores, record exact
 canonical-URL/source-native dedupe groups without deleting source evidence,
 write deterministic Markdown
@@ -171,9 +171,12 @@ unscored rows, corrupt dedupe groups, empty output, and unsupported selectors.
 
 This has copied/disposable-home production-data proof for existing Arcwell
 source-card outputs and foreground live RSS/GitHub/arXiv/Hacker News adapter
-execution with source-health/cursor state. X live fetching, Reddit, full
-recursive community-thread capture, semantic dedupe, enrichment/model-backed
-synthesis, delivery, and scheduled operation remain future work.
+execution with source-health/cursor state. The Reddit adapter is locally proven
+with JSON comment capture and RSS fallback, but current anonymous live proof is
+blocked by Reddit 403s pending OAuth or another sanctioned access path. X live
+fetching, Reddit production-data proof, full recursive community-thread
+capture, semantic dedupe, enrichment/model-backed synthesis, delivery, and
+scheduled operation remain future work.
 
 ### Worker And Ops
 

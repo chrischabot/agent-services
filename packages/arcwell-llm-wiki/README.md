@@ -88,7 +88,8 @@ Boundary:
 - Source cards are keyed by canonical URL/provider/type so repeated adapter runs update existing cards instead of flooding source-card rows or wiki artifacts.
 - `sync_wiki_dir` performs incremental Markdown sync and tombstones pages whose source Markdown file disappeared so deleted local files stop appearing in list/search evidence.
 - Current search uses a local SQLite FTS title/body index over active pages. Hybrid/vector search comes later.
-- URL ingest is HTTPS-only, rejects local/private/metadata hosts, validates redirects, enforces content type and size bounds, and writes provenance separately from cleaned readable text. HTML extraction is deterministic/readability-like (`article`/`main`/`body` preference plus boilerplate removal), not browser-rendered or model-backed.
+- URL ingest is HTTPS-only, rejects local/private/metadata hosts, validates redirects, enforces content type and size bounds, and writes provenance separately from cleaned readable text. Static HTML extraction is deterministic/readability-like (`article`/`main`/`body` preference plus boilerplate removal), not model-backed.
+- `wiki ingest-rendered` / `wiki_ingest_rendered_page` stores host/browser-supplied rendered DOM or visible text as untrusted wiki evidence with capture metadata. Arcwell does not launch a browser or perform hidden network fetches in this path.
 - External source text is treated as evidence, not instructions; generated source-card pages include an untrusted-source warning and are excluded from local-source evidence for later research briefs.
 
 Cloudflare boundary:

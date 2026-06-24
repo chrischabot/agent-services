@@ -12,8 +12,8 @@ radar pipeline: normalized items, FTS, and heuristic scores.
 
 Only pass `fetch_live: true` when the user explicitly requests live/current
 source fetching. With `fetch_live`, the tool invokes existing Arcwell
-RSS/GitHub/arXiv/Hacker News/X adapters before projection, then inspect the returned
+RSS/GitHub/arXiv/Hacker News/Reddit/X adapters before projection, then inspect the returned
 adapter jobs, source-health state, run status, and audit findings before
-calling the result healthy. Do not imply Reddit fetch, enrichment, model
-summary, scheduled operation, or delivery unless a later proof packet shows
-those stages passed.
+calling the result healthy. Do not imply Reddit production-data proof,
+enrichment, model summary, scheduled operation, or delivery unless a later
+proof packet shows those stages passed.

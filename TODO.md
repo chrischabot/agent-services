@@ -211,9 +211,11 @@ PR, implementation note, or final report:
       / `x_links` list the local index; `x expand-links` / `x_expand_links`
       fetch indexed links through URL-ingest safety with policy/cost gates,
       redirect/private-host checks, content-type and size limits, and durable
-      expansion status rows. Remaining work is richer cache freshness,
-      expansion provenance in reports/digests, large-corpus performance
-      fixtures, and downstream research/digest integration.
+      expansion status rows. `x report` / `x_report` now includes typed link
+      expansion provenance and Markdown status lines for returned items.
+      Remaining work is richer cache freshness, expansion provenance in
+      digests, large-corpus performance fixtures, and downstream research/digest
+      integration.
 - [ ] Extend X thread expansion beyond the implemented local-only CLI/MCP
       layer. `x thread` / `x_thread` now expand already-imported conversation,
       reply, quote, and retweet refs with cycle detection, depth caps, stable
@@ -323,6 +325,9 @@ PR, implementation note, or final report:
       bounded top-comment capture, RSS fallback that does not claim comments,
       source-health/cursor safety, watch-source enqueue support, and severe
       policy/fallback/source-card tests.
+- [ ] Add Reddit production-data proof through OAuth or another sanctioned
+      access path; current anonymous Arcwell binary proof is blocked by Reddit
+      HTTP 403 even when curl can intermittently read RSS.
 - [ ] Extend radar live execution to authenticated X watch/recent-search data
       with copied/disposable-home source-health/cursor proof before promotion.
 - [x] Add radar exact URL/source-native dedupe groups with preserved source
@@ -635,8 +640,14 @@ PR, implementation note, or final report:
       a positive cell-anchored measurement path.
 - [ ] Run fresh reference-topic deep-research live runs after host search,
       subagent orchestration, and provider-backed evals are proven.
+- [x] Add host-supplied browser-rendered page snapshot ingestion through
+      CLI/MCP with no daemon browser/network fetch, public-URL validation,
+      rendered HTML/text size bounds, capture metadata, untrusted rendering,
+      and severe invalid-input/prompt-injection tests.
 - [ ] Add browser-rendered JavaScript readability extraction for pages that
-      require rendering.
+      require rendering, including actual browser capture orchestration,
+      screenshot/page-snapshot artifact storage, blocked-state reporting, and
+      live proof against JS-heavy pages.
 
 ## 6A. Qualified Commerce Research
 

@@ -491,8 +491,9 @@ Invariants:
 - Malformed model output records `failed` and cannot silently become `0` unless
   the reason explicitly says `model_output_invalid`.
 - Model scoring requires policy and cost decisions before provider calls.
-- Private X/DM-like content is excluded from model scoring unless an explicit
-  retention and scoring policy exists.
+- Private X/DM-like content is hard-excluded from model scoring today; any
+  explicit retention/scoring override would require a separate policy design
+  and severe test suite before implementation.
 
 ### `radar_dedup_groups`
 
@@ -962,7 +963,10 @@ Anti-mirage gate:
       metadata excludes candidates before prompt construction, records
       `model_blocked` rows, omits private token-shaped sentinels from
       input/output artifacts, and skips provider/cost paths when every
-      candidate is excluded.
+      candidate is excluded. The gate also audits excluded rows beyond the
+      prompt `max_items` limit, backfills eligible public rows after private
+      candidates, recognizes X/DM/email privacy synonyms, and overwrites stale
+      model rows when source-card provenance becomes unverifiable.
 
 Production-data proof:
 

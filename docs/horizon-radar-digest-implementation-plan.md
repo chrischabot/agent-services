@@ -271,6 +271,17 @@ Evidence:
   selected 75, spanned nine source families, and had a minimum top/bottom
   average-score delta of 1.772. This proves deterministic ranking separation
   and review artifacts, not model-scoring quality, personalization, or delivery.
+- Production-data source-quality decay classification proof now exists through
+  `scripts/radar-source-quality-decay-production-proof`, preserved at
+  `.arcwell-dev/proofs/radar-source-quality-decay-proof-20260624T114329Z-90797/artifacts/proof-packet.json`.
+  Three disposable live public GitHub/arXiv/Hacker News radar runs wrote 75
+  real normalized/indexed/scored items and nine source-quality windows. The
+  proof then time-shifted those real windows across seven days inside the
+  disposable home, verified the latest low-signal run selected zero items,
+  classified all three common source families as `decaying`, exposed healthy
+  source-health/cursors/ops visibility, and passed audits. This proves
+  seven-day decay classification over real public adapter data, not that the
+  resident scheduler actually ran for seven wall-clock days.
 
 Still not proven by this slice:
 
@@ -278,7 +289,8 @@ Still not proven by this slice:
 - Scheduled recurring radar service execution, retry/recovery, and ops UI
   controls.
 - Full recursive HN/Reddit community-thread capture.
-- Arbitrary/model-generated taxonomy quality review and source-quality decay.
+- Arbitrary/model-generated taxonomy quality review and operational
+  wall-clock seven-day source-quality decay.
 - Model-scoring quality, enrichment/synthesis, and delivery attempts.
 - Full production multi-source proof including authenticated/private sources.
 
@@ -1691,6 +1703,8 @@ Exit gate:
 Exit gate:
 
 - [x] Real production ranking review across at least three profiles.
+- [x] Time-shifted seven-day source-quality decay classification over real
+      public adapter data.
 - [ ] Prove category/source balancing changes at least one real production-data
       run where a source family would otherwise dominate.
 - [ ] Model scoring cannot promote if deterministic scoring/audit fails.

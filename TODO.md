@@ -522,12 +522,21 @@ PR, implementation note, or final report:
       audits, ops score distributions, and non-delivery summaries, and writes a
       proof packet at
       `.arcwell-dev/proofs/radar-ranking-review-production-proof-20260624T112621Z-30748`.
+- [x] Add repeatable production-data source-quality decay classification proof:
+      `scripts/radar-source-quality-decay-production-proof` runs three
+      disposable live public GitHub/arXiv/Hacker News radar passes, writes 75
+      real normalized/indexed/scored items and nine source-quality windows,
+      time-shifts those real windows across seven days inside the disposable
+      home, verifies all three common source families classify as `decaying`,
+      checks source-health/cursors/ops visibility, passes audits, and writes a
+      proof packet at
+      `.arcwell-dev/proofs/radar-source-quality-decay-proof-20260624T114329Z-90797`.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
       production quiet-hours deferral, arbitrary/model-generated taxonomy
-      quality review, live model-scoring quality proof, seven-day source-quality
-      trend/decay proof, broader ops controls, and status promotion only after
-      real-data gates pass.
+      quality review, live model-scoring quality proof, operational
+      wall-clock seven-day source-quality decay proof, broader ops controls,
+      and status promotion only after real-data gates pass.
 - [x] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; `scripts/verify-tracked-email-placeholders` now scans
       git-tracked files and fails on non-placeholder email domains so real local

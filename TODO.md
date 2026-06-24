@@ -123,11 +123,6 @@ PR, implementation note, or final report:
 
 - [ ] Decide whether to keep server-rendered HTML or split out a small frontend
       package before adding richer controls.
-- [x] Add browser validation for the richer current `/ops/ui` on desktop and
-      mobile: `scripts/ops-ui-browser-smoke` seeds a disposable authenticated
-      server, drives desktop/detail/mobile browser checks, verifies radar score
-      bars, hostile HTML escaping, no horizontal overflow, and writes screenshots
-      plus a proof packet.
 - [ ] Add manual job requeue/cancel controls only after safe public core APIs
       exist; do not fake unsupported remediation.
 - [ ] Add safe controls for retry delivery, apply/reject candidate, run doctor,
@@ -135,9 +130,6 @@ PR, implementation note, or final report:
 - [ ] Add charts and stale-state summaries for queue age, failed deliveries,
       backup freshness, source health, credential health, costs, work runs, and
       pending reviews.
-      - [x] Radar run score-distribution summaries are now persisted in run
-            metadata and visible in `ops_snapshot` plus `/ops/ui` with
-            generated score bars, detail links, and severe escaping tests.
 - [ ] Add live-provider probe summaries to ops only where probes are cheap,
       safe, redacted, and policy/cost aware.
 - [ ] Keep Obsidian/Markdown as the wiki editing surface; do not duplicate wiki
@@ -172,13 +164,6 @@ PR, implementation note, or final report:
 - [ ] Add X sync-run tests for started/completed/failed/superseded statuses,
       count accuracy, previous/new cursor recording, cost decision linkage, and
       redacted error storage.
-- [x] Add X source-health tests for healthy, stale, rate_limited,
-      auth_failed, policy_denied, projection_failed, partial, and unknown
-      states: `severe_x_source_health_status_matrix_is_visible_to_stats_and_doctor`
-      proves `x_stats` preserves the full local status matrix, non-healthy
-      drift excludes only healthy rows, `health`/strict `doctor` warn, and
-      source-health errors redact token-shaped provider details. This is local
-      severe coverage, not a broader X tier/quota live proof.
 - [ ] Add X cursor-safety tests for malformed provider payloads, all rows
       rejected, duplicate newest ids, older newest ids, source-card projection
       failure, FTS failure, process interruption, and quota/rate limits.
@@ -212,10 +197,6 @@ PR, implementation note, or final report:
       Likes/bookmarks/tweets have a first local fixture path only, and selected
       tweet imports now prove unselected malformed/private slices are skipped
       without payload reads.
-- [x] Add canonical X profile identity alias/conflict storage: same immutable
-      `x_author_id` across handle renames preserves one profile with alias
-      history, while same-handle/different-author imports record a conflict and
-      reject the item before tweet/source-card/projection writes.
 - [ ] Extend the implemented X URL/link index beyond the current local
       extraction and explicit expansion layers. `x extract-links` /
       `x_extract_links` index safe URL occurrences without fetching; `x links`
@@ -233,12 +214,6 @@ PR, implementation note, or final report:
       ordering, and missing-context labels; remaining work is optional
       policy/cost-gated live mode, larger performance fixtures, archive-thread
       fixtures, and report/digest integration.
-- [x] Add X research brief generation only when every claim/quote links to
-      canonical tweet ids or source cards, empty evidence fails honestly,
-      no-write mode performs no writes, and prompt-injection tweets remain
-      quoted evidence. Implemented as local-only `x research` / `x_research`
-      with severe core tests for empty/unprojected/thread-context failure and
-      no-write prompt-injection rendering, plus MCP round-trip coverage.
 - [ ] Add X digest candidate hardening: canonical tweet/thread id linkage,
       source-card linkage, review states, score freshness, delivery-denial
       audit, delivery-attempt integration, quiet-hours schedule, and no
@@ -258,9 +233,12 @@ PR, implementation note, or final report:
       duplicate sends. Severe tests also prove provider failures record failed
       ledger rows with retry metadata, and monitor-created X digest candidates
       can be traced from `x_projections` to `digest_deliveries` to the channel
-      delivery attempt, with ledger rows visible through ops snapshots; score
-      freshness, email parity, due retry orchestration, and quiet-hours
-      scheduling remain open.
+      delivery attempt, with ledger rows visible through ops snapshots. Email
+      digest delivery now uses the same review/policy/channel-auth gated
+      `digest_deliveries` ledger and generic channel delivery-attempt path. Due
+      generic retries now reconcile digest ledger rows to `sent`, `failed`, or
+      `dead_lettered`; score freshness, quiet-hours scheduling, and live
+      external delivery proof remain open.
 - [ ] Add X heuristic scoring before model scoring, with score rows as overlays,
       stale-score labels, schema-validated model output, eval fixtures,
       cost-decision rows, private-content exclusion, and proof that scores never
@@ -270,24 +248,6 @@ PR, implementation note, or final report:
       queues, credential scope/expiry detail, richer archive import run
       summaries, portable export freshness, monitor staleness, and future failed/superseded
       archive/export/scoring syncs.
-- [x] Add X browser validation for ops UI: `scripts/ops-ui-x-browser-smoke`
-      seeds hostile X tweet/link/provider-error data, proves X summary/source
-      health/source-card rows render as inert text, verifies token-like provider
-      errors are redacted, checks desktop/mobile overflow, and preserves
-      screenshots plus a proof packet at
-      `.arcwell-dev/proofs/ops-ui-x-browser-smoke-20260624T105627Z-44257`.
-- [x] Add X portable export/import/validate for canonical tweet rows with
-      deterministic JSONL shards, manifest hashes, row counts, token-like
-      content scan, malformed JSONL failure, idempotent import, unsafe shard
-      path rejection, FTS/cache exclusion, and raw DM exclusion by default.
-      Current tests prove disposable restore searchability and MCP round trip;
-      broader entity coverage remains separate from this MVP.
-- [x] Add X backup/recovery drill integration proving portable export freshness
-      is visible in `x stats`, `/ops`, `/ops/ui`, `ops_snapshot`, strict
-      `doctor`, and backup manifests. Current backup manifests explicitly state
-      that SQLite backups contain canonical X rows while portable bundles are
-      separate unless exported/stored deliberately; disposable restore tests
-      prove restored canonical X rows remain searchable with source-card links.
 - [ ] Add scheduled-backup policy for optional automatic portable X export to a
       known backup-adjacent path before backup creation.
 - [ ] Add X follow graph only as snapshots/current edges/events with complete
@@ -304,11 +264,6 @@ PR, implementation note, or final report:
       with account-scoped confirmation, exact action preview, policy approval,
       audit-before-remote-call, idempotent retry, target-spoofing tests, and
       disposable-target live proof.
-- [x] Add X worker/scheduled watch-source monitor parity: due `x_handle`
-      sources enqueue executable per-handle monitor jobs with shared manual
-      monitor implementation, job input validation, policy/cost guards,
-      source-health, `watch_monitor` sync runs, digest candidates, cursor
-      safety, and policy-denied no-write tests.
 - [ ] Extend X worker/scheduled sync beyond implemented watch-source monitor
       jobs, with heartbeat-specific health, bounded retries/dead letters,
       explicit config for any default schedule, live cron/callback proof, and
@@ -327,9 +282,10 @@ PR, implementation note, or final report:
 - [ ] Add X adversarial review report before every X phase status promotion,
       using the score rubric in the architecture plan and ending with a clear
       judgment: promote, hold, or block.
-- [ ] Wire email/librarian digest delivery with schedule, threshold, quiet
-      hours, dedupe, policy/cost checks, recipient authorization, delivery
-      attempts, and retry behavior.
+- [ ] Wire scheduled librarian digest alerts with threshold selection, quiet
+      hours, dedupe windows, and live external delivery proof. Manual reviewed
+      Telegram/email digest delivery now uses policy/cost checks, recipient
+      authorization, durable delivery attempts, and retry reconciliation.
 - [ ] Add production monitoring for email ingress/outbound if email becomes a
       critical alert path.
 - [ ] Add Cloudflare callback/cron event capture after edge inbox is durable and
@@ -337,31 +293,11 @@ PR, implementation note, or final report:
 - [ ] Add model-backed interestingness for X/source/digest candidates behind
       explicit config, policy, cost gates, and eval coverage.
 - [ ] Add delivery routing for X/watch-source digest candidates through the same
-      email/Telegram delivery-attempt infrastructure. Telegram now has a
-      review/policy/channel-auth gated, idempotent `digest_deliveries` ledger
-      path over the generic channel delivery-attempt table; email parity,
-      quiet-hours scheduling, due retry, and live external digest-delivery proof
-      remain open.
-- [x] Add Horizon-inspired radar substrate with durable profiles, runs,
-      normalized source-card-backed items, radar FTS, heuristic score overlays,
-      CLI/MCP run/stage/audit surfaces, and severe local-proof tests for
-      unsupported selectors, FTS drift, unscored items, provenance links, and
-      prompt-injection source text.
-- [x] Extend radar projection from local source-card query into existing
-      RSS/GitHub/arXiv/X source-card families with copied-home production-data
-      proof and unsupported-selector audit visibility.
-- [x] Extend radar from projection over existing source cards into opt-in
-      foreground live RSS, GitHub, and arXiv adapter execution with
-      source-health/cursor safety, CLI/MCP/slash surfaces, severe failure tests,
-      and disposable-home production-data proof.
-- [x] Extend radar live execution to Hacker News top/frontpage stories through
-      the official Firebase API with bounded top-level comment capture,
-      source-health/cursor safety, watch-source enqueue support, severe tests,
-      and disposable-home production-data proof.
-- [x] Extend radar/source-card live execution to Reddit with JSON listing fetch,
-      bounded top-comment capture, RSS fallback that does not claim comments,
-      source-health/cursor safety, watch-source enqueue support, and severe
-      policy/fallback/source-card tests.
+      email/Telegram delivery-attempt infrastructure. Telegram and email now
+      have review/policy/channel-auth gated, idempotent `digest_deliveries`
+      ledger paths over the generic channel delivery-attempt table, and due
+      generic retries reconcile digest rows; quiet-hours scheduling and live
+      external digest-delivery proof remain open.
 - [ ] Add Reddit production-data proof through OAuth or another sanctioned
       access path; current anonymous Arcwell binary proof is blocked by Reddit
       HTTP 403 even when curl can intermittently read RSS.
@@ -375,205 +311,17 @@ PR, implementation note, or final report:
       is not a pass: OAuth refresh failed, app-bearer fallback returned 401,
       and the proof packet kept existing local X projection separate from
       current authenticated live fetch proof.
-- [x] Add radar exact URL/source-native dedupe groups with preserved source
-      evidence, duplicate score statuses, audit drift checks, schema-migration
-      coverage, severe local tests, and copied-home production-data proof over
-      2,500 real source cards.
-- [x] Add deterministic radar Markdown summary artifacts over selected scored
-      items, CLI/MCP/slash surfaces, no-delivery/no-source-evidence boundaries,
-      severe tests, and copied-home production-data proof.
-- [x] Add local queued radar execution with `radar_enqueue` /
-      `arcwell radar enqueue`, `worker run-once` processing, result JSON, MCP
-      round trip, severe source-card success proof, provider-denial blocked-run
-      proof, source-health/cursor assertions, and invalid-enqueue rejection.
-- [x] Run worker-drained production-data radar proof in a disposable home:
-      `scripts/radar-worker-production-proof` preserved
-      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T082527Z-74723`,
-      queued `radar_run`, drained it through `worker run-once`, completed RSS,
-      GitHub-owner, arXiv, and Hacker News adapter jobs, wrote 45 source
-      cards/wiki pages/radar items/FTS rows/scores, recorded four healthy
-      source-health rows and four cursors, selected 30 items, passed
-      `radar audit`, and wrote a deterministic non-delivery summary.
-- [x] Add local radar score freshness/source-health scoring adjustments and
-      source-quality window records with audit coverage and direct severe-test
-      assertions over source-card projection runs.
-- [x] Add local deterministic radar source/category balance caps via explicit
-      profile metadata, with quota rejection statuses that keep source-card
-      evidence inspectable and severe tests for malformed caps, source
-      dominance, category dominance, and audit-clean readback.
-- [x] Run production-data source-balance proof over live public RSS/GitHub/arXiv
-      and Hacker News data: `scripts/radar-balance-production-proof` preserved
-      `.arcwell-dev/proofs/radar-balance-production-proof-20260624T102938Z-92096`,
-      wrote 52 real radar items/scores, selected 4 items with at most one per
-      source, kept 36 `source_quota` rows inspectable with source-card/wiki
-      provenance, passed `radar audit`, recorded healthy cursors/source-health,
-      and wrote a deterministic non-delivery summary.
-- [x] Add radar source-quality ops visibility in `ops_snapshot` and `/ops/ui`
-      with non-healthy health warnings, summary scoring, filtered rows, and
-      severe HTML escaping coverage.
-- [x] Add local radar source-quality trend/ranking over durable historical
-      windows, with bounded CLI/MCP/slash surfaces and severe tests for thin
-      history filtering, decaying/failing sources, hostile locators, ranking,
-      and invalid limits.
-- [x] Run source-quality ranking production-data proof over repeated live public
-      GitHub/arXiv/Hacker News radar runs:
-      `scripts/radar-source-quality-trends-proof` preserved
-      `.arcwell-dev/proofs/radar-source-quality-trends-proof-20260624T090251Z-4856`,
-      wrote two scored runs, 50 radar items/scores total, six source-quality
-      windows, three trend rows, clean audits, and healthy cursors/source-health
-      for the three public source families.
-- [x] Add local deterministic semantic/topic dedupe after initial scoring, with
-      `semantic_topic` dedupe groups, `duplicate_topic` score rows, preserved
-      evidence, source-quality duplicate accounting, and audit drift coverage.
-- [x] Run copied-home production-data semantic/topic dedupe review over real
-      existing source cards:
-      `.arcwell-dev/proofs/radar-semantic-production-review-20260624T090459Z`
-      projected 16 Copilot source-card items, wrote 3 `semantic_topic` groups,
-      marked 5 `duplicate_topic` scores, selected 8 items, produced 16
-      source-quality windows, and passed `radar audit` with zero findings.
-- [x] Run copied-home production-data semantic/topic dedupe breadth proof over
-      the real 2,500-card source corpus:
-      `scripts/radar-semantic-dedupe-production-proof` preserved
-      `.arcwell-dev/proofs/radar-semantic-dedupe-production-proof-20260624T105627Z-44256`,
-      ran `copilot`, `codex`, `agent`, and `github` source-card profiles in a
-      sanitized disposable home, wrote 1,482 radar items/scores, kept 304
-      `semantic_topic` groups and 621 `duplicate_topic` rows inspectable with
-      source-card/wiki provenance, passed four clean audits, and wrote four
-      non-delivery summaries.
-- [x] Run live-adapter production-data semantic/topic dedupe breadth proof over
-      freshly fetched public sources:
-      `scripts/radar-live-semantic-dedupe-production-proof` preserved
-      `.arcwell-dev/proofs/radar-live-semantic-dedupe-production-proof-20260624T111008Z-75958`,
-      worker-drained real RSS, GitHub owner, arXiv, and Hacker News adapters,
-      wrote 62 radar items/FTS rows/scores, selected 47 items, kept 11
-      `semantic_topic` groups and 15 `duplicate_topic` rows inspectable with
-      source-card/wiki provenance, passed audit, and wrote a non-delivery
-      summary.
-- [x] Add local/manual radar summary delivery attempts through authorized
-      Telegram/email channel send paths, with CLI/MCP/slash surfaces, durable
-      `radar_deliveries` rows linked to channel delivery attempts, idempotency
-      replay, authorization/policy-denial blocking, provider-failure recording,
-      ops snapshot/UI visibility, health warnings, HTML escaping, and
-      token-redaction severe tests.
-- [x] Reconcile radar delivery retry state through resident Telegram/email
-      delivery retry paths: worker-driven successful retries now promote the
-      original `radar_deliveries` row and radar run, scheduled email retries
-      also promote the linked schedule tick, and exhausted local retry chains
-      become `dead_lettered` without continued sends.
-- [x] Add local scheduled Telegram/email delivery through the resident worker:
-      scheduled profiles write durable ticks, enqueue
-      `radar_scheduled_delivery`, run/summarize/audit, deliver through
-      configured authorized Telegram or Cloudflare Email, record
-      tick/run/summary/delivery lineage, suppress duplicate ticks inside the
-      interval, reject raw secrets in profile policy, block unauthorized email
-      recipients before provider send, and defer active quiet-hours windows
-      without provider sends.
-- [x] Add local cross-channel/scheduled retry with bounded attempts and
-      dead-letter behavior: due failed email messages retry from local
-      Cloudflare Email config without duplicate channel messages, successful
-      scheduled email retries reconcile tick/delivery/run state, exhausted
-      email retry chains dead-letter the channel message, radar delivery, and
-      schedule tick, and severe tests prove token redaction.
-- [x] Add optional radar model-score overlays: CLI/MCP/core write
-      schema-validated `model_interestingness_v1` score rows and inspectable
-      prompt/output artifacts, policy/cost block live OpenAI attempts before
-      credentials or score rows, malformed provider output fails closed, model
-      scores remain non-authorizing for summaries/delivery, private or
-      unauthorized source-card/radar-item metadata is excluded before prompt
-      construction with auditable `model_blocked` rows, all-excluded runs skip
-      provider/cost paths, missing source-card provenance overwrites stale
-      model rows as blocked, and
-      `scripts/radar-model-score-production-proof` proves a live OpenAI
-      overlay on a fresh public RSS/GitHub/arXiv/Hacker News worker run without
-      mutating heuristic selected rows or source-quality accounting.
-- [x] Add radar run-level heuristic score distribution metrics: completed runs
-      write `metadata.score_distribution` with count/status/min/max/average and
-      p10/p50/p90 for `heuristic_v1` rows only, `ops_snapshot` includes recent
-      radar runs, `/ops/ui` renders a Radar Runs table with score columns, and
-      severe tests prove the metrics are visible without relying only on
-      source-quality rows. `scripts/radar-worker-production-proof` now also
-      verifies the distribution in run metadata and ops over real public
-      RSS/GitHub/arXiv/Hacker News data at
-      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T102233Z-28818`.
-- [x] Add repeatable production-data scheduled-delivery proof:
-      `scripts/radar-scheduled-delivery-production-proof` creates a disposable
-      scheduled profile over real public RSS/GitHub/arXiv/Hacker News sources,
-      drains the resident worker, verifies real indexed/scored items and
-      healthy cursor/source-health state, sends one audit-ok summary through a
-      controlled Telegram endpoint, records tick/run/summary/delivery lineage,
-      and proves duplicate suppression on a second worker pass.
-- [x] Add repeatable production-data source-balance proof:
-      `scripts/radar-balance-production-proof` creates a disposable profile over
-      real public RSS/GitHub/arXiv/Hacker News sources with CLI `--metadata-json`
-      balance caps, drains the worker, verifies source-quota score rows,
-      selected-by-source caps, score distribution counts, audit-ok summary,
-      cursor/source-health state, and ops visibility at
-      `.arcwell-dev/proofs/radar-balance-production-proof-20260624T102938Z-92096`.
-- [x] Add repeatable production-data source-family category-balance proof:
-      `scripts/radar-category-balance-production-proof` creates two disposable
-      live public RSS/GitHub/arXiv/Hacker News profiles with different
-      category quotas, drains the worker, verifies category-quota score rows,
-      selected-by-category caps, score distribution counts, audit-ok summaries,
-      cursor/source-health state, and ops visibility at
-      `.arcwell-dev/proofs/radar-category-balance-production-proof-20260624T104401Z-30612`.
-- [x] Add repeatable production-data non-source-family taxonomy balance proof:
-      `scripts/radar-taxonomy-balance-production-proof` creates a disposable
-      live public RSS/GitHub/arXiv/Hacker News profile with topical `agent`
-      and `ai` quotas, drains the worker, verifies real taxonomy candidates
-      exceeded quota, selected counts respected `agent:1` and `ai:2`, 13
-      `category_quota` rows carried category-specific rejection tags/reasons,
-      score distribution counts matched ops, cursors/source-health were
-      healthy, audit passed, and a non-delivery summary was written at
-      `.arcwell-dev/proofs/radar-taxonomy-balance-production-proof-20260624T111820Z-48709`.
-- [x] Add repeatable production-data deterministic ranking review:
-      `scripts/radar-ranking-review-production-proof` copies the real
-      2,500-card source corpus into a secret-scrubbed disposable home, runs
-      `agent-infrastructure`, `security-sandboxing`, and `market-ecosystem`
-      source-card profiles, validates 150 top/bottom scored rows, verifies
-      score reasons against observable item fields/tags, checks provenance,
-      audits, ops score distributions, and non-delivery summaries, and writes a
-      proof packet at
-      `.arcwell-dev/proofs/radar-ranking-review-production-proof-20260624T112621Z-30748`.
-- [x] Add repeatable production-data source-quality decay classification proof:
-      `scripts/radar-source-quality-decay-production-proof` runs three
-      disposable live public GitHub/arXiv/Hacker News radar passes, writes 75
-      real normalized/indexed/scored items and nine source-quality windows,
-      time-shifts those real windows across seven days inside the disposable
-      home, verifies all three common source families classify as `decaying`,
-      checks source-health/cursors/ops visibility, passes audits, and writes a
-      proof packet at
-      `.arcwell-dev/proofs/radar-source-quality-decay-proof-20260624T114329Z-90797`.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
       production quiet-hours deferral, arbitrary/model-generated taxonomy
       quality review, live model-scoring quality proof, operational
       wall-clock seven-day source-quality decay proof, broader ops controls,
       and status promotion only after real-data gates pass.
-- [x] Preserve tracked email defaults as `agent@example.com` and
-      `user@example.com`; `scripts/verify-tracked-email-placeholders` now scans
-      git-tracked files and fails on non-placeholder email domains so real local
-      agent/author addresses stay in ignored env or secret config.
 
 ## 6. Deep Research Quality And Host-Native Execution
 
 - [ ] Add page expansion that actively gathers related docs/blogs/repos/social
       sources before writing a topic page.
-- [x] Record fresh in-app Codex subagent and host-search proof for the current
-      deep-research substrate.
-- [x] Prove live OpenAI editorial invocation with cost records and fail-closed
-      behavior on insufficient evidence.
-- [x] Expose rich deep-research MCP schemas plus `research_capabilities`, and
-      smoke the dev wrapper/cache for schema freshness before fresh-thread use.
-- [x] Run disposable MCP reference-topic smokes for London AI, image
-      compression, and safe cloud code execution with host-search proof,
-      role artifacts, document anchors, editorial gates, audit, and reports.
-- [x] Filter source/corpus bookkeeping claims out of executive judgment,
-      analyst takeaways, and evidence narrative while keeping them inspectable
-      in the report appendix.
-- [x] Implement the local deterministic convergence substrate: durable
-      iterations, statements, challenges, disproofs, revisions, fact-checks,
-      snapshots, convergence report artifacts, and report judgments over
-      persisted evidence.
 - [ ] Implement iterated epistemic convergence from
       `docs/iterated-epistemic-convergence-design.md`. Do not mark complete
       until schema, CLI, MCP, skill docs, severe tests, full proof runs, report
@@ -584,15 +332,9 @@ PR, implementation note, or final report:
 - [ ] Severe-test convergence run config with missing limits, huge limits,
       negative/NaN/infinite values, no-write propagation, user stop before the
       next expensive action, and long-run requests without approval.
-- [x] Add `research_iterations` schema, indexes, Rust structs, row mappers,
-      store methods, CLI read/list, MCP read/list, status embedding, redacted
-      error fields, and migration ledger entries.
 - [ ] Severe-test iterations for cross-run artifact rejection, duplicate
       iteration indexes, failed iteration preservation, long error redaction,
       parent lineage validation, database reopen, and 1000-iteration listing.
-- [x] Add `research_statements` schema with statement type, scope, temporal
-      scope, confidence, certainty, status, importance, evidence,
-      counterevidence, assumptions, caveats, stable keys, and lineage.
 - [ ] Severe-test statements with empty/overlong text, invalid enums,
       invalid confidence, cross-run evidence ids, duplicate stable keys,
       prompt-injection text, HTML/Markdown escaping, SQL metacharacters,
@@ -607,8 +349,6 @@ PR, implementation note, or final report:
 - [ ] Add `research_challenges` schema plus deterministic challenge templates
       by statement type/domain, expected-information-gain ranking, required
       source-family output, and challenge lifecycle states.
-- [x] Add initial `research_challenges` schema, deterministic challenge
-      templates, required source-family output, and lifecycle states.
 - [ ] Severe-test challenges for missing/cross-run statement ids, unknown
       challenge types, missing severity, empty search plans for high-severity
       challenges, prompt injection that tries to waive challenges, and duplicate
@@ -617,28 +357,6 @@ PR, implementation note, or final report:
       proof before reliance, falls back to configured provider search only
       through policy/cost gates, links search/source cards to challenges, and
       records blocked searches honestly.
-- [x] Add initial challenge-linked host-search proof consumption: planned
-      challenge queries can be answered only by matching
-      `research_host_search_record` entries with selected linked research
-      sources, and convergence disproof evidence records the host-search/result
-      ids before treating the challenge as answered.
-- [x] Add first-class convergence host-search task surface:
-      `research_convergence_host_search_tasks` derives exact pending/recorded
-      task rows from challenge search plans plus recorded host-search proof,
-      appears in convergence status/CLI/MCP/capabilities, refreshes matching
-      existing challenges when proof is recorded, and severe-tests wrong-query
-      selected results so they cannot satisfy a planned challenge.
-- [x] Add policy/cost-gated provider fallback for pending convergence
-      host-search tasks: `research_convergence_provider_search` runs
-      Brave/OpenAI/Perplexity provider search through existing policy and cost
-      gates, records safe selected provider results as auditable search proof,
-      can optionally enqueue bounded worker `ingest_url` jobs for selected safe
-      results, promotes completed research-scoped URL ingests into run-linked
-      full-text source cards and conservative extracted claims, stores blocked
-      provider attempts as artifacts, and severe-tests cost cap, budget denial,
-      unsafe URL filtering, cost-decision linkage, ingest enqueue caps, task
-      proof updates, same-run host-search validation, host-search-result
-      source-card backfill, and prompt-injection text as untrusted evidence.
 - [ ] Severe-test disproof retrieval with known contradiction discovery,
       duplicate source novelty suppression, blocked-search unresolved status,
       low-reliability contradictions, SSRF URLs, redirects to localhost or
@@ -650,112 +368,26 @@ PR, implementation note, or final report:
       uncertainty-loss rejection, cross-run anchors, nonexistent span/table/cell
       anchors, unsupported formats, PDF prompt injection, XLSX/CSV formula
       payloads, oversized files, and report-rendering injection.
-- [x] Add `research_disproofs` schema with verdict, strength, evidence,
-      reasoning summary, confidence delta, and `requires_revision`.
 - [ ] Severe-test disproof verdicts with direct contradictions, partial-scope
       mismatches, irrelevant evidence, missing evidence, stale vs official
       corrections, generated-synthesis misuse, low-quality source overreach,
       and numeric unit/date mismatches.
-- [x] Add `research_revisions` schema with dropped/narrowed/downgraded/
-      upgraded/split/merged/reframed/replaced/caveated lineage and links to
-      trigger disproof ids.
 - [ ] Severe-test revisions so refuted statements cannot remain final without
       caveat/replacement, rewording cannot hide a refuted stable key,
       confidence cannot increase after weakening without new evidence, and
       dropped statements remain visible in appendices.
-- [x] Add `research_convergence_snapshots` with source novelty, claim novelty,
-      statement change count, confidence deltas, open critical/high challenges,
-      strong refutations, active fact-check summaries, evaluator scores,
-      elapsed time, cost, and stop-rule JSON.
-- [x] Severe-test stop rules so critical unresolved challenges, strong
-      refutations without revisions, wrong high-impact fact checks, no-progress
-      loops, time caps, cost caps, provider-call caps, and user stop all block
-      `settled` or stop incomplete as appropriate:
-      `severe_research_convergence_stop_rules_block_false_settlement` proves
-      no analytical statements, time/source/iteration caps, open critical/error
-      challenges, strong refutations, required active fact-check blockers,
-      provider-call/cost-cap config rejection, blocker-free no-progress
-      settlement, and user-stopped runs cannot create fake convergence ledgers.
 - [ ] Performance-test convergence metrics with 10,000 candidate sources,
       2,000 source cards, 50,000 claims, 5,000 statements, 20,000
       challenges/disproofs, 100 iterations, large report appendices, and
       bounded status reads.
-- [x] Add active fact-checking for convergence runs that extracts report
-      statements, verifies them against source cards plus fresh retrieval,
-      labels right/wrong/unknown/not-checkable, and feeds wrong/unknown
-      high-impact facts back into the next iteration. Current implementation:
-      `research_active_fact_check` extracts factual report/generated-synthesis
-      sentences, matches source-backed convergence statements as `right`,
-      creates statement-backed `unknown` checks for unsupported high-impact
-      sentences, marks status as resumable `continue`, and creates citation-gap
-      host-search tasks for fresh retrieval.
-- [x] Add first-class active fact-check closure orchestration:
-      `research_convergence_close_loop` compiles/checks a convergence report,
-      runs active fact-checking, optionally runs policy/cost-gated provider
-      fallback for pending citation-gap searches, reruns convergence, compiles
-      a final report judgment, and returns `closure_status` plus blockers.
-      Severe fixtures prove unsupported report prose stays `needs_host_search`
-      without retrieval proof, while provider-recorded proof plus rerun can
-      settle and accept the final judgment.
-- [x] Severe-test active fact-checking with seeded false report sentences,
-      uncited true sentences, vague opinions, unknown high-impact claims,
-      verifier prompt injection, self-validating source text, cross-run source
-      cards, and generated-summary evidence misuse. Current coverage includes
-      supported/unsupported/vague sentence extraction plus close-loop blocked
-      and provider-proof closure; generated/model-answer evidence with
-      prompt-injection text is not marked `right`; and
-      `severe_research_active_fact_check_rejects_false_cross_run_and_prompt_injection_inputs`
-      now proves refuted false prose becomes `wrong`, cross-run evidence and
-      self-validating prose become high-impact `unknown`, prompt-injection
-      verifier instructions become non-checkable data without retrieval tasks,
-      and vague opinions remain non-checkable.
-- [x] Add convergence-aware report rendering: final position, what changed,
-      survived/weakened/refuted statements, unresolved disproofs, source
-      coverage, saturation, active fact-check summary, convergence stop reason,
-      and statement/disproof/revision appendices. The current renderer now
-      includes bottom-line readiness, iteration deltas, source/search
-      saturation, host-search proof coverage, executive caveats,
-      refuted/dropped-statement separation, residual risks, blockers,
-      revisions, evidence ledger, and method notes, with severe regressions
-      asserting those analyst-grade sections remain present and refuted
-      statements are not presented as the current position.
-- [x] Add initial convergence report rendering with executive judgment, current
-      position, pressure-test results, metrics, blockers, revisions, evidence
-      ledger, and method notes.
 - [ ] Add `research_report_judgment` artifacts written by Codex/main agent with
       scores for source coverage, primary-source depth, citation support,
       contradiction handling, uncertainty preservation, narrative clarity,
       decision usefulness, novelty/design quality, safety reasoning, and
       cost/time proportionality.
-- [x] Add initial `research_report_judgment` ledger with accept/reject/
-      incomplete decisions, blocking findings, non-blocking findings, evidence
-      checked, remaining risks, and commands/artifacts reviewed.
-- [x] Add opt-in model-backed convergence editorial/evaluator gate:
-      `editorial_provider` plus `max_provider_calls>=2` on synchronous and
-      queued convergence, fail-closed `no_write`/invalid-provider handling,
-      citation-verifier plus adversarial-evaluator invocations, persisted
-      nested judgment scores, terminal replay idempotency without duplicate
-      provider calls, and severe direct/MCP round-trip tests. Regression
-      coverage now proves incomplete terminal states such as `max_iterations`
-      still invoke and persist the model-backed gate instead of silently
-      skipping evaluation.
-- [x] Severe-test report rendering so refuted statements cannot appear as final
-      conclusions, unresolved severe disproofs appear in executive caveats,
-      metadata-only corpora do not fake judgment, appendices preserve
-      traceability, and source Markdown/HTML is escaped:
-      `severe_research_convergence_report_does_not_present_refuted_statements_as_current`
-      covers refuted/current separation, critical/strong executive caveats,
-      appendix traceability, and hostile HTML escaping; existing report
-      judgment coverage keeps metadata-only corpora from faking conclusions.
 - [ ] Add long-running convergence execution with resumable worker state,
       leases, heartbeats, idempotency keys, progress snapshots, cost
       reservations, stale-lease reclaim, dead-letter behavior, and user stop.
-- [x] Add initial worker-resumable convergence queue execution via
-      `research_convergence_enqueue`/`research_convergence_run` jobs with
-      worker leases, retry/dead-letter behavior, stopped-run no-op handling,
-      deterministic replay idempotency, terminal report/judgment compilation,
-      CLI/MCP callability, and severe tests for resume, replay, malformed
-      payloads, and user stop.
 - [ ] Severe-test long-running execution with crashes after statement compile,
       challenge generation, provider call, and revision; duplicate-write
       prevention; stale lease reclaim; stop during sleep/search; retry-storm
@@ -768,14 +400,6 @@ PR, implementation note, or final report:
       output artifacts, cross-run ids, source prompt injection, missing caveats,
       unavailable host search, accepted/rejected proposals, and a fresh Codex
       thread live smoke.
-- [x] Update `$deep-research` skill with convergence loop, ledger inspection,
-      settled/incomplete semantics, report judgment use, and stale-schema
-      caveats.
-- [x] Add CLI/MCP parity for convergence start/step/run/enqueue/status,
-      iteration read/list, statements, challenges, disproofs, revisions,
-      convergence report compile, and `research_capabilities` convergence
-      fields, including host-search task, provider fallback, and model-backed
-      editorial/evaluator convergence fields.
 - [ ] Severe-test CLI/MCP parity with unknown ids, malformed JSON, missing
       required fields, large bounded responses, stale schema detection, and
       equivalent CLI/MCP state transitions.
@@ -786,26 +410,6 @@ PR, implementation note, or final report:
 - [ ] Severe-test invention runs with known prior art, feasibility gaps,
       security flaws, proposed-design/fact separation, missing experiment
       evidence, and report language that refuses "proven" claims.
-- [x] Run deterministic convergence fixture proof with at least 30 source
-      cards, 80 claims, seeded contradictions, stale claims, malicious source
-      text, unsupported report sentences, revisions, active fact-check, audit,
-      and report judgment. `severe_research_convergence_saturated_fixture_preserves_bad_evidence_and_report_gate`
-      seeds 30 linked source cards and 82 claims, preserves a structured
-      contradiction, downgrades stale evidence, keeps prompt-injection source
-      text out of the analyst narrative, and turns unsupported report prose
-      into citation-gap host-search work.
-- [x] Add the live saturated production-proof harness for the technical profile
-      and make it fail closed when model-backed editorial/evaluator gates reject
-      the output. `scripts/deep-research-production-proof --profile
-      image-compression` preserves the disposable run home, command log, proof
-      packet, report, host-search proof, source-card ledger, structured claims,
-      convergence loop output, close-loop result, and OpenAI editorial/evaluator
-      records. The harness now also promotes selected URLs into full-text
-      source cards where bounded URL ingestion succeeds, executes exact
-      convergence challenge-search tasks with `--`-safe query handling,
-      dedupes normalized challenge tasks, supports worker-resumable convergence
-      mode, and records challenge/full-source/worker settings in the proof
-      packet.
 - [ ] Run an accepted live host-search technical proof on image compression
       algorithms with papers, codec docs, benchmarks, dissenting analyses,
       numeric/table anchors or caveats, and model-backed report acceptance.
@@ -853,12 +457,6 @@ PR, implementation note, or final report:
       and documentation honesty. No category below 4 before production-ready.
 - [ ] Add native host-search pathway for Claude where available and finish
       full-report host-search orchestration for Codex/OpenAI.
-- [x] Run live provider-backed research/editorial synthesis and adversarial eval
-      smokes over a saturated source-card corpus with cost records and artifacts
-      for the technical/literature profile, proving provider invocation,
-      structured score parsing, judgment persistence, fail-closed routing, and
-      rejection behavior. Accepted analyst-grade quality remains open above;
-      remaining live market and security profiles stay open below.
 - [ ] Regenerate fresh hundred-source reports through the narrative-filtered
       compiler and evaluate them for analyst-grade judgment quality, not just
       structural completion.
@@ -870,17 +468,8 @@ PR, implementation note, or final report:
       a severe XLSX fixture for hidden/very-hidden sheet skipping,
       merged-cell metadata/lowered confidence, and date-time normalization; the
       broader external difficult-document matrix remains open.
-- [x] Add publication-grade claim/report citation-quality checks that block
-      completed status when evidence links are missing, stale, generated, or too
-      weak, with severe convergence-report judgment tests for missing
-      measurement anchors, stale current evidence, untrusted-only evidence, and
-      a positive cell-anchored measurement path.
 - [ ] Run fresh reference-topic deep-research live runs after host search,
       subagent orchestration, and provider-backed evals are proven.
-- [x] Add host-supplied browser-rendered page snapshot ingestion through
-      CLI/MCP with no daemon browser/network fetch, public-URL validation,
-      rendered HTML/text size bounds, capture metadata, untrusted rendering,
-      and severe invalid-input/prompt-injection tests.
 - [ ] Add browser-rendered JavaScript readability extraction for pages that
       require rendering, including actual browser capture orchestration,
       screenshot/page-snapshot artifact storage, blocked-state reporting, and
@@ -888,14 +477,6 @@ PR, implementation note, or final report:
 
 ## 6A. Qualified Commerce Research
 
-- [x] Capture the qualified commerce research design in
-      `docs/qualified-commerce-research-design.md`, covering retail, rentals,
-      travel, private context, exact-variant availability proof, browser
-      verification, broad outputs, privacy boundaries, severe tests, and live
-      proof gates.
-- [x] Expand the qualified commerce design with anti-mirage claim ledger,
-      false-done traps, proof levels, dependency order, report acceptance gate,
-      proof packet template, and operational promotion requirements.
 - [ ] Keep qualified commerce status at `Scaffold` until durable candidate and
       availability-proof storage, browser verification, context packet
       redaction, CLI/MCP read surfaces, severe tests, live proof packets, and

@@ -162,6 +162,10 @@ typing part of the name. Use the displayed command name from the picker.
   `digest_candidate_deliver_telegram` to send an approved digest candidate to
   Telegram through the digest delivery ledger plus the normal Telegram send
   authorization, policy, cost, and provider-attempt path.
+- `/digest-candidate-deliver-email` uses `digest_candidate_deliver_email` to
+  send an approved digest candidate through Cloudflare Email via the digest
+  delivery ledger plus normal email send authorization, policy, cost, and
+  provider-attempt path.
 - `/radar-profile-create` uses `radar_profile_create`.
 - `/radar-profiles` uses `radar_profile_list`.
 - `/radar-profile-read` uses `radar_profile_read`.

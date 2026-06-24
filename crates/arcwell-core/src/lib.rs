@@ -867,6 +867,15 @@ pub struct RadarDeliveryReconcileReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestDeliveryReconcileReport {
+    pub inspected: usize,
+    pub sent: usize,
+    pub failed: usize,
+    pub dead_lettered: usize,
+    pub updated: Vec<DigestDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarAuditFinding {
     pub severity: String,
     pub code: String,
@@ -1054,6 +1063,7 @@ pub struct WorkerRunReport {
     pub telegram_retry: Option<TelegramRetryReport>,
     pub email_retry: Option<EmailRetryReport>,
     pub radar_delivery_reconcile: Option<RadarDeliveryReconcileReport>,
+    pub digest_delivery_reconcile: Option<DigestDeliveryReconcileReport>,
     pub warnings: Vec<String>,
 }
 
@@ -3022,6 +3032,14 @@ pub struct DigestCandidateTelegramDeliveryReport {
     pub gate: DigestCandidateDeliveryGate,
     pub digest_delivery: DigestDelivery,
     pub telegram: Option<TelegramSendReport>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestCandidateEmailDeliveryReport {
+    pub gate: DigestCandidateDeliveryGate,
+    pub digest_delivery: DigestDelivery,
+    pub email: Option<EmailSendReport>,
     pub replayed: bool,
 }
 
@@ -13133,6 +13151,12 @@ impl Store {
         } else {
             None
         };
+        let digest_delivery_reconcile = self.reconcile_digest_delivery_attempts(3)?;
+        let digest_delivery_reconcile = if digest_delivery_reconcile.inspected > 0 {
+            Some(digest_delivery_reconcile)
+        } else {
+            None
+        };
         let completed = jobs.iter().filter(|job| job.status == "completed").count();
         let failed = jobs.iter().filter(|job| job.status == "failed").count();
         let deferred = jobs.iter().filter(|job| job.status == "deferred").count();
@@ -13153,6 +13177,7 @@ impl Store {
             telegram_retry,
             email_retry,
             radar_delivery_reconcile,
+            digest_delivery_reconcile,
             warnings,
         })
     }
@@ -20195,6 +20220,117 @@ impl Store {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_digest_candidate_email(
+        &self,
+        id: &str,
+        account_id: &str,
+        api_token: &str,
+        from: &str,
+        to: &str,
+        idempotency_key: Option<&str>,
+        api_base: Option<&str>,
+    ) -> Result<DigestCandidateEmailDeliveryReport> {
+        validate_id(id)?;
+        validate_key(account_id)?;
+        validate_notes(api_token)?;
+        let from = normalize_email_address(from).context("invalid email from address")?;
+        let to = normalize_email_address(to).context("invalid email to address")?;
+        let subject = format!("email:{to}");
+        let idempotency_key =
+            digest_delivery_idempotency_key(id, "email", &subject, &subject, idempotency_key)?;
+        let delivery =
+            self.get_or_create_digest_delivery(id, "email", &subject, &subject, &idempotency_key)?;
+        if let Some(attempt_id) = delivery.channel_delivery_attempt_id.as_deref() {
+            let attempt = self
+                .get_channel_delivery_attempt(attempt_id)?
+                .with_context(|| format!("channel delivery attempt not found: {attempt_id}"))?;
+            let message = self
+                .get_channel_message(&attempt.message_id)?
+                .with_context(|| format!("channel message not found: {}", attempt.message_id))?;
+            let gate =
+                self.check_digest_candidate_delivery(id, "email", &subject, Some(&subject))?;
+            return Ok(DigestCandidateEmailDeliveryReport {
+                gate,
+                digest_delivery: delivery,
+                email: Some(EmailSendReport {
+                    ok: attempt.ok,
+                    status: attempt.provider_status.clamp(0, u16::MAX as i64) as u16,
+                    response: attempt.response.clone(),
+                    message,
+                    delivery: attempt,
+                }),
+                replayed: true,
+            });
+        }
+        let gate = self.check_digest_candidate_delivery(id, "email", &subject, Some(&subject))?;
+        if !gate.allowed {
+            let delivery = self.update_digest_delivery(
+                &delivery.id,
+                "blocked",
+                Some(&gate.policy_decision.id),
+                None,
+                None,
+                Some(&gate.reason),
+                None,
+            )?;
+            bail!(
+                "digest candidate delivery denied: {} (digest_delivery_id={})",
+                gate.reason,
+                delivery.id
+            );
+        }
+        let text = self.digest_candidate_delivery_text(&gate.candidate)?;
+        let subject_line = digest_candidate_email_subject(&gate.candidate);
+        match self.send_cloudflare_email(
+            account_id,
+            api_token,
+            &from,
+            &to,
+            &subject_line,
+            &text,
+            None,
+            None,
+            api_base,
+        ) {
+            Ok(email) => {
+                let status = if email.ok { "sent" } else { "failed" };
+                let digest_delivery = self.update_digest_delivery(
+                    &delivery.id,
+                    status,
+                    Some(&gate.policy_decision.id),
+                    Some(&email.message.id),
+                    Some(&email.delivery.id),
+                    email.delivery.error.as_deref(),
+                    email.delivery.retry_at.as_deref(),
+                )?;
+                Ok(DigestCandidateEmailDeliveryReport {
+                    gate,
+                    digest_delivery,
+                    email: Some(email),
+                    replayed: false,
+                })
+            }
+            Err(error) => {
+                let error_text = redact_secret_like_text(&error.to_string());
+                let delivery = self.update_digest_delivery(
+                    &delivery.id,
+                    "blocked",
+                    Some(&gate.policy_decision.id),
+                    None,
+                    None,
+                    Some(&error_text),
+                    None,
+                )?;
+                bail!(
+                    "digest candidate Email delivery blocked: {} (digest_delivery_id={})",
+                    error_text,
+                    delivery.id
+                );
+            }
+        }
+    }
+
     fn digest_candidate_delivery_text(&self, candidate: &DigestCandidate) -> Result<String> {
         let mut lines = vec![
             "Arcwell digest candidate".to_string(),
@@ -20348,6 +20484,111 @@ impl Store {
         rows(stmt.query_map([], digest_delivery_from_row)?)
     }
 
+    pub fn reconcile_digest_delivery_attempts(
+        &self,
+        max_attempts_per_message: i64,
+    ) -> Result<DigestDeliveryReconcileReport> {
+        let max_attempts_per_message = max_attempts_per_message.clamp(1, 20);
+        let due = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT dd.id,
+                       latest.id,
+                       latest.message_id,
+                       latest.ok,
+                       latest.attempt,
+                       latest.provider_status,
+                       latest.error,
+                       latest.retry_at
+                FROM digest_deliveries dd
+                JOIN channel_delivery_attempts linked
+                  ON linked.id = dd.channel_delivery_attempt_id
+                JOIN channel_delivery_attempts latest
+                  ON latest.message_id = linked.message_id
+                WHERE dd.status IN ('pending', 'failed')
+                  AND latest.attempt = (
+                    SELECT MAX(d2.attempt)
+                    FROM channel_delivery_attempts d2
+                    WHERE d2.message_id = linked.message_id
+                  )
+                  AND (
+                    dd.channel_delivery_attempt_id != latest.id
+                    OR latest.ok = 1
+                    OR latest.attempt >= ?1
+                  )
+                ORDER BY dd.updated_at ASC, dd.id ASC
+                "#,
+            )?;
+            rows(stmt.query_map(params![max_attempts_per_message], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })?)?
+        };
+
+        let mut report = DigestDeliveryReconcileReport {
+            inspected: due.len(),
+            sent: 0,
+            failed: 0,
+            dead_lettered: 0,
+            updated: Vec::new(),
+        };
+        for (
+            delivery_id,
+            latest_attempt_id,
+            message_id,
+            ok,
+            attempt,
+            provider_status,
+            error,
+            retry_at,
+        ) in due
+        {
+            let (status, error_text, retry_at) = if ok {
+                report.sent += 1;
+                ("sent", None, None)
+            } else if attempt >= max_attempts_per_message {
+                report.dead_lettered += 1;
+                self.update_channel_message_status(&message_id, "dead_lettered")?;
+                (
+                    "dead_lettered",
+                    Some(sanitize_radar_delivery_error(&format!(
+                        "delivery retry exhausted after {attempt} attempt(s): {}",
+                        error.unwrap_or_else(|| format!("provider status {provider_status}"))
+                    ))?),
+                    None,
+                )
+            } else {
+                report.failed += 1;
+                (
+                    "failed",
+                    Some(sanitize_radar_delivery_error(&error.unwrap_or_else(
+                        || format!("provider status {provider_status}"),
+                    ))?),
+                    retry_at,
+                )
+            };
+            let delivery = self.update_digest_delivery(
+                &delivery_id,
+                status,
+                None,
+                Some(&message_id),
+                Some(&latest_attempt_id),
+                error_text.as_deref(),
+                retry_at.as_deref(),
+            )?;
+            report.updated.push(delivery);
+        }
+        Ok(report)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn update_digest_delivery(
         &self,
@@ -20382,7 +20623,7 @@ impl Store {
             r#"
             UPDATE digest_deliveries
             SET status = ?2,
-                policy_decision_id = ?3,
+                policy_decision_id = COALESCE(?3, policy_decision_id),
                 channel_message_id = ?4,
                 channel_delivery_attempt_id = ?5,
                 error = ?6,
@@ -27917,6 +28158,13 @@ fn digest_delivery_idempotency_key(
         return Ok(supplied.to_string());
     }
     Ok(format!("{candidate_id}:{channel}:{subject}:{target}"))
+}
+
+fn digest_candidate_email_subject(candidate: &DigestCandidate) -> String {
+    format!(
+        "Arcwell digest candidate: {}",
+        excerpt(&candidate.topic, 120)
+    )
 }
 
 fn validate_policy_action(action: &str) -> Result<()> {
@@ -58023,6 +58271,450 @@ priority = 10
         assert!(failed_replay.replayed);
         assert_eq!(failed_replay.digest_delivery.id, failed.digest_delivery.id);
         assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
+
+        let failed_message_id = failed.telegram.as_ref().unwrap().message.id.clone();
+        store
+            .conn
+            .execute(
+                "UPDATE channel_delivery_attempts SET retry_at = ?1 WHERE message_id = ?2",
+                params!["2000-01-01T00:00:00.000000000+00:00", failed_message_id],
+            )
+            .unwrap();
+        let retry_api = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &retry_api, "telegram")
+            .unwrap();
+        let retry_worker = store.run_worker_once(1).unwrap();
+        let telegram_retry = retry_worker
+            .telegram_retry
+            .as_ref()
+            .expect("worker should retry failed digest Telegram message");
+        assert_eq!(telegram_retry.attempted, 1);
+        assert_eq!(telegram_retry.sent, 1);
+        let digest_reconcile = retry_worker
+            .digest_delivery_reconcile
+            .as_ref()
+            .expect("worker should reconcile digest delivery after retry");
+        assert_eq!(digest_reconcile.inspected, 1);
+        assert_eq!(digest_reconcile.sent, 1);
+        assert_eq!(digest_reconcile.failed, 0);
+        let reconciled = store
+            .get_digest_delivery(&failed.digest_delivery.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled.status, "sent");
+        assert_ne!(
+            reconciled.channel_delivery_attempt_id,
+            failed.digest_delivery.channel_delivery_attempt_id
+        );
+        assert_eq!(
+            store
+                .list_channel_delivery_attempts(Some(&failed_message_id))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn severe_digest_candidate_email_delivery_requires_review_policy_and_send_auth() {
+        // CLAIM: Email digest delivery has parity with Telegram delivery: review,
+        // digest policy, recipient send authorization, channel send policy, cost,
+        // provider attempt recording, and digest-ledger idempotency are all
+        // required before a candidate can be considered sent.
+        // ORACLE: blocked calls create digest ledger rows without channel
+        // attempts, successful sends link the digest ledger to the generic email
+        // channel message/attempt, provider failures retain retry metadata, and
+        // replays do not create duplicate provider attempts.
+        // SEVERITY: Severe because email parity without these gates would turn
+        // the digest queue into an unreviewed outbound notification path.
+        let store = test_store("digest-candidate-email-delivery");
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Approved email digest item".to_string(),
+                url: "https://x.com/example/status/188".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Approved email digest item summary.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "Approved email digest item exists.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.8,
+                }],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "188" }),
+            })
+            .unwrap();
+        let digest = store
+            .create_digest_candidate(
+                "Approved email delivery item",
+                std::slice::from_ref(&card.id),
+            )
+            .unwrap();
+
+        let blocked = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-review-key"),
+                Some("http://127.0.0.1:9"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            blocked.contains("requires approved review"),
+            "unreviewed digest must fail at the digest gate: {blocked}"
+        );
+        let deliveries = store.list_digest_deliveries(Some(&digest.id)).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "blocked");
+        assert!(deliveries[0].channel_delivery_attempt_id.is_none());
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty(),
+            "failed digest gate must not create email delivery attempts"
+        );
+
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-reviewed-digest-email"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "email"
+subject = "email:friend@example.com"
+target = "email:friend@example.com"
+reason = "allow only the reviewed digest email destination"
+priority = 10
+
+[[rules]]
+id = "allow-reviewed-digest-email-send"
+effect = "allow"
+action = "channel.send"
+package = "arcwell-email"
+provider = "cloudflare_email"
+channel = "email"
+subject = "email:friend@example.com"
+target = "friend@example.com"
+reason = "allow the reviewed digest email provider send"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .approve_digest_candidate(&digest.id, Some("severe-test"), Some("email this"))
+            .unwrap();
+        let no_send_auth = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-auth-key"),
+                Some("http://127.0.0.1:9"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            no_send_auth.contains("not authorized to send"),
+            "delivery still needs email channel send authorization: {no_send_auth}"
+        );
+        let deliveries = store.list_digest_deliveries(Some(&digest.id)).unwrap();
+        assert_eq!(deliveries.len(), 2);
+        assert!(deliveries.iter().any(|delivery| {
+            delivery.status == "blocked"
+                && delivery
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("not authorized")
+        }));
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty(),
+            "missing email channel authorization must not create delivery attempts"
+        );
+
+        store
+            .authorize_channel_subject("email", "email:friend@example.com", false, false, true)
+            .unwrap();
+        let api = mock_status_server(
+            "200 OK",
+            "",
+            r#"{"success":true,"result":{"id":"digest_email_123"}}"#,
+            "application/json",
+        );
+        let delivered = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-send-key"),
+                Some(&api),
+            )
+            .unwrap();
+        assert!(delivered.gate.allowed);
+        assert!(!delivered.replayed);
+        assert_eq!(delivered.digest_delivery.status, "sent");
+        let email = delivered.email.as_ref().expect("email send report");
+        assert!(email.ok);
+        assert_eq!(email.delivery.channel, "email");
+        assert_eq!(email.delivery.destination, "email:friend@example.com");
+        assert_eq!(email.message.status, "sent");
+        assert!(email.message.body.contains(&digest.topic));
+        assert!(email.message.body.contains(&card.id));
+        assert!(email.message.body.contains("untrusted evidence"));
+        let serialized = serde_json::to_string(&delivered).unwrap();
+        assert!(
+            !serialized.contains("SECRET_CF_DIGEST_TOKEN"),
+            "{serialized}"
+        );
+        let attempts = store.list_channel_delivery_attempts(None).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].id, email.delivery.id);
+        assert_eq!(
+            delivered
+                .digest_delivery
+                .channel_delivery_attempt_id
+                .as_deref(),
+            Some(email.delivery.id.as_str())
+        );
+
+        let replayed = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-send-key"),
+                Some("http://127.0.0.1:9"),
+            )
+            .unwrap();
+        assert!(replayed.replayed);
+        assert_eq!(replayed.digest_delivery.id, delivered.digest_delivery.id);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+        let ops = store.ops_snapshot().unwrap();
+        assert!(ops.digest_deliveries.iter().any(|delivery| {
+            delivery.id == delivered.digest_delivery.id
+                && delivery.channel == "email"
+                && delivery.status == "sent"
+        }));
+
+        let failing_api = mock_status_server(
+            "503 Service Unavailable",
+            "",
+            r#"{"success":false,"errors":[{"message":"temporarily unavailable"}]}"#,
+            "application/json",
+        );
+        let failed = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-failed-provider-key"),
+                Some(&failing_api),
+            )
+            .unwrap();
+        assert!(!failed.email.as_ref().unwrap().ok);
+        assert_eq!(failed.digest_delivery.status, "failed");
+        assert!(failed.digest_delivery.retry_at.is_some());
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
+
+        let failed_replay = store
+            .send_digest_candidate_email(
+                &digest.id,
+                "account123",
+                "SECRET_CF_DIGEST_TOKEN",
+                "agent@example.com",
+                "friend@example.com",
+                Some("digest-email-failed-provider-key"),
+                Some("http://127.0.0.1:9"),
+            )
+            .unwrap();
+        assert!(failed_replay.replayed);
+        assert_eq!(failed_replay.digest_delivery.id, failed.digest_delivery.id);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn severe_digest_delivery_retry_dead_letters_exhausted_channel_attempts() {
+        // CLAIM: Digest delivery rows are reconciled against the channel retry
+        // chain, including terminal dead-letter status after repeated provider
+        // failures.
+        // ORACLE: three failed attempts on the same channel message update the
+        // digest ledger to dead_lettered, preserve the latest attempt id, and
+        // mark the channel message dead_lettered.
+        // SEVERITY: Severe because unattended digest delivery can otherwise sit
+        // forever in "failed" while generic channel retries exhaust elsewhere.
+        let store = test_store("digest-delivery-retry-dead-letter");
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Retry exhausted X digest item".to_string(),
+                url: "https://x.com/example/status/99".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Retry exhausted X digest item summary.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "Retry exhausted X digest item exists.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.8,
+                }],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "99" }),
+            })
+            .unwrap();
+        let digest = store
+            .create_digest_candidate("Retry exhausted X delivery item", &[card.id])
+            .unwrap();
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-dead-letter-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "telegram"
+subject = "telegram:chat:123"
+target = "telegram:chat:123"
+reason = "allow reviewed digest Telegram dead-letter test"
+priority = 10
+
+[[rules]]
+id = "allow-dead-letter-digest-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:123"
+target = "123"
+reason = "allow reviewed digest Telegram retry sends"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .approve_digest_candidate(&digest.id, Some("severe-test"), Some("try delivery"))
+            .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        let api = mock_sequence_server(vec![
+            (
+                "429 Too Many Requests",
+                "retry-after: 1\r\n",
+                r#"{"ok":false,"description":"rate limited once"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 1\r\n",
+                r#"{"ok":false,"description":"rate limited twice"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 1\r\n",
+                r#"{"ok":false,"description":"rate limited thrice"}"#,
+                "application/json",
+            ),
+        ]);
+        let failed = store
+            .send_digest_candidate_telegram(
+                &digest.id,
+                "TOKEN",
+                "123",
+                Some("digest-delivery-dead-letter-key"),
+                Some(&api),
+            )
+            .unwrap();
+        assert_eq!(failed.digest_delivery.status, "failed");
+        let message_id = failed.telegram.as_ref().unwrap().message.id.clone();
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &api, "telegram")
+            .unwrap();
+
+        store
+            .conn
+            .execute(
+                "UPDATE channel_delivery_attempts SET retry_at = ?1 WHERE message_id = ?2",
+                params!["2000-01-01T00:00:00.000000000+00:00", message_id],
+            )
+            .unwrap();
+        let first_retry = store.run_worker_once(1).unwrap();
+        assert_eq!(first_retry.telegram_retry.as_ref().unwrap().failed, 1);
+        let first_reconcile = first_retry.digest_delivery_reconcile.as_ref().unwrap();
+        assert_eq!(first_reconcile.failed, 1);
+        assert_eq!(
+            store
+                .get_digest_delivery(&failed.digest_delivery.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE channel_delivery_attempts SET retry_at = ?1 WHERE message_id = ?2",
+                params!["2000-01-01T00:00:00.000000000+00:00", message_id],
+            )
+            .unwrap();
+        let second_retry = store.run_worker_once(1).unwrap();
+        assert_eq!(second_retry.telegram_retry.as_ref().unwrap().failed, 1);
+        let dead_letter = second_retry.digest_delivery_reconcile.as_ref().unwrap();
+        assert_eq!(dead_letter.dead_lettered, 1);
+        let delivery = store
+            .get_digest_delivery(&failed.digest_delivery.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.status, "dead_lettered");
+        assert!(
+            delivery
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delivery retry exhausted after 3 attempt")
+        );
+        assert_eq!(
+            store
+                .get_channel_message(&message_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "dead_lettered"
+        );
+        assert_eq!(
+            store
+                .list_channel_delivery_attempts(Some(&message_id))
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]

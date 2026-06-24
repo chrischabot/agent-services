@@ -171,12 +171,15 @@ unscored rows, corrupt dedupe groups, empty output, and unsupported selectors.
 
 This has copied/disposable-home production-data proof for existing Arcwell
 source-card outputs and foreground live RSS/GitHub/arXiv/Hacker News adapter
-execution with source-health/cursor state. The Reddit adapter is locally proven
-with JSON comment capture and RSS fallback, but current anonymous live proof is
-blocked by Reddit 403s pending OAuth or another sanctioned access path. X live
-fetching, Reddit production-data proof, full recursive community-thread
-capture, semantic dedupe, enrichment/model-backed synthesis, delivery, and
-scheduled operation remain future work.
+execution with source-health/cursor state, plus production-data proofs for
+semantic/topic dedupe, deterministic ranking review, model-score overlays, and
+scheduled public-source ingestion through a controlled Telegram provider. The
+Reddit adapter is locally proven with JSON comment capture and RSS fallback,
+but current anonymous live proof is blocked by Reddit 403s pending OAuth or
+another sanctioned access path. Authenticated X live fetching, Reddit
+production-data proof, full recursive community-thread capture, enrichment and
+model-backed synthesis, live external notification delivery, and long-running
+service proof remain future work.
 
 ### Worker And Ops
 

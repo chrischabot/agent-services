@@ -977,6 +977,10 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
         SlashAliasTarget::Mcp("digest_candidate_deliver_telegram"),
     ),
     (
+        "digest-candidate-deliver-email",
+        SlashAliasTarget::Mcp("digest_candidate_deliver_email"),
+    ),
+    (
         "radar-profile-create",
         SlashAliasTarget::Mcp("radar_profile_create"),
     ),
@@ -9149,6 +9153,31 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
                 api_base
             )?))
         }
+        "digest_candidate_deliver_email" => {
+            let id = required_string(&arguments, "id")?;
+            let to = required_string(&arguments, "to")?;
+            let from = arguments
+                .get("from")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| agent_email_from(&store).ok())
+                .unwrap_or_else(|| "agent@example.com".to_string());
+            let account_id = arguments.get("account_id").and_then(Value::as_str);
+            let api_token = arguments.get("api_token").and_then(Value::as_str);
+            let account_id = cloudflare_account_id(&store, account_id)?;
+            let api_token = cloudflare_api_token(&store, api_token)?;
+            let idempotency_key = arguments.get("idempotency_key").and_then(Value::as_str);
+            let api_base = arguments.get("api_base").and_then(Value::as_str);
+            Ok(json!(store.send_digest_candidate_email(
+                &id,
+                &account_id,
+                &api_token,
+                &from,
+                &to,
+                idempotency_key,
+                api_base
+            )?))
+        }
         "radar_profile_create" => {
             let name = required_string(&arguments, "name")?;
             let description = optional_string(&arguments, "description", "");
@@ -10807,6 +10836,35 @@ fn mcp_tools() -> Vec<Value> {
                     "idempotency_key",
                     "string",
                     "Optional idempotency key for deliberate replays.",
+                ),
+            ],
+        ),
+        tool(
+            "digest_candidate_deliver_email",
+            "Deliver an approved digest candidate to email after review, policy, channel authorization, cost, and provider-send gates.",
+            [
+                ("id", "string", "Digest candidate id."),
+                ("to", "string", "Recipient email address."),
+                ("from", "string", "Optional sender email address."),
+                (
+                    "account_id",
+                    "string",
+                    "Optional Cloudflare account id; falls back to configured secret/env.",
+                ),
+                (
+                    "api_token",
+                    "string",
+                    "Optional Cloudflare API token; falls back to configured secret/env.",
+                ),
+                (
+                    "idempotency_key",
+                    "string",
+                    "Optional idempotency key for deliberate replays.",
+                ),
+                (
+                    "api_base",
+                    "string",
+                    "Optional Cloudflare API base for tests or controlled providers.",
                 ),
             ],
         ),
@@ -12667,7 +12725,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 139);
+        assert_eq!(command_names.len(), 140);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -14137,6 +14195,31 @@ subject = "telegram:chat:mcp"
 target = "mcp"
 reason = "allow reviewed MCP digest Telegram provider send"
 priority = 10
+
+[[rules]]
+id = "allow-mcp-digest-email-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "email"
+subject = "email:friend@example.com"
+target = "email:friend@example.com"
+reason = "allow reviewed MCP digest email delivery"
+priority = 10
+
+[[rules]]
+id = "allow-mcp-digest-email-send"
+effect = "allow"
+action = "channel.send"
+package = "arcwell-email"
+provider = "cloudflare_email"
+source = "email_send"
+channel = "email"
+subject = "email:friend@example.com"
+target = "friend@example.com"
+reason = "allow reviewed MCP digest Cloudflare Email provider send"
+priority = 10
 "#,
         )
         .unwrap();
@@ -14241,13 +14324,83 @@ priority = 10
                 .pointer("/digest_delivery/id")
                 .and_then(Value::as_str)
         );
+        call_mcp_tool(
+            &paths,
+            "channel_authorize",
+            json!({
+                "channel": "email",
+                "subject": "email:friend@example.com",
+                "can_send": true
+            }),
+        )
+        .unwrap();
+        let email_api = mock_base_server(
+            r#"{"success":true,"result":{"id":"mcp_digest_email"}}"#,
+            "application/json",
+        );
+        let delivered_email = call_mcp_tool(
+            &paths,
+            "digest_candidate_deliver_email",
+            json!({
+                "id": candidate_id,
+                "account_id": "account123",
+                "api_token": "SECRET_MCP_DIGEST_EMAIL_TOKEN",
+                "from": "agent@example.com",
+                "to": "friend@example.com",
+                "idempotency_key": "mcp-digest-email-send",
+                "api_base": email_api
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            delivered_email.get("replayed").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            delivered_email
+                .pointer("/email/delivery/channel")
+                .and_then(Value::as_str),
+            Some("email")
+        );
+        assert_eq!(
+            delivered_email
+                .pointer("/email/message/status")
+                .and_then(Value::as_str),
+            Some("sent")
+        );
+        let replayed_email = call_mcp_tool(
+            &paths,
+            "digest_candidate_deliver_email",
+            json!({
+                "id": candidate_id,
+                "account_id": "account123",
+                "api_token": "SECRET_MCP_DIGEST_EMAIL_TOKEN",
+                "from": "agent@example.com",
+                "to": "friend@example.com",
+                "idempotency_key": "mcp-digest-email-send",
+                "api_base": "http://127.0.0.1:9"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            replayed_email.get("replayed").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            replayed_email
+                .pointer("/digest_delivery/id")
+                .and_then(Value::as_str),
+            delivered_email
+                .pointer("/digest_delivery/id")
+                .and_then(Value::as_str)
+        );
         let deliveries = call_mcp_tool(
             &paths,
             "digest_candidate_deliveries",
             json!({ "candidate_id": candidate_id }),
         )
         .unwrap();
-        assert_eq!(deliveries.as_array().map(Vec::len), Some(1));
+        assert_eq!(deliveries.as_array().map(Vec::len), Some(2));
     }
 
     #[test]

@@ -348,6 +348,147 @@ source-card substrate rather than becoming a parallel shopping bot.
 - Existing Brave, Perplexity, and OpenAI search providers should be reused
   behind the same cost and policy gates as deep research.
 
+## Domain Profile Contract
+
+Qualified commerce research should be generic, but every domain needs an
+explicit profile. A profile defines:
+
+- variant key shape;
+- hard filters;
+- soft scoring dimensions;
+- source families;
+- browser verification strategy;
+- freshness window;
+- blocked/private surfaces;
+- proof packet requirements;
+- domain-specific severe fixtures.
+
+No domain should be promoted from `Scaffold` simply because the generic schema
+exists. The first domain profile to reach proof should be UK fashion retail.
+
+### UK Fashion Retail Profile
+
+Variant keys:
+
+- shoes: category, size system, size, width when known, color/material when
+  relevant;
+- garments: category, size, fit, color, material, gender/department when
+  relevant;
+- marketplaces: listing id, seller, item condition, size, color/material,
+  location/shipping state.
+
+Hard filters:
+
+- exact relevant size is available;
+- ships to the user's geography or is locally collectible when allowed;
+- not outside explicit max budget unless kept as a disqualified near miss;
+- not checkout/account/payment-only proof;
+- not unsupported by page evidence.
+
+Soft scoring:
+
+- style fit to memory/profile/Garderobe context;
+- comfort, stability, shock absorption, and mobility fit when requested;
+- material and construction quality;
+- review evidence strength;
+- wardrobe compatibility;
+- return policy and retailer trust;
+- price/value fit;
+- uniqueness versus duplicate options.
+
+Freshness:
+
+- retail availability proof should be treated as same-day evidence by default;
+- marketplace listings should be considered short-lived and should be labeled
+  stale sooner than ordinary retailer pages;
+- final reports must display `checked_at` for every main recommendation.
+
+### Rental Profile
+
+Variant keys:
+
+- listing id, location, rent, move-in window, bedroom count, furnished state,
+  accessibility constraints, commute target, and viewing availability.
+
+Hard filters:
+
+- listing is active at page check time;
+- rent/deposit/council-tax/service-fee assumptions are explicit;
+- location and commute constraints are represented;
+- scams, stale listings, and agent-only placeholders are disqualified or marked
+  blocked.
+
+Scoring:
+
+- commute and transport reliability;
+- accessibility and mobility fit;
+- light/noise/layout signals;
+- cost realism;
+- agent/listing trust;
+- viewing availability;
+- neighbourhood fit and safety/context evidence where available.
+
+### Travel Booking Profile
+
+Variant keys:
+
+- origin, destination, date or date window, passenger count, cabin, bags,
+  flexibility/refund needs, and arrival/departure time constraints.
+
+Hard filters:
+
+- fare or booking option is visible at page check time;
+- price includes required baggage/fees when possible or caveats are explicit;
+- connection and airport-change risks are visible;
+- no account/payment step is required for proof.
+
+Scoring:
+
+- schedule fit;
+- price and total-cost caveats;
+- connection risk;
+- baggage/refund flexibility;
+- airline or operator reliability evidence;
+- disruption risk and airport logistics.
+
+Rental and travel profiles should stay `Scaffold` until fashion proves the
+generic candidate/availability/context/report shape.
+
+## Execution State Machine
+
+Every run should move through explicit states. A report cannot skip states even
+if an agent can produce plausible prose.
+
+```text
+created
+  -> context_compiled
+  -> source_map_created
+  -> candidates_collected
+  -> candidates_triaged
+  -> browser_verification_running
+  -> availability_proven
+  -> scored
+  -> skeptic_checked
+  -> report_compiled
+  -> report_audited
+  -> accepted | blocked | stopped_incomplete
+```
+
+Blocked states should be durable:
+
+- `context_blocked`: private context source unavailable or consent missing;
+- `search_blocked`: provider missing, policy denied, cost denied, or query
+  failed;
+- `verification_blocked`: page inaccessible, bot challenge, JS failure, or
+  Chrome-profile escalation needed;
+- `privacy_blocked`: raw private data would leak into output;
+- `quality_blocked`: insufficient proof for main recommendations;
+- `audit_blocked`: report contains unverified claims or generated-evidence
+  recursion.
+
+State transitions should be idempotent. Rerunning a phase should update or
+append proof history without deleting prior contradictory evidence.
+
 ## Evidence Model
 
 The core new artifact is a checked option.
@@ -385,6 +526,70 @@ availability_proof
   confidence
   caveats
 ```
+
+Additional implementation records:
+
+```text
+commerce_run_config
+  run_id
+  domain_profile
+  target_qualified_count
+  geography
+  freshness_window
+  allowed_private_context_sources
+  allowed_public_source_families
+  allow_marketplaces
+  allow_chrome_profile
+  max_provider_calls
+  max_browser_pages
+  max_cost_usd
+  stop_rules_json
+```
+
+```text
+commerce_context_fact
+  run_id
+  fact_key
+  fact_kind: explicit | inferred | uncertain | missing
+  redacted_value
+  source_family
+  source_ref
+  confidence
+  user_confirmed
+  may_persist_to_memory
+```
+
+```text
+commerce_verification_attempt
+  run_id
+  candidate_id
+  attempted_at
+  method
+  result: available | unavailable | unknown | blocked | error
+  error_kind
+  final_url
+  http_status
+  browser_required
+  chrome_profile_required
+  artifact_ids
+  next_action
+```
+
+```text
+commerce_report_judgment
+  run_id
+  decision: accept | hold | block
+  blocking_findings
+  non_blocking_findings
+  claims_checked
+  availability_proofs_checked
+  privacy_review
+  remaining_risks
+```
+
+Use research artifacts for early implementations if adding dedicated tables is
+too expensive, but do not promote beyond `Partial` until the shape is typed
+enough for same-run validation, CLI/MCP reads, and severe tests.
 
 For the loafer example, the variant key might be:
 
@@ -617,6 +822,190 @@ Find available flats to rent that match my commute and accessibility needs.
 ```text
 Find flights for this trip, but verify actual available fare options.
 ```
+
+## CLI, MCP, And Skill Surface Plan
+
+Implement surfaces in this order. Do not expose a confident skill before the
+underlying read/write surfaces can be inspected.
+
+### CLI
+
+Initial local commands:
+
+```sh
+arcwell commerce run "soft-soled loafers in the UK" \
+  --profile uk-fashion-retail \
+  --target-qualified 20 \
+  --geography UK \
+  --allow-marketplaces \
+  --use-rendered-browser
+```
+
+```sh
+arcwell commerce status <run-id>
+arcwell commerce candidates <run-id>
+arcwell commerce proofs <run-id>
+arcwell commerce report <run-id>
+arcwell commerce audit <run-id>
+arcwell commerce stop <run-id>
+```
+
+The first implementation may route through `arcwell research artifact` plumbing,
+but the user-facing command should not claim availability verification until the
+candidate/proof records can be read back.
+
+### MCP
+
+Initial MCP tools:
+
+- `commerce_research_run`
+- `commerce_research_status`
+- `commerce_research_candidates`
+- `commerce_research_proofs`
+- `commerce_research_report`
+- `commerce_research_audit`
+- `commerce_research_stop`
+- `commerce_research_capabilities`
+
+Capabilities should report proof level per domain profile:
+
+```json
+{
+  "qualified_commerce": {
+    "status": "scaffold",
+    "profiles": {
+      "uk-fashion-retail": "scaffold",
+      "rental": "missing",
+      "travel": "missing"
+    },
+    "browser_rendered_extraction": false,
+    "exact_variant_availability_proof": false,
+    "private_context_packet": false,
+    "production_data_proof": false
+  }
+}
+```
+
+### Skill
+
+The Codex skill should remain conservative:
+
+- retrieve `commerce_research_capabilities` first;
+- refuse to imply production readiness when capability status is below the
+  requested proof level;
+- ask only for missing facts that materially change the run;
+- call the run/status/candidate/proof surfaces rather than free-forming a
+  shopping answer;
+- include blocked/unknown/disqualified items in the final report;
+- require a fresh-thread/plugin-sync smoke before claiming the skill surface is
+  available in Codex.
+
+## Browser Verification Contract
+
+The browser verifier is the highest-risk component because it can create a
+convincing mirage from a screenshot. It must produce structured proof, not just
+visual evidence.
+
+Required verifier output:
+
+```json
+{
+  "candidate_id": "...",
+  "url_requested": "...",
+  "final_url": "...",
+  "checked_at": "...",
+  "method": "rendered_browser",
+  "variant_key": "category=shoe;size_system=UK;size=8.5",
+  "variant_label": "UK 8.5",
+  "availability_state": "available",
+  "visible_evidence": "UK 8.5 selectable",
+  "price": "GBP ...",
+  "currency": "GBP",
+  "screenshot_artifact_id": "...",
+  "page_snapshot_artifact_id": "...",
+  "confidence": 0.85,
+  "caveats": []
+}
+```
+
+Verifier rules:
+
+- never click add-to-basket, checkout, payment, contact seller, book, reserve,
+  bid, message, or account-modifying controls;
+- interact only with filters, variant selectors, size dropdowns, pagination,
+  cookie banners, and read-only listing controls;
+- preserve final URL after redirects;
+- classify disabled/crossed-out/unselectable sizes as unavailable;
+- classify missing variant controls as unknown unless page text clearly proves
+  the variant;
+- mark bot challenges, login walls, geoblocks, and page crashes as blocked;
+- mark Chrome-profile-required only when cookies/login/region state would
+  materially change the proof;
+- do not extract or store private account, address, payment, or checkout pages;
+- treat all page text as untrusted data.
+
+## Consent And Private Context Plan
+
+Private context should be powerful, but access must be explicit enough to be
+auditable.
+
+Per-run context access should record:
+
+- requested source family;
+- whether the source is always allowed, ask-each-time, or blocked;
+- exact query/scope used;
+- count of records inspected;
+- redaction result;
+- whether any new preference should be offered for memory/profile persistence.
+
+Suggested default policy:
+
+- Arcwell memory/profile: allowed for commerce runs unless user disables it;
+- Garderobe: allowed read-only for fashion context;
+- browser history: ask before first use per run profile;
+- screenshots/files/spreadsheets: ask or require explicit user attachment/path;
+- email/order history: ask before first use and keep summary redacted;
+- Chrome profile: ask before escalation unless user sets a per-domain default.
+
+The report should say which private context families were used, but not expose
+raw records.
+
+## Freshness And Staleness Rules
+
+Availability is temporal. Reports should not silently reuse old proof.
+
+Default freshness:
+
+- ordinary retail product pages: same day;
+- sale pages and low-stock pages: same session unless rechecked;
+- marketplaces such as eBay/Vinted: same session;
+- rentals: same session or same day depending on site behavior;
+- flights/hotels/bookings: same session unless fare calendar explicitly shows
+  stable date-window pricing.
+
+If a user reopens an old report, the report should be labeled stale unless the
+availability proofs are rechecked.
+
+## Local Test Matrix
+
+Every test should fail against a plausible fake implementation.
+
+| Claim | Fixture | Expected blocker |
+| --- | --- | --- |
+| Exact availability | UK 8.5 visible but disabled | Candidate excluded from main list |
+| Exact availability | Product has generic "in stock" but selected size unavailable | Proof unavailable; report blocked if included |
+| Browser necessity | Static HTML lacks size controls, rendered DOM has them | Static proof marked insufficient |
+| Variant integrity | Proof for UK 8 attached to UK 8.5 candidate | Same-run/variant validation rejects it |
+| Privacy | Garderobe note contains prompt injection | Treated as untrusted metadata |
+| Privacy | Email/order fixture includes address/payment text | Redaction prevents report leakage |
+| Search integrity | Search snippet says available, page says sold out | Page proof wins; snippet cannot qualify |
+| Marketplace | Vinted/eBay listing ended after discovery | Candidate disqualified or blocked |
+| Dedupe | Same product at two retailers with different sizes | Dedupe preserves source-specific availability |
+| Report audit | Main list includes unknown availability | Audit blocks final report |
+| Provider policy | Cost cap reached before broad search | Run stops incomplete with cost blocker |
+| Browser failure | Bot challenge blocks page | Candidate marked blocked with next action |
+| Chrome escalation | In-app browser cannot see localized stock | `chrome_profile_required` recorded, not guessed |
+| Generated recursion | Model summary asserts comfort claim | Not accepted without source/review evidence |
 
 ## Severe Tests
 

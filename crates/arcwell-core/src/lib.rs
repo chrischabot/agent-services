@@ -39869,6 +39869,28 @@ fn is_generated_wiki_page(title: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::{Mutex, OnceLock};
+
+    static LOOPBACK_URL_INGEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_loopback_url_ingest_allowed<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = LOOPBACK_URL_INGEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("loopback URL ingest env lock poisoned");
+        unsafe {
+            std::env::set_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST", "1");
+        }
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe {
+            std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -50272,9 +50294,6 @@ reason = "X monitor network blocked for test"
             "location: http://169.254.169.254/latest/meta-data\r\ncontent-type: text/html\r\n",
             "",
         );
-        unsafe {
-            std::env::set_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST", "1");
-        }
         for url in [
             ok_url.as_str(),
             "https://169.254.169.254/latest/meta-data",
@@ -50293,10 +50312,7 @@ reason = "X monitor network blocked for test"
                 .unwrap();
         }
 
-        let report = store.x_expand_links(10).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
-        }
+        let report = with_loopback_url_ingest_allowed(|| store.x_expand_links(10).unwrap());
         assert_eq!(report.candidates, 3);
         assert_eq!(report.expanded, 1);
         assert_eq!(report.failed, 2);
@@ -50359,9 +50375,6 @@ source = "x_link_expand"
 reason = "test denies X link expansion"
 "#,
         );
-        unsafe {
-            std::env::set_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST", "1");
-        }
         store
             .conn
             .execute(
@@ -50373,10 +50386,7 @@ reason = "test denies X link expansion"
                 params![url, now()],
             )
             .unwrap();
-        let report = store.x_expand_links(10).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
-        }
+        let report = with_loopback_url_ingest_allowed(|| store.x_expand_links(10).unwrap());
         assert_eq!(report.expanded, 0);
         assert_eq!(report.failed, 1);
         assert!(

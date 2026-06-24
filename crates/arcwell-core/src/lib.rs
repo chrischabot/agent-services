@@ -876,6 +876,57 @@ pub struct DigestDeliveryReconcileReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAlertScheduleInput {
+    pub name: String,
+    pub channel: String,
+    pub recipient_ref: String,
+    pub min_score: f64,
+    pub max_candidates: i64,
+    pub interval_hours: i64,
+    pub quiet_hours: Option<Value>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAlertSchedule {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub channel: String,
+    pub recipient_ref: String,
+    pub min_score: f64,
+    pub max_candidates: i64,
+    pub interval_hours: i64,
+    pub quiet_hours: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAlertScheduleEnqueueReport {
+    pub inspected: usize,
+    pub enqueued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAlertTick {
+    pub id: String,
+    pub schedule_id: String,
+    pub tick_key: String,
+    pub due_at: String,
+    pub status: String,
+    pub job_id: Option<String>,
+    pub candidate_ids: Vec<String>,
+    pub delivery_ids: Vec<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarAuditFinding {
     pub severity: String,
     pub code: String,
@@ -1032,6 +1083,16 @@ struct ScheduledRadarQuietHours {
     end_minutes: u32,
 }
 
+#[derive(Debug, Clone)]
+struct DigestAlertSchedulePolicy {
+    channel: String,
+    recipient_ref: String,
+    min_score: f64,
+    max_candidates: i64,
+    interval_hours: i64,
+    quiet_hours: Option<ScheduledRadarQuietHours>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiJob {
     pub id: String,
@@ -1060,6 +1121,7 @@ pub struct WorkerRunReport {
     pub jobs: Vec<WikiJob>,
     pub watch_poll: Option<WatchSourcePollEnqueueReport>,
     pub radar_schedule: Option<RadarScheduleEnqueueReport>,
+    pub digest_alert_schedule: Option<DigestAlertScheduleEnqueueReport>,
     pub telegram_retry: Option<TelegramRetryReport>,
     pub email_retry: Option<EmailRetryReport>,
     pub radar_delivery_reconcile: Option<RadarDeliveryReconcileReport>,
@@ -4329,6 +4391,42 @@ impl Store {
               UNIQUE(candidate_id, channel, subject, target, idempotency_key),
               FOREIGN KEY(candidate_id) REFERENCES digest_candidates(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS digest_alert_schedules (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              channel TEXT NOT NULL,
+              recipient_ref TEXT NOT NULL,
+              min_score REAL NOT NULL,
+              max_candidates INTEGER NOT NULL,
+              interval_hours INTEGER NOT NULL,
+              quiet_hours_json TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS digest_alert_ticks (
+              id TEXT PRIMARY KEY,
+              schedule_id TEXT NOT NULL,
+              tick_key TEXT NOT NULL UNIQUE,
+              due_at TEXT NOT NULL,
+              status TEXT NOT NULL,
+              job_id TEXT,
+              candidate_ids_json TEXT NOT NULL DEFAULT '[]',
+              delivery_ids_json TEXT NOT NULL DEFAULT '[]',
+              error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(schedule_id) REFERENCES digest_alert_schedules(id) ON DELETE CASCADE,
+              FOREIGN KEY(job_id) REFERENCES wiki_jobs(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_digest_alert_ticks_schedule_due
+            ON digest_alert_ticks(schedule_id, due_at);
+
+            CREATE INDEX IF NOT EXISTS idx_digest_alert_ticks_status
+            ON digest_alert_ticks(status);
             "#,
         )?;
         self.ensure_column(
@@ -13135,6 +13233,12 @@ impl Store {
         } else {
             None
         };
+        let digest_alert_schedule = self.enqueue_due_digest_alert_schedule_jobs(max_jobs)?;
+        let digest_alert_schedule = if digest_alert_schedule.inspected > 0 {
+            Some(digest_alert_schedule)
+        } else {
+            None
+        };
         let mut jobs = Vec::new();
         for _ in 0..max_jobs {
             let Some(job) = self.claim_next_pending_job()? else {
@@ -13174,6 +13278,7 @@ impl Store {
             jobs,
             watch_poll,
             radar_schedule,
+            digest_alert_schedule,
             telegram_retry,
             email_retry,
             radar_delivery_reconcile,
@@ -20484,6 +20589,348 @@ impl Store {
         rows(stmt.query_map([], digest_delivery_from_row)?)
     }
 
+    pub fn create_digest_alert_schedule(
+        &self,
+        input: DigestAlertScheduleInput,
+    ) -> Result<DigestAlertSchedule> {
+        validate_query(&input.name)?;
+        let status = input
+            .status
+            .as_deref()
+            .unwrap_or("active")
+            .to_ascii_lowercase();
+        match status.as_str() {
+            "active" | "paused" => {}
+            other => bail!("digest alert schedule status must be active or paused, got {other}"),
+        }
+        let channel = normalize_radar_delivery_channel(&input.channel)?;
+        let recipient_ref = normalize_radar_delivery_recipient(&channel, &input.recipient_ref)?;
+        let policy = DigestAlertSchedulePolicy {
+            channel,
+            recipient_ref,
+            min_score: input.min_score,
+            max_candidates: input.max_candidates,
+            interval_hours: input.interval_hours,
+            quiet_hours: input
+                .quiet_hours
+                .as_ref()
+                .map(parse_scheduled_radar_quiet_hours)
+                .transpose()?,
+        };
+        validate_digest_alert_schedule_policy(&policy)?;
+        let quiet_hours_json = input
+            .quiet_hours
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.conn.execute(
+            r#"
+            INSERT INTO digest_alert_schedules
+              (id, name, status, channel, recipient_ref, min_score, max_candidates,
+               interval_hours, quiet_hours_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            "#,
+            params![
+                id,
+                input.name,
+                status,
+                policy.channel,
+                policy.recipient_ref,
+                policy.min_score,
+                policy.max_candidates,
+                policy.interval_hours,
+                quiet_hours_json,
+                timestamp
+            ],
+        )?;
+        self.get_digest_alert_schedule(&id)?
+            .with_context(|| format!("inserted digest alert schedule not found: {id}"))
+    }
+
+    pub fn list_digest_alert_schedules(&self) -> Result<Vec<DigestAlertSchedule>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, name, status, channel, recipient_ref, min_score, max_candidates,
+                   interval_hours, quiet_hours_json, created_at, updated_at
+            FROM digest_alert_schedules
+            ORDER BY updated_at DESC
+            "#,
+        )?;
+        rows(stmt.query_map([], digest_alert_schedule_from_row)?)
+    }
+
+    pub fn get_digest_alert_schedule(&self, id: &str) -> Result<Option<DigestAlertSchedule>> {
+        validate_id(id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, name, status, channel, recipient_ref, min_score, max_candidates,
+                       interval_hours, quiet_hours_json, created_at, updated_at
+                FROM digest_alert_schedules
+                WHERE id = ?1
+                "#,
+                params![id],
+                digest_alert_schedule_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_digest_alert_ticks(
+        &self,
+        schedule_id: Option<&str>,
+    ) -> Result<Vec<DigestAlertTick>> {
+        if let Some(schedule_id) = schedule_id {
+            validate_id(schedule_id)?;
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT id, schedule_id, tick_key, due_at, status, job_id,
+                       candidate_ids_json, delivery_ids_json, error, created_at, updated_at
+                FROM digest_alert_ticks
+                WHERE schedule_id = ?1
+                ORDER BY due_at DESC, updated_at DESC
+                "#,
+            )?;
+            return rows(stmt.query_map(params![schedule_id], digest_alert_tick_from_row)?);
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, schedule_id, tick_key, due_at, status, job_id,
+                   candidate_ids_json, delivery_ids_json, error, created_at, updated_at
+            FROM digest_alert_ticks
+            ORDER BY due_at DESC, updated_at DESC
+            "#,
+        )?;
+        rows(stmt.query_map([], digest_alert_tick_from_row)?)
+    }
+
+    pub fn enqueue_due_digest_alert_schedule_jobs(
+        &self,
+        max_schedules: usize,
+    ) -> Result<DigestAlertScheduleEnqueueReport> {
+        let mut report = DigestAlertScheduleEnqueueReport {
+            inspected: 0,
+            enqueued: 0,
+            skipped: 0,
+            jobs: Vec::new(),
+            errors: Vec::new(),
+        };
+        for schedule in self
+            .list_digest_alert_schedules()?
+            .into_iter()
+            .take(max_schedules.clamp(1, 100))
+        {
+            report.inspected += 1;
+            if schedule.status != "active" {
+                report.skipped += 1;
+                continue;
+            }
+            let policy = match digest_alert_schedule_policy(&schedule) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    report.skipped += 1;
+                    report.errors.push(format!("{}: {error}", schedule.name));
+                    continue;
+                }
+            };
+            if self.digest_alert_schedule_has_active_job(&schedule.id)? {
+                report.skipped += 1;
+                continue;
+            }
+            if let Some(latest_due_at) = self.latest_digest_alert_due_at(&schedule.id)?
+                && !radar_schedule_interval_elapsed(&latest_due_at, policy.interval_hours)
+            {
+                report.skipped += 1;
+                continue;
+            }
+            let due_at = radar_schedule_due_slot(policy.interval_hours);
+            let tick_key = digest_alert_schedule_tick_key(&schedule.id, &due_at, &policy);
+            if self.get_digest_alert_tick_by_key(&tick_key)?.is_some() {
+                report.skipped += 1;
+                continue;
+            }
+            match self.create_digest_alert_tick(&schedule.id, &tick_key, &due_at) {
+                Ok(tick) => match self
+                    .enqueue_wiki_job("digest_scheduled_alert", json!({ "tick_id": tick.id }))
+                {
+                    Ok(job) => {
+                        self.attach_digest_alert_job(&tick.id, &job.id)?;
+                        report.enqueued += 1;
+                        report.jobs.push(job.id);
+                    }
+                    Err(error) => {
+                        self.update_digest_alert_tick(
+                            &tick.id,
+                            "blocked",
+                            &[],
+                            &[],
+                            Some(&error.to_string()),
+                        )?;
+                        report.skipped += 1;
+                        report.errors.push(format!("{}: {error}", schedule.name));
+                    }
+                },
+                Err(error) => {
+                    report.skipped += 1;
+                    report.errors.push(format!("{}: {error}", schedule.name));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    fn digest_alert_schedule_has_active_job(&self, schedule_id: &str) -> Result<bool> {
+        validate_id(schedule_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM digest_alert_ticks tick
+                JOIN wiki_jobs job ON job.id = tick.job_id
+                WHERE tick.schedule_id = ?1
+                  AND job.kind = 'digest_scheduled_alert'
+                  AND job.status IN ('pending', 'running', 'deferred')
+                "#,
+                params![schedule_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .map_err(Into::into)
+    }
+
+    fn latest_digest_alert_due_at(&self, schedule_id: &str) -> Result<Option<String>> {
+        validate_id(schedule_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT due_at
+                FROM digest_alert_ticks
+                WHERE schedule_id = ?1
+                  AND status IN ('sent', 'partial', 'empty', 'blocked', 'failed', 'deferred')
+                ORDER BY due_at DESC
+                LIMIT 1
+                "#,
+                params![schedule_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn create_digest_alert_tick(
+        &self,
+        schedule_id: &str,
+        tick_key: &str,
+        due_at: &str,
+    ) -> Result<DigestAlertTick> {
+        validate_id(schedule_id)?;
+        validate_query(tick_key)?;
+        validate_timestamp(due_at)?;
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.conn.execute(
+            r#"
+            INSERT INTO digest_alert_ticks
+              (id, schedule_id, tick_key, due_at, status, candidate_ids_json,
+               delivery_ids_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, 'pending', '[]', '[]', ?5, ?5)
+            "#,
+            params![id, schedule_id, tick_key, due_at, timestamp],
+        )?;
+        self.get_digest_alert_tick(&id)?
+            .with_context(|| format!("inserted digest alert tick not found: {id}"))
+    }
+
+    fn attach_digest_alert_job(&self, tick_id: &str, job_id: &str) -> Result<()> {
+        validate_id(tick_id)?;
+        validate_id(job_id)?;
+        self.conn.execute(
+            "UPDATE digest_alert_ticks SET job_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![tick_id, job_id, now()],
+        )?;
+        Ok(())
+    }
+
+    fn update_digest_alert_tick(
+        &self,
+        tick_id: &str,
+        status: &str,
+        candidate_ids: &[String],
+        delivery_ids: &[String],
+        error: Option<&str>,
+    ) -> Result<DigestAlertTick> {
+        validate_id(tick_id)?;
+        validate_key(status)?;
+        for id in candidate_ids {
+            validate_id(id)?;
+        }
+        for id in delivery_ids {
+            validate_id(id)?;
+        }
+        if let Some(error) = error {
+            validate_notes(error)?;
+        }
+        let candidate_ids_json = serde_json::to_string(candidate_ids)?;
+        let delivery_ids_json = serde_json::to_string(delivery_ids)?;
+        self.conn.execute(
+            r#"
+            UPDATE digest_alert_ticks
+            SET status = ?2,
+                candidate_ids_json = ?3,
+                delivery_ids_json = ?4,
+                error = ?5,
+                updated_at = ?6
+            WHERE id = ?1
+            "#,
+            params![
+                tick_id,
+                status,
+                candidate_ids_json,
+                delivery_ids_json,
+                error,
+                now()
+            ],
+        )?;
+        self.get_digest_alert_tick(tick_id)?
+            .with_context(|| format!("updated digest alert tick not found: {tick_id}"))
+    }
+
+    fn get_digest_alert_tick(&self, id: &str) -> Result<Option<DigestAlertTick>> {
+        validate_id(id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, schedule_id, tick_key, due_at, status, job_id,
+                       candidate_ids_json, delivery_ids_json, error, created_at, updated_at
+                FROM digest_alert_ticks
+                WHERE id = ?1
+                "#,
+                params![id],
+                digest_alert_tick_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn get_digest_alert_tick_by_key(&self, tick_key: &str) -> Result<Option<DigestAlertTick>> {
+        validate_query(tick_key)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, schedule_id, tick_key, due_at, status, job_id,
+                       candidate_ids_json, delivery_ids_json, error, created_at, updated_at
+                FROM digest_alert_ticks
+                WHERE tick_key = ?1
+                "#,
+                params![tick_key],
+                digest_alert_tick_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn reconcile_digest_delivery_attempts(
         &self,
         max_attempts_per_message: i64,
@@ -25109,6 +25556,7 @@ impl Store {
                 "radar_scheduled_delivery" => {
                     self.execute_radar_scheduled_delivery(&job.input_json)
                 }
+                "digest_scheduled_alert" => self.execute_digest_scheduled_alert(&job.input_json),
                 "research_convergence_run" => {
                     self.execute_research_convergence_run(&job.input_json)
                 }
@@ -25654,6 +26102,253 @@ impl Store {
             "status": tick_status,
             "proof_level": proof_level
         }))
+    }
+
+    fn execute_digest_scheduled_alert(&self, input: &Value) -> Result<Value> {
+        let tick_id = input
+            .get("tick_id")
+            .and_then(Value::as_str)
+            .context("digest_scheduled_alert missing tick_id")?;
+        let tick = self
+            .get_digest_alert_tick(tick_id)?
+            .with_context(|| format!("digest alert tick not found: {tick_id}"))?;
+        let schedule = self
+            .get_digest_alert_schedule(&tick.schedule_id)?
+            .with_context(|| format!("digest alert schedule not found: {}", tick.schedule_id))?;
+        let policy = digest_alert_schedule_policy(&schedule)?;
+        if let Some(deferred_until) = digest_alert_quiet_hours_deferred_until(&policy, Utc::now())?
+        {
+            let note = format!("quiet hours active until {}", deferred_until.to_rfc3339());
+            let updated = self.update_digest_alert_tick(
+                &tick.id,
+                "deferred",
+                &tick.candidate_ids,
+                &tick.delivery_ids,
+                Some(&note),
+            )?;
+            return Ok(json!({
+                "tick": updated,
+                "schedule": schedule,
+                "status": "deferred",
+                "deferred_until": deferred_until.to_rfc3339(),
+                "reason": "quiet_hours",
+                "proof_level": "Production-shape proof: quiet-hours policy deferred scheduled digest alert before provider send"
+            }));
+        }
+        let candidates = self.select_digest_alert_candidates(&policy)?;
+        let candidate_ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            let updated = self.update_digest_alert_tick(&tick.id, "empty", &[], &[], None)?;
+            return Ok(json!({
+                "tick": updated,
+                "schedule": schedule,
+                "status": "empty",
+                "selected_candidates": [],
+                "deliveries": [],
+                "proof_level": "Production-shape proof: scheduled digest alert ran threshold selection and found no approved unsent candidates"
+            }));
+        }
+        let credentials = (|| -> Result<_> {
+            match policy.channel.as_str() {
+                "telegram" => Ok((
+                    Some(self.configured_telegram_bot_token()?.context(
+                        "TELEGRAM_BOT_TOKEN is required for scheduled digest Telegram alerts",
+                    )?),
+                    None,
+                    None,
+                    None,
+                    self.configured_telegram_api_base()?,
+                    "Production-shape proof: scheduled Telegram digest alert through resident worker",
+                )),
+                "email" => Ok((
+                    None,
+                    Some(self.configured_cloudflare_account_id()?.context(
+                        "CLOUDFLARE_ACCOUNT_ID is required for scheduled digest email alerts",
+                    )?),
+                    Some(self.configured_cloudflare_email_api_token()?.context(
+                        "CLOUDFLARE_EMAIL_API_TOKEN or CLOUDFLARE_API_TOKEN is required for scheduled digest email alerts",
+                    )?),
+                    Some(self.configured_agent_email_from()?.context(
+                        "ARCWELL_AGENT_EMAIL_FROM or ARCWELL_AGENT_EMAIL is required for scheduled digest email alerts",
+                    )?),
+                    self.configured_cloudflare_email_api_base()?,
+                    "Production-shape proof: scheduled email digest alert through resident worker",
+                )),
+                other => bail!("unsupported scheduled digest alert channel: {other}"),
+            }
+        })();
+        let (
+            telegram_bot_token,
+            email_account_id,
+            email_api_token,
+            email_from,
+            api_base,
+            proof_level,
+        ) = match credentials {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                let error = sanitize_radar_delivery_error(&error.to_string())?;
+                let updated = self.update_digest_alert_tick(
+                    &tick.id,
+                    "blocked",
+                    &candidate_ids,
+                    &[],
+                    Some(&error),
+                )?;
+                return Ok(json!({
+                    "tick": updated,
+                    "schedule": schedule,
+                    "status": "blocked",
+                    "selected_candidates": candidate_ids,
+                    "deliveries": [],
+                    "error": error,
+                    "proof_level": "Production-shape boundary: scheduled digest alert is blocked before provider send when channel config is missing"
+                }));
+            }
+        };
+        let mut deliveries = Vec::new();
+        let mut delivery_ids = Vec::new();
+        let mut errors = Vec::new();
+        for candidate in candidates {
+            let idempotency_key = format!("digest-alert-{}-{}", tick.tick_key, candidate.id);
+            let result = match policy.channel.as_str() {
+                "telegram" => self
+                    .send_digest_candidate_telegram(
+                        &candidate.id,
+                        telegram_bot_token.as_deref().unwrap_or_default(),
+                        digest_alert_telegram_chat_id(&policy.recipient_ref)?,
+                        Some(&idempotency_key),
+                        api_base.as_deref(),
+                    )
+                    .map(|report| json!(report.digest_delivery)),
+                "email" => self
+                    .send_digest_candidate_email(
+                        &candidate.id,
+                        email_account_id.as_deref().unwrap_or_default(),
+                        email_api_token.as_deref().unwrap_or_default(),
+                        email_from.as_deref().unwrap_or_default(),
+                        digest_alert_email_recipient(&policy.recipient_ref)?,
+                        Some(&idempotency_key),
+                        api_base.as_deref(),
+                    )
+                    .map(|report| json!(report.digest_delivery)),
+                other => bail!("unsupported scheduled digest alert channel: {other}"),
+            };
+            match result {
+                Ok(delivery) => {
+                    if let Some(id) = delivery.get("id").and_then(Value::as_str) {
+                        delivery_ids.push(id.to_string());
+                    }
+                    deliveries.push(delivery);
+                }
+                Err(error) => {
+                    let error = sanitize_radar_delivery_error(&error.to_string())?;
+                    if let Some(delivery) =
+                        self.find_digest_alert_delivery(&candidate.id, &policy, &idempotency_key)?
+                    {
+                        delivery_ids.push(delivery.id.clone());
+                        deliveries.push(json!(delivery));
+                    }
+                    errors.push(format!("{}: {error}", candidate.id));
+                }
+            }
+        }
+        let sent = deliveries
+            .iter()
+            .filter(|delivery| delivery.get("status").and_then(Value::as_str) == Some("sent"))
+            .count();
+        let status = if errors.is_empty() && sent == delivery_ids.len() {
+            "sent"
+        } else if sent > 0 {
+            "partial"
+        } else {
+            "failed"
+        };
+        let error_text = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        };
+        let updated = self.update_digest_alert_tick(
+            &tick.id,
+            status,
+            &candidate_ids,
+            &delivery_ids,
+            error_text.as_deref(),
+        )?;
+        Ok(json!({
+            "tick": updated,
+            "schedule": schedule,
+            "status": status,
+            "selected_candidates": candidate_ids,
+            "deliveries": deliveries,
+            "errors": errors,
+            "proof_level": proof_level
+        }))
+    }
+
+    fn select_digest_alert_candidates(
+        &self,
+        policy: &DigestAlertSchedulePolicy,
+    ) -> Result<Vec<DigestCandidate>> {
+        let subject = digest_alert_delivery_subject(policy)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, topic, score, reason, status, source_card_ids_json,
+                   review_status, reviewed_at, reviewed_by, review_note,
+                   created_at, updated_at
+            FROM digest_candidates candidate
+            WHERE candidate.status = 'approved'
+              AND candidate.review_status = 'approved'
+              AND candidate.score >= ?1
+              AND NOT EXISTS (
+                SELECT 1
+                FROM digest_deliveries delivery
+                WHERE delivery.candidate_id = candidate.id
+                  AND delivery.channel = ?2
+                  AND delivery.subject = ?3
+                  AND delivery.target = ?3
+                  AND delivery.status IN ('pending', 'sent', 'failed', 'blocked')
+              )
+            ORDER BY candidate.score DESC, candidate.updated_at DESC
+            LIMIT ?4
+            "#,
+        )?;
+        rows(stmt.query_map(
+            params![
+                policy.min_score,
+                policy.channel,
+                subject,
+                policy.max_candidates
+            ],
+            digest_candidate_from_row,
+        )?)
+    }
+
+    fn find_digest_alert_delivery(
+        &self,
+        candidate_id: &str,
+        policy: &DigestAlertSchedulePolicy,
+        explicit_idempotency_key: &str,
+    ) -> Result<Option<DigestDelivery>> {
+        let subject = digest_alert_delivery_subject(policy)?;
+        let idempotency_key = digest_delivery_idempotency_key(
+            candidate_id,
+            &policy.channel,
+            &subject,
+            &subject,
+            Some(explicit_idempotency_key),
+        )?;
+        self.find_digest_delivery(
+            candidate_id,
+            &policy.channel,
+            &subject,
+            &subject,
+            &idempotency_key,
+        )
     }
 
     fn execute_rss_fetch(&self, input: &Value) -> Result<Value> {
@@ -30010,6 +30705,7 @@ fn validate_job_kind(kind: &str) -> Result<()> {
         | "x_monitor_watch_source"
         | "radar_run"
         | "radar_scheduled_delivery"
+        | "digest_scheduled_alert"
         | "research_convergence_run" => Ok(()),
         other => bail!("unsupported job kind: {other}"),
     }
@@ -32775,6 +33471,45 @@ fn digest_delivery_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigestD
     })
 }
 
+fn digest_alert_schedule_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DigestAlertSchedule> {
+    let quiet_hours_json: Option<String> = row.get(8)?;
+    Ok(DigestAlertSchedule {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        status: row.get(2)?,
+        channel: row.get(3)?,
+        recipient_ref: row.get(4)?,
+        min_score: row.get(5)?,
+        max_candidates: row.get(6)?,
+        interval_hours: row.get(7)?,
+        quiet_hours: quiet_hours_json
+            .map(|raw| parse_json_column(&raw, 8))
+            .transpose()?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn digest_alert_tick_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigestAlertTick> {
+    let candidate_ids_json: String = row.get(6)?;
+    let delivery_ids_json: String = row.get(7)?;
+    Ok(DigestAlertTick {
+        id: row.get(0)?,
+        schedule_id: row.get(1)?,
+        tick_key: row.get(2)?,
+        due_at: row.get(3)?,
+        status: row.get(4)?,
+        job_id: row.get(5)?,
+        candidate_ids: parse_json_string_vec_column(&candidate_ids_json, 6)?,
+        delivery_ids: parse_json_string_vec_column(&delivery_ids_json, 7)?,
+        error: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
 fn radar_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RadarProfile> {
     let languages_json: String = row.get(7)?;
     let category_groups_json: String = row.get(8)?;
@@ -33605,6 +34340,99 @@ fn normalize_radar_delivery_idempotency_key(
             .as_bytes()
         )[..32]
     ))
+}
+
+fn digest_alert_schedule_policy(
+    schedule: &DigestAlertSchedule,
+) -> Result<DigestAlertSchedulePolicy> {
+    let channel = normalize_radar_delivery_channel(&schedule.channel)?;
+    let recipient_ref = normalize_radar_delivery_recipient(&channel, &schedule.recipient_ref)?;
+    let quiet_hours = schedule
+        .quiet_hours
+        .as_ref()
+        .map(parse_scheduled_radar_quiet_hours)
+        .transpose()?;
+    let policy = DigestAlertSchedulePolicy {
+        channel,
+        recipient_ref,
+        min_score: schedule.min_score,
+        max_candidates: schedule.max_candidates,
+        interval_hours: schedule.interval_hours,
+        quiet_hours,
+    };
+    validate_digest_alert_schedule_policy(&policy)?;
+    Ok(policy)
+}
+
+fn validate_digest_alert_schedule_policy(policy: &DigestAlertSchedulePolicy) -> Result<()> {
+    if !policy.min_score.is_finite() || !(0.0..=10.0).contains(&policy.min_score) {
+        bail!("digest alert min_score must be finite and between 0 and 10");
+    }
+    if !(1..=50).contains(&policy.max_candidates) {
+        bail!("digest alert max_candidates must be between 1 and 50");
+    }
+    if !(1..=24 * 365).contains(&policy.interval_hours) {
+        bail!("digest alert interval_hours must be between 1 and 8760");
+    }
+    Ok(())
+}
+
+fn digest_alert_quiet_hours_deferred_until(
+    policy: &DigestAlertSchedulePolicy,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let radar_policy = ScheduledRadarDeliveryPolicy {
+        interval_hours: policy.interval_hours,
+        channel: policy.channel.clone(),
+        recipient_ref: policy.recipient_ref.clone(),
+        language: "en".to_string(),
+        format: "markdown".to_string(),
+        fetch_live: false,
+        quiet_hours: policy.quiet_hours.clone(),
+    };
+    radar_quiet_hours_deferred_until(&radar_policy, now)
+}
+
+fn digest_alert_schedule_tick_key(
+    schedule_id: &str,
+    due_at: &str,
+    policy: &DigestAlertSchedulePolicy,
+) -> String {
+    format!(
+        "digest-alert-{}",
+        &sha256(
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n{}",
+                schedule_id,
+                due_at,
+                policy.channel,
+                policy.recipient_ref,
+                policy.min_score,
+                policy.max_candidates
+            )
+            .as_bytes()
+        )[..32]
+    )
+}
+
+fn digest_alert_delivery_subject(policy: &DigestAlertSchedulePolicy) -> Result<String> {
+    normalize_radar_delivery_recipient(&policy.channel, &policy.recipient_ref)
+}
+
+fn digest_alert_telegram_chat_id(recipient_ref: &str) -> Result<&str> {
+    let chat_id = recipient_ref
+        .strip_prefix("telegram:chat:")
+        .context("scheduled digest Telegram recipient must be telegram:chat:<id>")?;
+    validate_key(chat_id)?;
+    Ok(chat_id)
+}
+
+fn digest_alert_email_recipient(recipient_ref: &str) -> Result<&str> {
+    let email = recipient_ref
+        .strip_prefix("email:")
+        .context("scheduled digest email recipient must be email:<address>")?;
+    normalize_email_address(email).context("invalid scheduled digest email recipient")?;
+    Ok(email)
 }
 
 fn scheduled_radar_delivery_policy(
@@ -50623,7 +51451,7 @@ reason = "radar model score denied"
         );
 
         let worker = store.run_worker_once(1).unwrap();
-        assert_eq!(worker.processed, 1);
+        assert_eq!(worker.processed, 1, "{worker:#?}");
         assert_eq!(worker.completed, 1, "{worker:#?}");
         let completed = &worker.jobs[0];
         assert_eq!(completed.kind, "radar_run");
@@ -50727,7 +51555,7 @@ reason = "radar model score denied"
         let schedule = worker.radar_schedule.as_ref().expect("schedule report");
         assert_eq!(schedule.inspected, 1);
         assert_eq!(schedule.enqueued, 1);
-        assert_eq!(worker.processed, 1);
+        assert_eq!(worker.processed, 1, "{worker:#?}");
         assert_eq!(worker.completed, 1, "{worker:#?}");
         assert_eq!(worker.jobs[0].kind, "radar_scheduled_delivery");
         let result = worker.jobs[0]
@@ -50822,7 +51650,7 @@ reason = "radar model score denied"
             .unwrap();
 
         let worker = store.run_worker_once(2).unwrap();
-        assert_eq!(worker.processed, 1);
+        assert_eq!(worker.processed, 1, "{worker:#?}");
         assert_eq!(worker.completed, 0);
         assert_eq!(worker.deferred, 1);
         assert_eq!(worker.jobs[0].status, "deferred");
@@ -58553,6 +59381,226 @@ priority = 10
         assert!(failed_replay.replayed);
         assert_eq!(failed_replay.digest_delivery.id, failed.digest_delivery.id);
         assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn severe_digest_alert_schedule_worker_delivers_once_and_records_tick() {
+        // CLAIM: scheduled digest alerts are resident worker behavior over
+        // approved candidates, not a prompt-level promise or manual send alias.
+        // ORACLE: worker run-once creates one digest alert tick, selects one
+        // reviewed candidate above threshold, sends through the existing
+        // Telegram digest delivery ledger, and suppresses an immediate duplicate
+        // schedule pass.
+        // SEVERITY: Severe because unattended digests are high-mirage territory:
+        // without tick/delivery lineage, "scheduled alert" can be an empty shell.
+        let store = test_store("digest-alert-schedule-worker");
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Scheduled digest alert launch".to_string(),
+                url: "https://example.com/scheduled-digest-alert".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Scheduled digest alert should route through worker delivery.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "The scheduled digest item is worth alerting.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.82,
+                }],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "scheduled-digest-1" }),
+            })
+            .unwrap();
+        let digest = store
+            .create_digest_candidate("Scheduled digest alert", std::slice::from_ref(&card.id))
+            .unwrap();
+        store
+            .approve_digest_candidate(&digest.id, Some("severe-test"), Some("schedule it"))
+            .unwrap();
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-scheduled-digest-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow scheduled digest alert worker job enqueue"
+priority = 20
+
+[[rules]]
+id = "allow-scheduled-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "telegram"
+subject = "telegram:chat:123"
+target = "telegram:chat:123"
+reason = "allow scheduled reviewed digest delivery"
+priority = 10
+
+[[rules]]
+id = "allow-scheduled-digest-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:123"
+target = "123"
+reason = "allow scheduled digest Telegram send"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        let api = mock_status_server(
+            "200 OK",
+            "",
+            r#"{"ok":true,"result":{"message_id":321}}"#,
+            "application/json",
+        );
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &api, "telegram")
+            .unwrap();
+        let schedule = store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "scheduled digest alerts".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:123".to_string(),
+                min_score: 0.0,
+                max_candidates: 3,
+                interval_hours: 1,
+                quiet_hours: None,
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(2).unwrap();
+        assert_eq!(worker.processed, 1, "{worker:#?}");
+        assert_eq!(worker.digest_alert_schedule.as_ref().unwrap().enqueued, 1);
+        assert_eq!(worker.jobs[0].kind, "digest_scheduled_alert");
+        assert_eq!(worker.jobs[0].status, "completed");
+        assert_eq!(
+            worker.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("sent")
+        );
+        let ticks = store.list_digest_alert_ticks(Some(&schedule.id)).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].status, "sent");
+        assert_eq!(ticks[0].candidate_ids, vec![digest.id.clone()]);
+        assert_eq!(ticks[0].delivery_ids.len(), 1);
+        let deliveries = store.list_digest_deliveries(Some(&digest.id)).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "sent");
+        assert_eq!(deliveries[0].id, ticks[0].delivery_ids[0]);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+
+        let duplicate = store.run_worker_once(2).unwrap();
+        assert_eq!(duplicate.processed, 0);
+        assert_eq!(
+            store
+                .list_digest_alert_ticks(Some(&schedule.id))
+                .unwrap()
+                .len(),
+            1,
+            "immediate duplicate worker pass must not create a second alert tick"
+        );
+    }
+
+    #[test]
+    fn severe_digest_alert_schedule_defers_quiet_hours_without_provider_send() {
+        // CLAIM: digest alert quiet-hours are enforced by the resident worker
+        // before credentials or provider sends are used.
+        // ORACLE: an active quiet-hours window defers the job/tick, records the
+        // deferred-until proof state, and creates no digest delivery or channel
+        // delivery attempt.
+        // SEVERITY: Severe because quiet-hours that only appear in docs would
+        // create real-world notification harm while tests still looked green.
+        let store = test_store("digest-alert-schedule-quiet-hours");
+        let quiet_time = |minutes: u32| format!("{:02}:{:02}", minutes / 60, minutes % 60);
+        let now_minutes = Utc::now().hour() * 60 + Utc::now().minute();
+        let start_minutes = (now_minutes + 24 * 60 - 5) % (24 * 60);
+        let end_minutes = (now_minutes + 5) % (24 * 60);
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Quiet-hours scheduled digest".to_string(),
+                url: "https://example.com/quiet-scheduled-digest".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Quiet-hours should stop scheduled digest sends.".to_string(),
+                claims: vec![],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "quiet-scheduled-digest" }),
+            })
+            .unwrap();
+        let digest = store
+            .create_digest_candidate("Quiet scheduled digest", &[card.id])
+            .unwrap();
+        store
+            .approve_digest_candidate(&digest.id, Some("severe-test"), Some("not now"))
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN_SHOULD_NOT_SEND", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", "http://127.0.0.1:9", "telegram")
+            .unwrap();
+        let schedule = store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "quiet scheduled digest alerts".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:123".to_string(),
+                min_score: 0.0,
+                max_candidates: 3,
+                interval_hours: 1,
+                quiet_hours: Some(json!({
+                    "timezone": "UTC",
+                    "start": quiet_time(start_minutes),
+                    "end": quiet_time(end_minutes)
+                })),
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(2).unwrap();
+        assert_eq!(worker.processed, 1);
+        assert_eq!(worker.jobs[0].kind, "digest_scheduled_alert");
+        assert_eq!(worker.jobs[0].status, "deferred");
+        let result = worker.jobs[0].result_json.as_ref().unwrap();
+        assert_eq!(
+            result.get("reason").and_then(Value::as_str),
+            Some("quiet_hours")
+        );
+        assert!(
+            result
+                .get("deferred_until")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        let ticks = store.list_digest_alert_ticks(Some(&schedule.id)).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].status, "deferred");
+        assert!(ticks[0].delivery_ids.is_empty());
+        assert!(
+            store
+                .list_digest_deliveries(Some(&digest.id))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

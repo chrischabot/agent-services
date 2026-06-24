@@ -1,13 +1,13 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
-    AppPaths, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
-    RadarDeliveryInput, RadarProfileInput, RadarRun, RenderedPageSnapshotInput,
-    ResearchActiveFactCheckInput, ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
-    ResearchConvergenceProviderSearchInput, ResearchConvergenceStartInput,
-    ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
-    ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
-    ResearchRoleRunStart, ResearchSourceInput, SourceCardInput, Store, WebSearchConfig,
-    XStatsReport, personal_memory_eval_corpus,
+    AppPaths, DigestAlertScheduleInput, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest,
+    ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput, RadarRun,
+    RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
+    ResearchConvergenceCloseLoopInput, ResearchConvergenceProviderSearchInput,
+    ResearchConvergenceStartInput, ResearchConvergenceStepInput, ResearchDocumentInput,
+    ResearchEditorialInvokeInput, ResearchEditorialRunInput, ResearchHostSearchInput,
+    ResearchHostSearchResultInput, ResearchRoleRunStart, ResearchSourceInput, SourceCardInput,
+    Store, WebSearchConfig, XStatsReport, personal_memory_eval_corpus,
 };
 use axum::{
     Json, Router,
@@ -979,6 +979,18 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
     (
         "digest-candidate-deliver-email",
         SlashAliasTarget::Mcp("digest_candidate_deliver_email"),
+    ),
+    (
+        "digest-alert-schedule-create",
+        SlashAliasTarget::Mcp("digest_alert_schedule_create"),
+    ),
+    (
+        "digest-alert-schedules",
+        SlashAliasTarget::Mcp("digest_alert_schedules"),
+    ),
+    (
+        "digest-alert-ticks",
+        SlashAliasTarget::Mcp("digest_alert_ticks"),
     ),
     (
         "radar-profile-create",
@@ -9178,6 +9190,36 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
                 api_base
             )?))
         }
+        "digest_alert_schedule_create" => {
+            let name = required_string(&arguments, "name")?;
+            let channel = required_string(&arguments, "channel")?;
+            let recipient_ref = required_string(&arguments, "recipient_ref")?;
+            let min_score = optional_f64_arg(&arguments, "min_score").unwrap_or(0.75);
+            let max_candidates = optional_i64_arg(&arguments, "max_candidates").unwrap_or(5);
+            let interval_hours = optional_i64_arg(&arguments, "interval_hours").unwrap_or(24);
+            let quiet_hours = arguments.get("quiet_hours").cloned();
+            let status = arguments
+                .get("status")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            Ok(json!(store.create_digest_alert_schedule(
+                DigestAlertScheduleInput {
+                    name,
+                    channel,
+                    recipient_ref,
+                    min_score,
+                    max_candidates,
+                    interval_hours,
+                    quiet_hours,
+                    status,
+                }
+            )?))
+        }
+        "digest_alert_schedules" => Ok(json!(store.list_digest_alert_schedules()?)),
+        "digest_alert_ticks" => {
+            let schedule_id = arguments.get("schedule_id").and_then(Value::as_str);
+            Ok(json!(store.list_digest_alert_ticks(schedule_id)?))
+        }
         "radar_profile_create" => {
             let name = required_string(&arguments, "name")?;
             let description = optional_string(&arguments, "description", "");
@@ -10867,6 +10909,53 @@ fn mcp_tools() -> Vec<Value> {
                     "Optional Cloudflare API base for tests or controlled providers.",
                 ),
             ],
+        ),
+        tool(
+            "digest_alert_schedule_create",
+            "Create a resident worker schedule that selects approved digest candidates above a threshold and routes them through the digest delivery ledger.",
+            [
+                ("name", "string", "Schedule name."),
+                (
+                    "channel",
+                    "string",
+                    "Delivery channel, currently telegram or email.",
+                ),
+                (
+                    "recipient_ref",
+                    "string",
+                    "Recipient reference such as telegram:chat:123 or email:user@example.com.",
+                ),
+                (
+                    "min_score",
+                    "number",
+                    "Minimum approved digest candidate score required for alerting.",
+                ),
+                (
+                    "max_candidates",
+                    "integer",
+                    "Maximum approved unsent candidates delivered per tick.",
+                ),
+                ("interval_hours", "integer", "Schedule cadence in hours."),
+                (
+                    "quiet_hours",
+                    "object",
+                    "Optional UTC quiet-hours object with start and end HH:MM.",
+                ),
+            ],
+        ),
+        tool(
+            "digest_alert_schedules",
+            "List scheduled digest alert routes.",
+            [],
+        ),
+        tool(
+            "digest_alert_ticks",
+            "List scheduled digest alert worker ticks, optionally for one schedule.",
+            [(
+                "schedule_id",
+                "string",
+                "Optional digest alert schedule id filter.",
+            )],
         ),
         tool(
             "radar_profile_create",
@@ -12725,7 +12814,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 140);
+        assert_eq!(command_names.len(), 143);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -14186,6 +14275,13 @@ reason = "allow reviewed MCP digest delivery check"
 priority = 10
 
 [[rules]]
+id = "allow-mcp-digest-source-write"
+effect = "allow"
+action = "source.write"
+reason = "allow MCP digest test source-card creation after policy override"
+priority = 10
+
+[[rules]]
 id = "allow-mcp-digest-channel-send"
 effect = "allow"
 action = "channel.send"
@@ -14401,6 +14497,79 @@ priority = 10
         )
         .unwrap();
         assert_eq!(deliveries.as_array().map(Vec::len), Some(2));
+
+        let scheduled_card = call_mcp_tool(
+            &paths,
+            "source_card_add",
+            json!({
+                "title": "MCP Scheduled Digest Source",
+                "url": "https://example.com/mcp-scheduled-digest-source",
+                "summary": "MCP scheduled digest source summary",
+                "claims": [
+                    { "claim": "MCP scheduled digest source claim", "kind": "fact", "confidence": 0.82 }
+                ]
+            }),
+        )
+        .unwrap();
+        let scheduled_card_id = scheduled_card.get("id").and_then(Value::as_str).unwrap();
+        let scheduled_candidate = call_mcp_tool(
+            &paths,
+            "digest_candidate_create",
+            json!({
+                "topic": "MCP scheduled digest alert",
+                "source_card_ids": [scheduled_card_id]
+            }),
+        )
+        .unwrap();
+        let scheduled_candidate_id = scheduled_candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap();
+        call_mcp_tool(
+            &paths,
+            "digest_candidate_approve",
+            json!({
+                "id": scheduled_candidate_id,
+                "reviewed_by": "mcp-test",
+                "note": "scheduled alert candidate"
+            }),
+        )
+        .unwrap();
+        let schedule = call_mcp_tool(
+            &paths,
+            "digest_alert_schedule_create",
+            json!({
+                "name": "MCP scheduled digest alerts",
+                "channel": "email",
+                "recipient_ref": "email:friend@example.com",
+                "min_score": 0.0,
+                "max_candidates": 2,
+                "interval_hours": 24,
+                "quiet_hours": {
+                    "timezone": "UTC",
+                    "start": "23:00",
+                    "end": "06:00"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            schedule.get("channel").and_then(Value::as_str),
+            Some("email")
+        );
+        let schedule_id = schedule.get("id").and_then(Value::as_str).unwrap();
+        let schedules = call_mcp_tool(&paths, "digest_alert_schedules", json!({})).unwrap();
+        assert!(schedules.as_array().unwrap().iter().any(|item| {
+            item.get("id").and_then(Value::as_str) == Some(schedule_id)
+                && item.get("min_score").and_then(Value::as_f64) == Some(0.0)
+        }));
+        let ticks = call_mcp_tool(
+            &paths,
+            "digest_alert_ticks",
+            json!({ "schedule_id": schedule_id }),
+        )
+        .unwrap();
+        assert_eq!(ticks.as_array().map(Vec::len), Some(0));
     }
 
     #[test]

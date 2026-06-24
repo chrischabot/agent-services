@@ -166,6 +166,16 @@ typing part of the name. Use the displayed command name from the picker.
   send an approved digest candidate through Cloudflare Email via the digest
   delivery ledger plus normal email send authorization, policy, cost, and
   provider-attempt path.
+- `/digest-alert-schedule-create` uses `digest_alert_schedule_create` to
+  create a resident worker schedule that selects already-approved digest
+  candidates above a threshold and routes them through the digest delivery
+  ledger; provider sends still require policy, channel authorization, cost, and
+  configured provider secrets at worker execution time.
+- `/digest-alert-schedules` uses `digest_alert_schedules` to list scheduled
+  digest alert routes.
+- `/digest-alert-ticks` uses `digest_alert_ticks` to inspect scheduled digest
+  alert worker ticks, including selected candidate ids, delivery ids, quiet-hour
+  deferrals, blocked states, and failures.
 - `/radar-profile-create` uses `radar_profile_create`.
 - `/radar-profiles` uses `radar_profile_list`.
 - `/radar-profile-read` uses `radar_profile_read`.

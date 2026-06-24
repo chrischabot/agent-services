@@ -1282,6 +1282,19 @@ Checklist:
       message, successful retry promotes the schedule tick, radar delivery, and
       run, exhausted retries dead-letter all three ledgers, and serialized
       worker output redacts configured tokens.
+- [x] Add local scheduled digest alert routing through the resident worker:
+      digest alert schedules select already-approved candidates above a
+      threshold, create durable ticks, deliver through the existing
+      `digest_deliveries` plus channel delivery-attempt ledger, suppress
+      immediate duplicate ticks, and defer active UTC quiet-hours without
+      provider sends.
+- [x] Add repeatable production-data scheduled digest alert proof with copied
+      real source cards and a controlled Cloudflare Email provider:
+      `scripts/digest-alert-scheduled-production-proof` sanitizes copied
+      operational queues while preserving source-card/wiki evidence, creates an
+      approved candidate from real source cards, runs the resident worker to a
+      sent digest delivery, proves duplicate suppression, and proves a
+      quiet-hours tick defers without an additional provider request.
 - [ ] Add live external scheduled delivery proof, long-running service proof,
       production quiet-hours deferral, and production cross-channel scheduled
       delivery.
@@ -1303,6 +1316,11 @@ Production-data proof:
       disposable authorized email route.
 - [x] Prove local quiet-hours deferral with a deferred worker job/tick and no
       provider send.
+- [x] Prove local scheduled digest alert threshold selection, tick/delivery
+      lineage, duplicate suppression, and quiet-hours no-send deferral.
+- [x] Prove scheduled digest alert production-data routing over copied real
+      source cards with controlled provider delivery:
+      `.arcwell-dev/proofs/digest-alert-scheduled-production-proof-20260624T150845Z-42512/artifacts/proof-packet.json`.
 - [x] Prove retry/dead-letter with controlled provider failure/success, without
       leaking secrets.
 - [x] Prove local Telegram retry/dead-letter behavior with controlled provider

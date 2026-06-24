@@ -282,12 +282,18 @@ PR, implementation note, or final report:
 - [ ] Add X adversarial review report before every X phase status promotion,
       using the score rubric in the architecture plan and ending with a clear
       judgment: promote, hold, or block.
-- [ ] Wire scheduled librarian digest alerts with threshold selection, quiet
-      hours, dedupe windows, and live external delivery proof. Manual reviewed
-      Telegram/email digest delivery now uses policy/cost checks, recipient
-      authorization, durable delivery attempts, and retry reconciliation.
+- [ ] Complete scheduled librarian digest alerts with live external delivery
+      proof. Local resident-worker routing now selects already-approved
+      candidates above a threshold, records durable ticks/delivery ids, suppresses
+      duplicate immediate ticks, and defers active UTC quiet-hours before
+      provider sends. Manual and scheduled reviewed Telegram/email digest
+      delivery uses policy/cost checks, recipient authorization, durable delivery
+      attempts, and retry reconciliation.
       Controlled-provider email proof over copied real source cards passed at
       `.arcwell-dev/proofs/digest-email-production-proof-20260624T143355Z-46300`;
+      scheduled alert controlled-provider proof over copied real source cards
+      passed at
+      `.arcwell-dev/proofs/digest-alert-scheduled-production-proof-20260624T150845Z-42512/artifacts/proof-packet.json`;
       live external delivery remains unproven.
 - [ ] Add production monitoring for email ingress/outbound if email becomes a
       critical alert path.
@@ -295,31 +301,37 @@ PR, implementation note, or final report:
       monitored enough for production use.
 - [ ] Add model-backed interestingness for X/source/digest candidates behind
       explicit config, policy, cost gates, and eval coverage.
-- [ ] Add delivery routing for X/watch-source digest candidates through the same
-      email/Telegram delivery-attempt infrastructure. Telegram and email now
+- [ ] Add live production proof for X/watch-source digest delivery through the
+      same email/Telegram delivery-attempt infrastructure. Telegram and email now
       have review/policy/channel-auth gated, idempotent `digest_deliveries`
-      ledger paths over the generic channel delivery-attempt table, and due
-      generic retries reconcile digest rows; quiet-hours scheduling and live
-      external digest-delivery proof remain open.
+      ledger paths over the generic channel delivery-attempt table; scheduled
+      digest alerts route approved candidates through that ledger with
+      quiet-hours deferral; due generic retries reconcile digest rows. Live
+      external digest-delivery proof remains open.
 - [ ] Add Reddit production-data proof through OAuth or another sanctioned
-      access path; current anonymous Arcwell binary proof is blocked by Reddit
-      HTTP 403 even when curl can intermittently read RSS.
+      access path. Latest disposable proof attempt
+      `.arcwell-dev/proofs/radar-reddit-production-proof-20260624T150229Z-29771`
+      created a Reddit radar profile and adapter job but remained blocked by
+      Reddit HTTP 403 before any source-card projection.
 - [ ] Extend radar live execution to authenticated X watch/recent-search data
       with copied/disposable-home source-health/cursor proof before promotion.
       `scripts/radar-x-production-proof` now provides a guarded disposable-home
       harness with OAuth refresh, source-health/cursor, audit, summary, ops,
       artifact redaction checks, and a blocked proof packet when live auth
       fails. Latest local run
-      `.arcwell-dev/proofs/radar-x-production-proof-20260624T113929Z-51642`
+      `.arcwell-dev/proofs/radar-x-production-proof-20260624T150151Z-29198`
       is not a pass: OAuth refresh failed, app-bearer fallback returned 401,
       and the proof packet kept existing local X projection separate from
       current authenticated live fetch proof.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
       production quiet-hours deferral, arbitrary/model-generated taxonomy
-      quality review, live model-scoring quality proof, operational
+      quality review, model-written synthesis quality proof, operational
       wall-clock seven-day source-quality decay proof, broader ops controls,
-      and status promotion only after real-data gates pass.
+      and status promotion only after real-data gates pass. Fresh live OpenAI
+      model-score proof passed at
+      `.arcwell-dev/proofs/radar-model-score-production-proof-20260624T150127Z-28610/artifacts/proof-packet.json`;
+      it is a non-authorizing scoring overlay proof, not model synthesis proof.
 
 ## 6. Deep Research Quality And Host-Native Execution
 

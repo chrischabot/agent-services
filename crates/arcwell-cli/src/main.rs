@@ -2303,6 +2303,19 @@ enum RadarSubcommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    ModelScore {
+        run_id: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        max_items: usize,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
     RepairFts {
         #[arg(long)]
         run_id: Option<String>,
@@ -3849,6 +3862,21 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
         RadarSubcommand::SourceQualityTrends { min_windows, limit } => {
             print_json(&store.list_radar_source_quality_trends(min_windows, limit)?)
         }
+        RadarSubcommand::ModelScore {
+            run_id,
+            provider,
+            model,
+            max_items,
+            endpoint,
+            api_key,
+        } => print_json(&store.score_radar_run_with_model(
+            &run_id,
+            &provider,
+            model.as_deref(),
+            max_items,
+            endpoint.as_deref(),
+            api_key.as_deref(),
+        )?),
         RadarSubcommand::RepairFts { run_id } => {
             print_json(&json!({ "rebuilt": store.rebuild_radar_fts(run_id.as_deref())? }))
         }
@@ -8896,6 +8924,20 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             let run_id = required_string(&arguments, "run_id")?;
             Ok(json!(store.read_radar_stage(&run_id)?))
         }
+        "radar_model_score" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let provider = optional_string(&arguments, "provider", "mock");
+            let model = arguments.get("model").and_then(Value::as_str);
+            let max_items = arguments
+                .get("max_items")
+                .and_then(Value::as_u64)
+                .unwrap_or(10) as usize;
+            let endpoint = arguments.get("endpoint").and_then(Value::as_str);
+            let api_key = arguments.get("api_key").and_then(Value::as_str);
+            Ok(json!(store.score_radar_run_with_model(
+                &run_id, &provider, model, max_items, endpoint, api_key
+            )?))
+        }
         "radar_summarize" => {
             let run_id = required_string(&arguments, "run_id")?;
             let language = optional_string(&arguments, "language", "en");
@@ -10462,6 +10504,19 @@ fn mcp_tools() -> Vec<Value> {
             "radar_stage_read",
             "Read normalized radar items, score overlays, and dedupe groups for a run.",
             [("run_id", "string", "Radar run id.")],
+        ),
+        tool_with_schema(
+            "radar_model_score",
+            "Write model-backed radar interestingness score overlays for an audit-ok run. These rows are non-authorizing and do not replace heuristic selected rows used for summaries or delivery.",
+            json!({
+                "run_id": string_schema("Radar run id."),
+                "provider": enum_schema("Model provider. Use mock for deterministic local proof or openai for live provider attempt.", &["mock", "openai"]),
+                "model": string_schema("Optional model name."),
+                "max_items": integer_schema("Maximum heuristic-selected/over-limit candidates to score, default 10, max 25."),
+                "endpoint": string_schema("Optional OpenAI-compatible endpoint override for authorized tests."),
+                "api_key": string_schema("Optional API key; prefer local secret configuration.")
+            }),
+            &["run_id"],
         ),
         tool(
             "radar_summarize",

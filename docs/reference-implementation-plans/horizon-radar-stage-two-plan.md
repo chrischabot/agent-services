@@ -216,8 +216,9 @@ Ops:
   drift, generated-summary/no-delivery boundaries, manual radar delivery
   authorization/idempotency/provider-failure boundaries, local scheduled
   Telegram/email delivery through the resident worker, email authorization
-  blocking, quiet-hours deferral, raw secret rejection, FTS drift, corrupt
-  dedupe groups, and
+  blocking, local cross-channel/scheduled retry/dead-letter reconciliation,
+  local model-score overlays as non-authorizing rows, quiet-hours deferral, raw
+  secret rejection, FTS drift, corrupt dedupe groups, and
   prompt-injection-as-evidence rendering.
 - Production Data Proof: copied-home source-card projection, foreground public
   RSS/GitHub/arXiv/Hacker News live fetch, worker-drained public

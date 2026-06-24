@@ -947,16 +947,16 @@ Checklist:
       scoring.
 - [x] Add category quota and max-item selection after scoring.
 - [x] Add per-source cap so one source cannot dominate unless profile says so.
-- [ ] Add model-backed ranking only after deterministic score and stage
+- [x] Add model-backed ranking only after deterministic score and stage
       inspection exist.
-- [ ] Add model output schema validation and malformed-output severe tests.
+- [x] Add model output schema validation and malformed-output severe tests.
 - [ ] Add score distribution metrics to run metadata and ops.
 
 Anti-mirage gate:
 
-- [ ] A model score alone cannot authorize delivery.
-- [ ] A score without reason is invalid.
-- [ ] A score that references unavailable evidence is invalid.
+- [x] A model score alone cannot authorize delivery.
+- [x] A score without reason is invalid.
+- [x] A score that references unavailable evidence is invalid.
 - [ ] Private or unauthorized content cannot be sent to a model as ranking
       context.
 
@@ -1137,8 +1137,12 @@ Checklist:
 - [x] Add local Telegram retry reconciliation for manual radar deliveries:
       worker-driven successful retries update the original `radar_deliveries`
       row and exhausted local retry chains become `dead_lettered`.
-- [ ] Add cross-channel/scheduled retry with bounded attempts and dead-letter
-      behavior.
+- [x] Add local cross-channel/scheduled retry with bounded attempts and
+      dead-letter behavior: due failed email messages retry from configured
+      Cloudflare Email secrets without duplicate channel messages, successful
+      scheduled email retries reconcile tick/delivery/run state, and exhausted
+      retry chains dead-letter the channel message, radar delivery, and
+      schedule tick without leaking tokens.
 - [x] Add delivery attempt records linked to `radar_deliveries`.
 - [x] Add delivery status to ops snapshot and `/ops/ui`.
 - [x] Add manual `radar deliver` confirmation path with CLI/MCP/slash surfaces,
@@ -1166,6 +1170,12 @@ Checklist:
       lineage, reaches `sent` through the Cloudflare Email path, avoids
       duplicate ticks inside the interval, redacts configured tokens, and
       writes no channel message/provider attempt for unauthorized recipients.
+- [x] Prove local scheduled email retry/dead-letter reconciliation with
+      controlled provider failure/success: failed scheduled email delivery
+      records a retryable channel attempt, worker retry reuses the same channel
+      message, successful retry promotes the schedule tick, radar delivery, and
+      run, exhausted retries dead-letter all three ledgers, and serialized
+      worker output redacts configured tokens.
 - [ ] Add live external scheduled delivery proof, long-running service proof,
       production quiet-hours deferral, and production cross-channel scheduled
       delivery.
@@ -1187,8 +1197,8 @@ Production-data proof:
       disposable authorized email route.
 - [x] Prove local quiet-hours deferral with a deferred worker job/tick and no
       provider send.
-- [ ] Prove retry/dead-letter with a controlled provider failure or disabled
-      route, without leaking secrets.
+- [x] Prove retry/dead-letter with controlled provider failure/success, without
+      leaking secrets.
 - [x] Prove local Telegram retry/dead-letter behavior with controlled provider
       failures and no real provider send.
 - [x] Prove local scheduled Telegram delivery with controlled provider success:
@@ -1204,6 +1214,11 @@ Production-data proof:
       path, avoids duplicate ticks inside the interval, redacts configured
       tokens, and writes no channel message/provider attempt for unauthorized
       recipients.
+- [x] Prove local scheduled email retry/dead-letter behavior: retry uses the
+      existing channel message, success reconciles the schedule tick, radar
+      delivery, and run to `sent`/`delivered`, and exhausted failure reconciles
+      the schedule tick, radar delivery, and channel message to `dead_lettered`
+      without another retry storm.
 - [x] Prove production-data scheduled delivery with real public-source ingestion
       and controlled Telegram provider delivery using
       `scripts/radar-scheduled-delivery-production-proof`: real items are
@@ -1436,7 +1451,7 @@ Required:
 - [ ] Missing score reason invalid.
 - [ ] Malformed model JSON rejected.
 - [ ] Prompt-injection content cannot alter scoring schema.
-- [ ] Cost denial blocks model scoring but leaves deterministic scoring.
+- [x] Cost denial blocks model scoring but leaves deterministic scoring.
 - [ ] Private content excluded from model prompt.
 - [ ] Stale score detected after item/profile change.
 
@@ -1478,7 +1493,7 @@ Required:
 - [x] Local scheduled Telegram/email delivery through resident worker.
 - [x] Delivery error redacts tokens/addresses where required.
 - [x] Policy denial records decision.
-- [ ] Cost denial records decision.
+- [x] Cost denial records decision.
 
 ### Ops
 
@@ -1564,7 +1579,7 @@ Exit gate:
 - [x] Exact URL/native dedupe.
 - [x] Local deterministic semantic/topic dedupe.
 - [x] Local deterministic category/source balancing.
-- [ ] Optional model scoring.
+- [x] Optional local/mock model scoring overlays.
 - [ ] Optional model semantic dedupe.
 
 Exit gate:
@@ -1598,9 +1613,11 @@ Exit gate:
   durable ticks, authorized provider attempts, duplicate suppression,
   raw-secret rejection, email authorization blocking, and explicit quiet-hours
   deferral.
+- [x] Local cross-channel/scheduled retry/dead-letter through `worker run-once`
+  and reconciliation: Telegram and email retry attempts feed radar delivery
+  status, and scheduled email retry updates linked schedule ticks.
 - [x] Production-data scheduled delivery proof through `worker run-once` with
   live public-source ingestion and controlled Telegram provider delivery.
-- [ ] Cross-channel/scheduled retry/dead-letter.
 - [ ] Live external scheduled delivery and production scheduled worker/service
   runs.
 - [ ] Source-quality rollups.

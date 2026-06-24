@@ -389,10 +389,11 @@ PR, implementation note, or final report:
       replay, authorization/policy-denial blocking, provider-failure recording,
       ops snapshot/UI visibility, health warnings, HTML escaping, and
       token-redaction severe tests.
-- [x] Reconcile radar delivery retry state through the resident Telegram
-      delivery retry path: worker-driven successful retries now promote the
-      original `radar_deliveries` row and radar run, and exhausted local retry
-      chains become `dead_lettered` without continued sends.
+- [x] Reconcile radar delivery retry state through resident Telegram/email
+      delivery retry paths: worker-driven successful retries now promote the
+      original `radar_deliveries` row and radar run, scheduled email retries
+      also promote the linked schedule tick, and exhausted local retry chains
+      become `dead_lettered` without continued sends.
 - [x] Add local scheduled Telegram/email delivery through the resident worker:
       scheduled profiles write durable ticks, enqueue
       `radar_scheduled_delivery`, run/summarize/audit, deliver through
@@ -401,6 +402,17 @@ PR, implementation note, or final report:
       interval, reject raw secrets in profile policy, block unauthorized email
       recipients before provider send, and defer active quiet-hours windows
       without provider sends.
+- [x] Add local cross-channel/scheduled retry with bounded attempts and
+      dead-letter behavior: due failed email messages retry from local
+      Cloudflare Email config without duplicate channel messages, successful
+      scheduled email retries reconcile tick/delivery/run state, exhausted
+      email retry chains dead-letter the channel message, radar delivery, and
+      schedule tick, and severe tests prove token redaction.
+- [x] Add optional local/mock radar model-score overlays: CLI/MCP/core write
+      schema-validated `model_interestingness_v1` score rows and inspectable
+      prompt/output artifacts, policy/cost block live OpenAI attempts before
+      credentials or score rows, malformed provider output fails closed, and
+      model scores remain non-authorizing for summaries/delivery.
 - [x] Add repeatable production-data scheduled-delivery proof:
       `scripts/radar-scheduled-delivery-production-proof` creates a disposable
       scheduled profile over real public RSS/GitHub/arXiv/Hacker News sources,
@@ -409,11 +421,11 @@ PR, implementation note, or final report:
       controlled Telegram endpoint, records tick/run/summary/delivery lineage,
       and proves duplicate suppression on a second worker pass.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
-      scheduled delivery/service proof, production cross-channel scheduled
-      delivery, quiet-hours deferral, production-data semantic dedupe breadth
-      across more profiles, production-data balance review, seven-day
-      source-quality trend/decay proof, broader ops controls, and status
-      promotion only after real-data gates pass.
+      scheduled delivery/service proof, production cross-channel delivery proof,
+      production quiet-hours deferral, production-data semantic dedupe breadth
+      across more profiles, production-data balance review, live model-scoring
+      quality proof, seven-day source-quality trend/decay proof, broader ops
+      controls, and status promotion only after real-data gates pass.
 - [ ] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; keep real local agent/author addresses only in ignored
       env or secret config.

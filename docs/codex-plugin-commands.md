@@ -209,6 +209,7 @@ typing part of the name. Use the displayed command name from the picker.
 - `/x-thread` uses `x_thread`.
 - `/x-stats` uses `x_stats`.
 - `/x-repair-projections` uses `x_repair_projections`.
+- `/x-research` uses `x_research`.
 - `/x-report` uses `x_report`.
 - `/x-oauth` uses `x_oauth_authorize_url`, `x_oauth_exchange_code`, or `x_oauth_refresh`.
 

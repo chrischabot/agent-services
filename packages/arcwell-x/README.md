@@ -53,6 +53,7 @@ MCP tools:
 - `x_monitor_watch_sources`
 - `x_search_tweets`
 - `x_thread`
+- `x_research`
 - `x_extract_links`
 - `x_expand_links`
 - `x_links`
@@ -110,6 +111,10 @@ Boundary:
   conversation, reply, quote, and retweet refs. Missing parents/quotes/retweets
   are returned as `missing_context`; no provider fetch or inferred context is
   performed in this path.
+- `arcwell x research <query>` and `x_research` render a local-only research
+  brief over already-imported canonical X tweets. Matching evidence must have
+  source-card projection, emitted quotes are tied to tweet ids/source cards, and
+  the command performs no live fetches, model synthesis, or durable writes.
 - `arcwell x extract-links` / `x_extract_links` index safe URL occurrences from
   already-imported local tweets without fetching or expanding them.
   `arcwell x links` / `x_links` list those indexed occurrences.

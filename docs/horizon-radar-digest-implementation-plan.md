@@ -181,6 +181,16 @@ Evidence:
   worker job whose radar result is `blocked`, with failed adapter job summary,
   non-healthy source-health, no cursor advance, and failed radar audit; invalid
   profile/window inputs are rejected before inert jobs are inserted.
+- Repeatable worker-drained production-data proof script
+  `scripts/radar-worker-production-proof` preserved proof packet
+  `.arcwell-dev/proofs/radar-worker-production-proof-20260624T082527Z-74723/artifacts/proof-packet.json`.
+  It queued one `radar_run` and completed it through `worker run-once` against
+  real public RSS, GitHub owner, arXiv, and Hacker News selectors. The worker
+  completed one radar job plus four adapter jobs, wrote 45 source cards, 45
+  wiki pages, 45 radar items, 45 FTS rows, 45 score rows, four healthy
+  source-health rows, and four cursors; selected 30 items; returned
+  `radar audit ok=true`; and wrote
+  `radar-summary-5b04716d7eed4115061f4bd0261586de` with `not_delivery=true`.
 - Reddit disposable live proof is not yet production-data proof. Preserved
   attempts under `/tmp/arcwell-radar-reddit-proof-20260624T075239Z` and
   `/tmp/arcwell-radar-reddit-debug-20260624T075408Z` show the Arcwell binary
@@ -192,8 +202,8 @@ Evidence:
 Still not proven by this slice:
 
 - Radar-owned live X/Reddit/public Telegram/OSS/OpenBB fetch.
-- Production-data worker-drained radar run, scheduled recurring radar service
-  execution, retry/recovery, and ops UI controls.
+- Scheduled recurring radar service execution, retry/recovery, and ops UI
+  controls.
 - Full recursive HN/Reddit community-thread capture.
 - Semantic dedupe, category/source balancing, source-quality decay.
 - Model-backed interestingness, enrichment/synthesis, and delivery attempts.
@@ -1211,7 +1221,7 @@ Checklist:
 
 Production-data proof:
 
-- [ ] Queue a real production-data radar run and drain it through
+- [x] Queue a real production-data radar run and drain it through
       `arcwell worker run-once` without manual stage calls.
 - [ ] Kill or interrupt after fetch, resume, and prove no duplicate source
       cards, no cursor corruption, and no duplicate delivery.

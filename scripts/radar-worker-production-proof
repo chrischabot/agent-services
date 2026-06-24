@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "BLOCKED: node is required for JSON assertions." >&2
+  exit 2
+fi
+
+RUN_STAMP="${ARCWELL_RADAR_WORKER_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_RADAR_WORKER_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/radar-worker-production-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+export ARCWELL_HOME="${ARCWELL_RADAR_WORKER_PROOF_HOME:-$PROOF_ROOT/home}"
+
+RSS_URL="${ARCWELL_RADAR_WORKER_RSS_URL:-https://hnrss.org/newest?points=100}"
+GITHUB_OWNER="${ARCWELL_RADAR_WORKER_GITHUB_OWNER:-Thysrael}"
+ARXIV_QUERY="${ARCWELL_RADAR_WORKER_ARXIV_QUERY:-cat:cs.AI}"
+HACKERNEWS_FEED="${ARCWELL_RADAR_WORKER_HACKERNEWS_FEED:-frontpage}"
+PROFILE_NAME="${ARCWELL_RADAR_WORKER_PROFILE_NAME:-worker-live-proof-$RUN_STAMP}"
+MIN_ITEMS="${ARCWELL_RADAR_WORKER_MIN_ITEMS:-10}"
+MIN_SELECTED="${ARCWELL_RADAR_WORKER_MIN_SELECTED:-1}"
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log() {
+  printf '[radar-worker-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[radar-worker-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+log "proof root: $PROOF_ROOT"
+log "ARCWELL_HOME: $ARCWELL_HOME"
+log "creating live radar profile: $PROFILE_NAME"
+
+"$ARCWELL_BIN" radar profile create "$PROFILE_NAME" \
+  --description "Worker-drained production-data radar proof over public RSS, GitHub, and arXiv sources." \
+  --window-hours 168 \
+  --min-score 1 \
+  --max-items 30 \
+  --selector-json "{\"kind\":\"rss\",\"locator\":\"$RSS_URL\",\"limit\":10}" \
+  --selector-json "{\"kind\":\"github_owner\",\"locator\":\"$GITHUB_OWNER\",\"limit\":10}" \
+  --selector-json "{\"kind\":\"arxiv\",\"locator\":\"$ARXIV_QUERY\",\"limit\":10}" \
+  --selector-json "{\"kind\":\"hackernews\",\"locator\":\"$HACKERNEWS_FEED\",\"limit\":5}" \
+  >"$ARTIFACT_DIR/profile.json"
+
+log "enqueueing radar run with live fetch enabled"
+"$ARCWELL_BIN" radar enqueue "$PROFILE_NAME" --window-hours 168 --fetch-live \
+  >"$ARTIFACT_DIR/enqueue.json"
+
+log "draining local worker once"
+"$ARCWELL_BIN" worker run-once --max-jobs 5 >"$ARTIFACT_DIR/worker.json"
+
+RADAR_RUN_ID="$(node - "$ARTIFACT_DIR/worker.json" "$MIN_ITEMS" "$MIN_SELECTED" <<'NODE'
+const fs = require("fs");
+const [workerPath, minItemsRaw, minSelectedRaw] = process.argv.slice(2);
+const minItems = Number(minItemsRaw);
+const minSelected = Number(minSelectedRaw);
+const worker = JSON.parse(fs.readFileSync(workerPath, "utf8"));
+const jobs = Array.isArray(worker.jobs) ? worker.jobs : [];
+const radarJob = jobs.find((job) => job.kind === "radar_run");
+if (!radarJob) {
+  console.error(`worker did not process a radar_run job: ${JSON.stringify(worker)}`);
+  process.exit(1);
+}
+if (radarJob.status !== "completed") {
+  console.error(`radar worker job did not complete: ${JSON.stringify(radarJob)}`);
+  process.exit(1);
+}
+const result = radarJob.result_json || {};
+if (result.fetch_live !== true) {
+  console.error(`radar worker result did not preserve fetch_live=true: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+if (result.status !== "scored") {
+  console.error(`radar run did not reach scored status: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+if (Number(result.items_inserted || 0) < minItems) {
+  console.error(`radar run inserted too few real items: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+if (Number(result.scores_inserted || 0) < Number(result.items_inserted || 0)) {
+  console.error(`radar run did not score all inserted items: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+if (Number(result.selected_items || 0) < minSelected) {
+  console.error(`radar run selected too few items: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+const adapterJobs = Array.isArray(result.adapter_jobs) ? result.adapter_jobs : [];
+const kinds = new Set(adapterJobs.map((job) => job.kind));
+for (const expected of ["rss_fetch", "github_owner", "arxiv_search", "hackernews_fetch"]) {
+  if (!kinds.has(expected)) {
+    console.error(`missing adapter job ${expected}: ${JSON.stringify(adapterJobs)}`);
+    process.exit(1);
+  }
+}
+const failed = adapterJobs.filter((job) => job.status !== "completed");
+if (failed.length) {
+  console.error(`one or more adapter jobs failed: ${JSON.stringify(failed)}`);
+  process.exit(1);
+}
+if (!result.run_id) {
+  console.error(`radar worker result has no run_id: ${JSON.stringify(result)}`);
+  process.exit(1);
+}
+process.stdout.write(result.run_id);
+NODE
+)"
+
+log "reading stage/audit/summary for run: $RADAR_RUN_ID"
+"$ARCWELL_BIN" radar stage "$RADAR_RUN_ID" >"$ARTIFACT_DIR/stage.json"
+"$ARCWELL_BIN" radar audit "$RADAR_RUN_ID" >"$ARTIFACT_DIR/audit.json"
+"$ARCWELL_BIN" radar summarize "$RADAR_RUN_ID" >"$ARTIFACT_DIR/summary-write.json"
+"$ARCWELL_BIN" radar summary "$RADAR_RUN_ID" >"$ARTIFACT_DIR/summary-read.json"
+"$ARCWELL_BIN" wiki jobs >"$ARTIFACT_DIR/wiki-jobs.json"
+"$ARCWELL_BIN" cursors list >"$ARTIFACT_DIR/cursors.json"
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops.json"
+
+log "validating proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$RADAR_RUN_ID" "$RSS_URL" "$GITHUB_OWNER" "$ARXIV_QUERY" "$HACKERNEWS_FEED" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [
+  artifactDir,
+  proofRoot,
+  runId,
+  rssUrl,
+  githubOwner,
+  arxivQuery,
+  hackernewsFeed,
+] = process.argv.slice(2);
+
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const profile = read("profile.json");
+const enqueue = read("enqueue.json");
+const worker = read("worker.json");
+const stage = read("stage.json");
+const audit = read("audit.json");
+const summaryWrite = read("summary-write.json");
+const summaryRead = read("summary-read.json");
+const jobs = read("wiki-jobs.json");
+const cursors = read("cursors.json");
+const ops = read("ops.json");
+
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+assert(profile.status === "local_proof_ready", "profile should be supported by local projection", profile);
+assert(enqueue.kind === "radar_run" && enqueue.status === "pending", "enqueue should create pending radar_run job", enqueue);
+assert(worker.processed >= 1 && worker.completed >= 1, "worker should process and complete at least one job", worker);
+assert(stage.run && stage.run.id === runId, "stage should read the worker-created run", stage.run);
+assert(stage.run.status === "scored", "worker-created run should be scored", stage.run);
+assert(Array.isArray(stage.items) && stage.items.length >= 10, "stage should contain real normalized items", { count: stage.items?.length });
+assert(Array.isArray(stage.scores) && stage.scores.length >= stage.items.length, "stage should contain score overlays", { items: stage.items?.length, scores: stage.scores?.length });
+assert(audit.ok === true, "radar audit should pass", audit);
+assert(audit.item_count === stage.items.length, "audit item count should match stage", audit);
+assert(summaryWrite.audit_status === "audit_ok", "summary write should require audit_ok", summaryWrite);
+assert(summaryRead.id === summaryWrite.id, "summary read should return the written summary", { summaryWrite, summaryRead });
+assert(summaryRead.metadata && summaryRead.metadata.not_delivery === true, "summary must remain non-delivery", summaryRead.metadata);
+assert(Array.isArray(summaryRead.source_card_ids) && summaryRead.source_card_ids.length > 0, "summary should cite source cards", summaryRead);
+
+const radarJob = (worker.jobs || []).find((job) => job.kind === "radar_run");
+const result = radarJob.result_json || {};
+const adapterJobs = result.adapter_jobs || [];
+const adapterKinds = adapterJobs.map((job) => job.kind).sort();
+assert(
+  adapterKinds.includes("rss_fetch") &&
+    adapterKinds.includes("github_owner") &&
+    adapterKinds.includes("arxiv_search") &&
+    adapterKinds.includes("hackernews_fetch"),
+  "all expected adapters should run",
+  adapterJobs
+);
+assert(adapterJobs.every((job) => job.status === "completed"), "all adapter jobs should complete", adapterJobs);
+assert((jobs || []).some((job) => job.id === radarJob.id && job.status === "completed"), "wiki jobs should include completed radar_run", jobs);
+
+const cursorKeys = new Set((cursors || []).map((cursor) => cursor.key));
+assert(cursorKeys.has(`rss:${rssUrl}`), "RSS cursor should advance after durable writes", cursors);
+assert(cursorKeys.has(`github-owner:${githubOwner}`), "GitHub cursor should advance after durable writes", cursors);
+assert(cursorKeys.has(`arxiv:${arxivQuery}`), "arXiv cursor should advance after durable writes", cursors);
+assert(cursorKeys.has("hackernews:topstories"), "Hacker News cursor should advance after durable writes", cursors);
+
+const health = Array.isArray(ops.source_health) ? ops.source_health : [];
+const hasHealthy = (provider, locatorNeedle) =>
+  health.some((row) =>
+    row.provider === provider &&
+    row.status === "healthy" &&
+    String(row.locator || row.key || "").includes(locatorNeedle)
+  );
+assert(hasHealthy("rss", rssUrl), "ops should show healthy RSS source", health);
+assert(hasHealthy("github", githubOwner), "ops should show healthy GitHub source", health);
+assert(hasHealthy("arxiv", arxivQuery), "ops should show healthy arXiv source", health);
+assert(hasHealthy("hackernews", "topstories"), "ops should show healthy Hacker News source", health);
+
+const proofPacket = {
+  proof_name: "radar-worker-production-proof",
+  proof_level: "Production Data Proof for worker-drained live RSS/GitHub/arXiv/Hacker News radar run",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  run_id: runId,
+  profile_id: profile.id,
+  profile_name: profile.name,
+  source_families: [
+    { provider: "rss", locator: rssUrl },
+    { provider: "github", locator: githubOwner },
+    { provider: "arxiv", locator: arxivQuery },
+    { provider: "hackernews", locator: hackernewsFeed },
+  ],
+  worker: {
+    processed: worker.processed,
+    completed: worker.completed,
+    failed: worker.failed,
+    dead_lettered: worker.dead_lettered,
+  },
+  radar_result: {
+    status: result.status,
+    stage: result.stage,
+    items_inserted: result.items_inserted,
+    scores_inserted: result.scores_inserted,
+    selected_items: result.selected_items,
+    adapter_job_count: result.adapter_job_count,
+    adapter_jobs: adapterJobs.map((job) => ({
+      id: job.id,
+      kind: job.kind,
+      status: job.status,
+    })),
+  },
+  audit: {
+    ok: audit.ok,
+    item_count: audit.item_count,
+    fts_count: audit.fts_count,
+    scored_count: audit.scored_count,
+    findings: audit.findings,
+  },
+  summary: {
+    id: summaryRead.id,
+    audit_status: summaryRead.audit_status,
+    item_count: summaryRead.item_ids.length,
+    source_card_count: summaryRead.source_card_ids.length,
+    not_delivery: summaryRead.metadata.not_delivery,
+  },
+  cursor_keys: [...cursorKeys].filter((key) =>
+    key === `rss:${rssUrl}` ||
+    key === `github-owner:${githubOwner}` ||
+    key === `arxiv:${arxivQuery}` ||
+    key === "hackernews:topstories"
+  ),
+  remaining_risk: [
+    "This proves one worker-drained live radar run in a disposable home, not recurring scheduled service execution.",
+    "It does not prove Reddit OAuth, authenticated X, model synthesis, semantic dedupe, or delivery attempts.",
+  ],
+};
+
+fs.writeFileSync(
+  path.join(artifactDir, "proof-packet.json"),
+  `${JSON.stringify(proofPacket, null, 2)}\n`
+);
+process.stdout.write(JSON.stringify(proofPacket, null, 2));
+NODE
+
+printf '\n'
+log "production-data worker radar proof passed"
+log "proof packet: $ARTIFACT_DIR/proof-packet.json"

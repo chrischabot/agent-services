@@ -200,17 +200,25 @@ Ops:
 
 ## Proof Gates
 
-- Missing: stage artifacts and source-card linkage absent.
-- Scaffold: stage commands exist with sample data.
-- Partial: one or two stages write artifacts but no full run proof.
-- Local Proof: deterministic fixtures prove fetch error isolation, scoring
-  fallback, URL dedup, semantic dedup fallback, balancing, digest rendering,
-  and path validation.
-- Production Data Proof: real configured sources fetch a nontrivial window,
-  write source cards, score/filter/dedup/balance, and render a digest with
-  inspectable citations.
-- Operational: scheduled runs, retries, source-health stale/failed states,
-  delivery attempts, and ops views are proven.
+- Missing: balanced digest rules, source recommendation, model enrichment,
+  delivery attempts, and scheduled/recurring operation remain absent or
+  unproven.
+- Scaffold: stage-two command names and data-model ideas exist in planning
+  docs.
+- Local Proof: current Arcwell radar writes inspectable `radar_runs`,
+  `radar_items`, FTS rows, score rows, exact URL/source-native dedupe groups,
+  summary artifacts, and source-card/wiki links; severe tests cover foreground
+  and queued worker execution, provider-denial blocked runs, invalid enqueue,
+  generated-summary/no-delivery boundaries, FTS drift, corrupt dedupe groups,
+  and prompt-injection-as-evidence rendering.
+- Production Data Proof: copied-home source-card projection, foreground public
+  RSS/GitHub/arXiv/Hacker News live fetch, and worker-drained public
+  RSS/GitHub/arXiv/Hacker News runs have passed real-data proof packets.
+- Partial: Reddit has local proof but anonymous live attempts hit HTTP 403; X
+  is limited to existing local source-card/canonical projections until
+  authenticated live proof passes.
+- Operational: scheduled runs, retries, stale/failed source-health recovery,
+  delivery attempts, and ops controls still need proof.
 - Done: every claimed source family satisfies the real-data gate and the docs
   distinguish fetch, digest, and delivery claims.
 
@@ -231,7 +239,9 @@ Ops:
 
 ## First Slice
 
-Make `radar_stage_artifacts` and `arcwell radar stage <run-id>` real for the
-current pipeline. Stage visibility should land before new source adapters or
-more sophisticated scoring.
-
+The first slice is now partially implemented through existing Arcwell tables
+rather than a separate `radar_stage_artifacts` table: `arcwell radar stage`
+and `radar_stage_read` expose the run, items, scores, and dedupe groups, with
+source-card/wiki links preserved. Remaining first-slice work is to add any
+missing explicit skipped/error stage records only where the current run counts,
+metadata, source-health rows, and audit findings are too indirect.

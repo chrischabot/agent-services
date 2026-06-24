@@ -8,6 +8,17 @@ Rules:
 - Prefer `x_import_json_file` for replay/export fixtures.
 - Use `x_oauth_authorize_url`, `x_oauth_exchange_code`, and `x_oauth_refresh` when live API access needs setup.
 - Use `x_recent_search` for immediate live X API search and `x_enqueue_recent_search` plus `worker_run_once` when the search should be queued.
+- Use `x_search_tweets` for local search over already-imported canonical X tweet evidence.
+- Use `x_thread` for local-only thread expansion around an already-imported
+  tweet; report missing context instead of implying parents, quotes, or
+  retweets were fetched.
+- Use `x_research` for a local-only, no-write X research brief over
+  already-imported canonical tweets. It fails honestly when matching evidence is
+  absent or lacks completed source-card projection. Do not treat it as a
+  completed deep-research report, live thread fetch, model synthesis, or durable
+  artifact writer.
+- Use `x_extract_links`, `x_links`, and `x_expand_links` only according to the
+  local-index versus explicit-network boundary.
 - Use `cursor_get` for `x:recent-search:<query>` when checking incremental state.
 - Use `secret_value_set` only for local provider/API tokens and do not print token values back to the user.
 - Search/list imported items before writing a report.
@@ -21,6 +32,9 @@ arcwell x import-json ./x-items.json
 arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,bookmark.read,follows.read,offline.access
 arcwell x recent-search <query>
 arcwell x enqueue-recent-search <query>
+arcwell x search-tweets <query>
+arcwell x thread <x_id>
+arcwell x research <query>
 arcwell x list --query <topic>
 arcwell x report --query <topic>
 ```
@@ -33,6 +47,12 @@ MCP tools:
 - `x_oauth_refresh`
 - `x_recent_search`
 - `x_enqueue_recent_search`
+- `x_search_tweets`
+- `x_thread`
+- `x_research`
+- `x_extract_links`
+- `x_expand_links`
+- `x_links`
 - `x_list`
 - `x_report`
 - `cursor_list`

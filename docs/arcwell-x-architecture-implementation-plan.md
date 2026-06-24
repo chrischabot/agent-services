@@ -3690,7 +3690,8 @@ Sync proof checklist:
 - [ ] `x search-tweets`.
 - [ ] `x expand-thread`.
 - [ ] `x links search`.
-- [ ] `x research`.
+- [x] `x research` local-only no-write brief over source-card-projected
+      canonical tweets.
 - [ ] `x digest`.
 - [ ] `x graph summary`.
 - [ ] `x graph events`.
@@ -3942,10 +3943,10 @@ Required tests:
 - [ ] `severe_x_thread_local_mode_makes_no_provider_call`.
 - [ ] `severe_x_link_extraction_performs_no_network`.
 - [ ] `severe_x_link_expansion_rejects_loopback_metadata_and_private_hosts`.
-- [ ] `severe_x_research_brief_refuses_empty_evidence`.
-- [ ] `severe_x_research_brief_links_every_claim_to_evidence`.
-- [ ] `severe_x_research_brief_no_write_mutates_no_state`.
-- [ ] `severe_x_research_brief_escapes_hostile_markdown`.
+- [x] `severe_x_research_brief_refuses_empty_evidence`.
+- [x] `severe_x_research_brief_links_every_claim_to_evidence`.
+- [x] `severe_x_research_brief_no_write_mutates_no_state`.
+- [x] `severe_x_research_brief_escapes_hostile_markdown`.
 
 Completeness measures:
 
@@ -4926,34 +4927,34 @@ Done measure:
 
 Claim:
 
-- [ ] Generates inspectable X evidence briefs from canonical local material,
+- [x] Generates inspectable X evidence briefs from canonical local material,
       not unsupported prose, and fails honestly when evidence is absent.
 
 Acceptance checks:
 
 - [ ] Corpus filters work: bookmarks, likes, watch, author, source, date.
-- [ ] FTS seed search used.
+- [x] FTS seed search used.
 - [ ] Thread expansion labels missing context.
 - [ ] Links and handles extracted.
-- [ ] Every quoted item has canonical id.
-- [ ] Every claim has source-card or canonical evidence.
-- [ ] `--no-write` writes nothing.
+- [x] Every quoted item has canonical id.
+- [x] Every claim has source-card or canonical evidence.
+- [x] No-write mode writes nothing.
 - [ ] Output path handling is safe.
 - [ ] Live expansion requires explicit mode, policy, and cost.
-- [ ] Prompt-injection text remains evidence.
+- [x] Prompt-injection text remains evidence.
 
 Required severe tests:
 
-- [ ] Empty evidence fails honestly.
-- [ ] Fake citations blocked.
-- [ ] Every claim linked.
-- [ ] No-write mutates no state.
-- [ ] Hostile Markdown escaped.
+- [x] Empty evidence fails honestly.
+- [x] Fake citations blocked.
+- [x] Every claim linked.
+- [x] No-write mutates no state.
+- [x] Hostile Markdown escaped.
 - [ ] Live expansion denied path still produces local brief where possible.
 
 Done measure:
 
-- [ ] Brief JSON and Markdown can be audited back to canonical/source-card rows.
+- [x] Brief JSON and Markdown can be audited back to canonical/source-card rows.
 
 ### `arcwell x digest`
 
@@ -5537,10 +5538,10 @@ Evidence required for live sync requirements:
 - [ ] RX-READ-008: thread expansion cannot loop forever.
 - [ ] RX-READ-009: link extraction does not fetch network.
 - [ ] RX-READ-010: link expansion uses SSRF/content-type/size/timeout rules.
-- [ ] RX-READ-011: research brief fails honestly on empty evidence.
-- [ ] RX-READ-012: research brief links every claim/quote to evidence.
-- [ ] RX-READ-013: research brief preserves prompt-injection text as evidence.
-- [ ] RX-READ-014: research no-write mode writes no state.
+- [x] RX-READ-011: research brief fails honestly on empty evidence.
+- [x] RX-READ-012: research brief links every claim/quote to evidence.
+- [x] RX-READ-013: research brief preserves prompt-injection text as evidence.
+- [x] RX-READ-014: research no-write mode writes no state.
 - [ ] RX-READ-015: report output cannot hide stale/partial/missing context.
 - [ ] RX-READ-016: CLI and MCP read surfaces agree.
 - [ ] RX-READ-017: slash command docs point to current surfaces.
@@ -5846,16 +5847,16 @@ implementation it should catch.
 - [x] `severe_x_link_expansion_redirect_private_rejected`
       - Refutes: redirect bypass.
       - Oracle: `x_expand_links` records failed expansion when redirect target is blocked.
-- [ ] `severe_x_research_empty_evidence_fails`
+- [x] `severe_x_research_empty_evidence_fails`
       - Refutes: command generates prose from nothing.
       - Oracle: no report or incomplete report with no-evidence reason.
-- [ ] `severe_x_research_every_claim_has_source`
+- [x] `severe_x_research_every_claim_has_source`
       - Refutes: unsupported claims in brief.
       - Oracle: all claims link to canonical/source-card ids.
-- [ ] `severe_x_research_prompt_injection_quoted`
+- [x] `severe_x_research_prompt_injection_quoted`
       - Refutes: source text treated as instructions.
       - Oracle: rendered evidence warning and no tool/policy action.
-- [ ] `severe_x_research_no_write_mutates_nothing`
+- [x] `severe_x_research_no_write_mutates_nothing`
       - Refutes: no-write still writes wiki/source rows.
       - Oracle: row counts unchanged.
 - [ ] `severe_x_digest_duplicate_candidate_deduped`
@@ -6497,7 +6498,8 @@ Scope:
 - [x] Thread expansion, local-only layer.
 - [x] Link occurrence extraction, local-only/no-fetch layer.
 - [x] Optional safe link expansion, explicit network-gated layer.
-- [ ] X research brief.
+- [x] Local-only X research brief.
+- [ ] Filtered/writing/live X research brief expansion.
 - [ ] Digest candidate links.
 - [ ] Heuristic scoring.
 - [ ] Optional provider scoring later.

@@ -33,6 +33,11 @@ Rules:
 - Use `x_thread` for local-only thread expansion around an already-imported
   tweet; report `missing_context` instead of implying missing parents, quotes,
   or retweets were fetched.
+- Use `x_research` for a local-only, no-write X research brief over
+  already-imported canonical tweets. It must fail honestly when matching
+  evidence is absent or lacks source-card projection. Do not treat it as a
+  completed deep-research report, live thread fetch, model synthesis, or durable
+  artifact writer.
 - Use `x_extract_links` and `x_links` to build/list the local URL occurrence
   index. These tools do not fetch, expand, open, crawl, or summarize linked
   URLs.
@@ -64,6 +69,7 @@ Useful tools:
 - `x_enqueue_recent_search`
 - `x_search_tweets`
 - `x_thread`
+- `x_research`
 - `x_extract_links`
 - `x_expand_links`
 - `x_links`

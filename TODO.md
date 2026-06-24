@@ -222,10 +222,12 @@ PR, implementation note, or final report:
       ordering, and missing-context labels; remaining work is optional
       policy/cost-gated live mode, larger performance fixtures, archive-thread
       fixtures, and report/digest integration.
-- [ ] Add X research brief generation only when every claim/quote links to
+- [x] Add X research brief generation only when every claim/quote links to
       canonical tweet ids or source cards, empty evidence fails honestly,
       no-write mode performs no writes, and prompt-injection tweets remain
-      quoted evidence.
+      quoted evidence. Implemented as local-only `x research` / `x_research`
+      with severe core tests for empty/unprojected/thread-context failure and
+      no-write prompt-injection rendering, plus MCP round-trip coverage.
 - [ ] Add X digest candidate hardening: canonical tweet/thread id linkage,
       source-card linkage, review states, score freshness, delivery-denial
       audit, delivery-attempt integration, quiet-hours schedule, and no
@@ -343,6 +345,14 @@ PR, implementation note, or final report:
       `arcwell radar enqueue`, `worker run-once` processing, result JSON, MCP
       round trip, severe source-card success proof, provider-denial blocked-run
       proof, source-health/cursor assertions, and invalid-enqueue rejection.
+- [x] Run worker-drained production-data radar proof in a disposable home:
+      `scripts/radar-worker-production-proof` preserved
+      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T082527Z-74723`,
+      queued `radar_run`, drained it through `worker run-once`, completed RSS,
+      GitHub-owner, arXiv, and Hacker News adapter jobs, wrote 45 source
+      cards/wiki pages/radar items/FTS rows/scores, recorded four healthy
+      source-health rows and four cursors, selected 30 items, passed
+      `radar audit`, and wrote a deterministic non-delivery summary.
 - [ ] Add radar semantic dedupe, score freshness, source-quality windows,
       category/source balancing, model-backed synthesis, delivery attempts, ops
       UI visibility, and status promotion only after real-data gates pass.

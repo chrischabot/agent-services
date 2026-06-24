@@ -144,6 +144,9 @@ Boundary:
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.
 - Full following import is available for diagnostics/backfill only; do not use it as the default monitor seed because it imports the whole social graph.
 - `x monitor-watch-sources` polls the active definitive `x_handle` watch list, imports accepted watched-source tweets into X items/source cards/wiki pages, creates digest candidates from new source cards, and records per-source `x:watch:<handle>` cursors, source-health, and `watch_monitor` sync runs.
+- Resident worker due-source polling now enqueues the same per-handle watch
+  monitor job for `x_handle` watch sources, rather than the weaker
+  `x_recent_search from:<handle>` substitute.
 - X provider failures are classified for expired/rejected tokens, API tier/forbidden responses, and rate-limit/quota responses. Token-like text is redacted from errors and source-health.
 - Watch rebuild gathers bookmark/follow candidates before replacing existing `x_handle` rows, then swaps the list in one SQLite transaction.
 - Cursors advance only after accepted X items/source cards and source-health are durable. Partial X API errors, blocked/protected/deleted items, malformed tweet objects, quota/rate-limit responses, and duplicate newest-id pages do not corrupt cursors.

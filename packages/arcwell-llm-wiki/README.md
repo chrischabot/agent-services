@@ -74,9 +74,14 @@ Boundary:
   the resident `arcwell worker run` loop, or the MCP `worker_run_once` tool.
   Worker ticks also poll due active watch sources before claiming jobs.
 - Worker claims use leases. Failed jobs retry with bounded backoff and become `dead_lettered` after their attempt budget is exhausted.
-- RSS/Atom, GitHub owner/repo, GitHub releases/commits, and arXiv search adapters write source cards rather than directly rewriting topic pages.
+- RSS/Atom, GitHub owner/repo, GitHub releases/commits, arXiv search, Reddit,
+  Hacker News, and X watch-source adapters write source cards rather than
+  directly rewriting topic pages.
 - Adapter cursor state lives in SQLite and is exposed through cursor CLI/MCP reads for debugging.
-- Source-health state records last success, last failure, last item id/date, cursor key/value, and next run hints for RSS, GitHub, arXiv, and X recent search. Rate-limit/quota failures are classified as `rate_limited` with longer backoff instead of generic failure.
+- Source-health state records last success, last failure, last item id/date,
+  cursor key/value, and next run hints for RSS, GitHub, arXiv, Reddit, Hacker
+  News, X recent search, and X watch monitors. Rate-limit/quota failures are
+  classified as `rate_limited` with longer backoff instead of generic failure.
 - Resident worker ticks enqueue due active watch sources while respecting
   source-health `next_run_at`, then drain jobs up to the configured per-tick
   limit.

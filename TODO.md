@@ -269,10 +269,15 @@ PR, implementation note, or final report:
       with account-scoped confirmation, exact action preview, policy approval,
       audit-before-remote-call, idempotent retry, target-spoofing tests, and
       disposable-target live proof.
-- [ ] Add X worker/scheduled sync only after CLI paths are operational, with
-      shared implementation, job input validation, policy/cost guards,
-      heartbeat, source-health, sync runs, bounded retries, dead letters, and
-      no default job without explicit config.
+- [x] Add X worker/scheduled watch-source monitor parity: due `x_handle`
+      sources enqueue executable per-handle monitor jobs with shared manual
+      monitor implementation, job input validation, policy/cost guards,
+      source-health, `watch_monitor` sync runs, digest candidates, cursor
+      safety, and policy-denied no-write tests.
+- [ ] Extend X worker/scheduled sync beyond implemented watch-source monitor
+      jobs, with heartbeat-specific health, bounded retries/dead letters,
+      explicit config for any default schedule, live cron/callback proof, and
+      delivery integration.
 - [ ] Add X performance/stress fixtures: large archive, many duplicate tweets,
       large follow graph, FTS rebuild over a large corpus, export/import over
       large shards, bounded URL expansion, and ops UI row limits.
@@ -314,6 +319,10 @@ PR, implementation note, or final report:
       the official Firebase API with bounded top-level comment capture,
       source-health/cursor safety, watch-source enqueue support, severe tests,
       and disposable-home production-data proof.
+- [x] Extend radar/source-card live execution to Reddit with JSON listing fetch,
+      bounded top-comment capture, RSS fallback that does not claim comments,
+      source-health/cursor safety, watch-source enqueue support, and severe
+      policy/fallback/source-card tests.
 - [ ] Extend radar live execution to authenticated X watch/recent-search data
       with copied/disposable-home source-health/cursor proof before promotion.
 - [x] Add radar exact URL/source-native dedupe groups with preserved source
@@ -619,9 +628,11 @@ PR, implementation note, or final report:
       structural completion.
 - [ ] Expand difficult-document fixture coverage for PDFs, XLSX, precise table
       extraction, formula/cell handling, and publication-grade citation links.
-- [ ] Add publication-grade claim/report citation-quality checks that block
+- [x] Add publication-grade claim/report citation-quality checks that block
       completed status when evidence links are missing, stale, generated, or too
-      weak.
+      weak, with severe convergence-report judgment tests for missing
+      measurement anchors, stale current evidence, untrusted-only evidence, and
+      a positive cell-anchored measurement path.
 - [ ] Run fresh reference-topic deep-research live runs after host search,
       subagent orchestration, and provider-backed evals are proven.
 - [ ] Add browser-rendered JavaScript readability extraction for pages that

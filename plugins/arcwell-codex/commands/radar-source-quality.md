@@ -7,7 +7,7 @@ argument-hint: <run_id>
 
 The user invoked this command with: $ARGUMENTS
 
-Use `radar_source_quality` with the provided `run_id`. List the durable
+Use `radar_source_quality` with the provided run id. List the durable
 source-quality windows written for that specific radar run after scoring. Treat
 this as telemetry over already-ingested radar items and score overlays, not as
 proof of scheduled operation, model scoring, or delivery.

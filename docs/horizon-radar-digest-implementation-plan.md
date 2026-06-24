@@ -234,7 +234,7 @@ arcwell radar runs
 arcwell radar stage <run-id> <raw|normalized|indexed|scored|filtered|enriched>
 arcwell radar summary <run-id> --language en
 arcwell radar audit <run-id>
-arcwell radar source-quality
+arcwell radar source-quality <run-id>
 arcwell radar repair <run-id>
 ```
 
@@ -268,7 +268,6 @@ Target resources:
 arcwell://radar
 arcwell://radar-runs
 arcwell://radar-profiles
-arcwell://radar-source-quality
 arcwell://radar-deliveries
 ```
 
@@ -624,6 +623,7 @@ Purpose: local HorizonHub-style source quality telemetry.
 Fields:
 
 - `id TEXT PRIMARY KEY`
+- `run_id TEXT NOT NULL`
 - `source_kind TEXT NOT NULL`
 - `locator TEXT NOT NULL`
 - `window_start TEXT NOT NULL`
@@ -1187,6 +1187,9 @@ Anti-mirage gate:
 
 Production-data proof:
 
+- [x] Local single-run source-quality windows are materialized from scored
+      `radar_items` / `radar_scores`, exposed through `radar stage` and
+      `radar_source_quality`, and audited for missing/drifted rows.
 - [ ] Run at least seven days of real scheduled or manually repeated
       production radar runs before claiming decay/quality trend behavior.
 - [ ] Show at least one source-quality ranking generated from real local run

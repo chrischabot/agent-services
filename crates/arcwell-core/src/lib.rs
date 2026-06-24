@@ -4332,14 +4332,7 @@ impl Store {
             Ok(())
         })?;
         self.apply_schema_migration(11, "radar_source_quality_windows", false, None, |conn| {
-            ensure_radar_schema_on(conn)?;
-            ensure_column_on(
-                conn,
-                "radar_source_quality",
-                "run_id",
-                "ALTER TABLE radar_source_quality ADD COLUMN run_id TEXT NOT NULL DEFAULT ''",
-            )?;
-            Ok(())
+            migrate_radar_source_quality_windows_on(conn)
         })?;
         self.conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
@@ -27997,6 +27990,73 @@ fn ensure_column_on(conn: &Connection, table: &str, column: &str, alter_sql: &st
     Ok(())
 }
 
+fn table_columns_on(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    rows(stmt.query_map([], |row| row.get::<_, String>(1))?)
+}
+
+fn migrate_radar_source_quality_windows_on(conn: &Connection) -> Result<()> {
+    ensure_radar_schema_on(conn)?;
+    let columns = table_columns_on(conn, "radar_source_quality")?;
+    let has_run_id = columns.iter().any(|column| column == "run_id");
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS radar_source_quality_v11;
+        CREATE TABLE radar_source_quality_v11 (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL DEFAULT '',
+          source_kind TEXT NOT NULL,
+          locator TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          raw_count INTEGER NOT NULL DEFAULT 0,
+          accepted_count INTEGER NOT NULL DEFAULT 0,
+          average_score REAL,
+          score_p50 REAL,
+          score_p90 REAL,
+          signal_to_noise REAL,
+          duplicate_rate REAL,
+          delivery_contribution_count INTEGER NOT NULL DEFAULT 0,
+          failure_count INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(run_id, source_kind, locator, window_start, window_end)
+        );
+        "#,
+    )?;
+    let insert_sql = if has_run_id {
+        r#"
+        INSERT OR REPLACE INTO radar_source_quality_v11
+          (id, run_id, source_kind, locator, window_start, window_end, raw_count,
+           accepted_count, average_score, score_p50, score_p90, signal_to_noise,
+           duplicate_rate, delivery_contribution_count, failure_count, status, created_at)
+        SELECT id, COALESCE(run_id, ''), source_kind, locator, window_start, window_end, raw_count,
+               accepted_count, average_score, score_p50, score_p90, signal_to_noise,
+               duplicate_rate, delivery_contribution_count, failure_count, status, created_at
+        FROM radar_source_quality
+        "#
+    } else {
+        r#"
+        INSERT OR REPLACE INTO radar_source_quality_v11
+          (id, run_id, source_kind, locator, window_start, window_end, raw_count,
+           accepted_count, average_score, score_p50, score_p90, signal_to_noise,
+           duplicate_rate, delivery_contribution_count, failure_count, status, created_at)
+        SELECT id, '', source_kind, locator, window_start, window_end, raw_count,
+               accepted_count, average_score, score_p50, score_p90, signal_to_noise,
+               duplicate_rate, delivery_contribution_count, failure_count, status, created_at
+        FROM radar_source_quality
+        "#
+    };
+    conn.execute(insert_sql, [])?;
+    conn.execute_batch(
+        r#"
+        DROP TABLE radar_source_quality;
+        ALTER TABLE radar_source_quality_v11 RENAME TO radar_source_quality;
+        "#,
+    )?;
+    Ok(())
+}
+
 fn ensure_radar_schema_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -41154,6 +41214,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 1);
+        let columns = {
+            let mut stmt = store
+                .conn
+                .prepare("PRAGMA table_info(radar_source_quality)")
+                .unwrap();
+            rows(stmt.query_map([], |row| row.get::<_, String>(1)).unwrap()).unwrap()
+        };
+        assert!(
+            columns.iter().any(|column| column == "run_id"),
+            "radar_source_quality must be run-scoped after migration"
+        );
         let migration_name: String = store
             .conn
             .query_row(
@@ -41224,8 +41295,9 @@ mod tests {
     fn severe_schema_migration_adds_radar_source_quality_after_v10() {
         // CLAIM: schema version 11 upgrades existing v10 homes with radar
         // source-quality windows instead of only working for fresh databases.
-        // ORACLE: a hand-built schema_version=10 database with migration 10
-        // recorded gains the table and records migration 11 after Store::open.
+        // ORACLE: a hand-built schema_version=10 database with the old unique
+        // constraint keeps legacy rows and accepts two run-scoped rows with the
+        // same source/window after Store::open.
         // SEVERITY: Severe because source-quality audit gates must not brick
         // upgraded local homes that already recorded earlier radar migrations.
         let paths = test_paths("schema-fixture-radar-source-quality-v10");
@@ -41246,6 +41318,34 @@ mod tests {
               (version, name, destructive, backup_id, applied_at)
             VALUES
               (10, 'x_profile_identity_events', 0, NULL, '2026-06-24T00:00:00Z');
+            CREATE TABLE radar_source_quality (
+              id TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL,
+              locator TEXT NOT NULL,
+              window_start TEXT NOT NULL,
+              window_end TEXT NOT NULL,
+              raw_count INTEGER NOT NULL DEFAULT 0,
+              accepted_count INTEGER NOT NULL DEFAULT 0,
+              average_score REAL,
+              score_p50 REAL,
+              score_p90 REAL,
+              signal_to_noise REAL,
+              duplicate_rate REAL,
+              delivery_contribution_count INTEGER NOT NULL DEFAULT 0,
+              failure_count INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(source_kind, locator, window_start, window_end)
+            );
+            INSERT INTO radar_source_quality
+              (id, source_kind, locator, window_start, window_end, raw_count,
+               accepted_count, average_score, score_p50, score_p90, signal_to_noise,
+               duplicate_rate, delivery_contribution_count, failure_count, status, created_at)
+            VALUES
+              ('legacy-quality', 'rss', 'https://example.com/feed.xml',
+               '2026-06-24T00:00:00Z', '2026-06-24T01:00:00Z', 2, 1,
+               4.0, 4.0, 5.0, 0.5, 0.0, 0, 0, 'healthy',
+               '2026-06-24T01:00:00Z');
             "#,
         )
         .unwrap();
@@ -41262,6 +41362,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 1);
+        let legacy = store.list_all_radar_source_quality().unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].id, "legacy-quality");
+        assert_eq!(legacy[0].run_id, "");
+        for run_id in ["run-one", "run-two"] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO radar_source_quality
+                      (id, run_id, source_kind, locator, window_start, window_end,
+                       raw_count, accepted_count, status, created_at)
+                    VALUES
+                      (?1, ?2, 'rss', 'https://example.com/feed.xml',
+                       '2026-06-24T02:00:00Z', '2026-06-24T03:00:00Z',
+                       1, 1, 'healthy', '2026-06-24T03:00:00Z')
+                    "#,
+                    params![format!("quality-{run_id}"), run_id],
+                )
+                .unwrap();
+        }
         let migration_name: String = store
             .conn
             .query_row(

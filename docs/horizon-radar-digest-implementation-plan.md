@@ -951,7 +951,10 @@ Checklist:
 - [x] Add model-backed ranking only after deterministic score and stage
       inspection exist.
 - [x] Add model output schema validation and malformed-output severe tests.
-- [ ] Add score distribution metrics to run metadata and ops.
+- [x] Add heuristic score distribution metrics to run metadata and ops:
+      `score_distribution` now records run-level count/status/min/max/average
+      and p10/p50/p90 metrics for `heuristic_v1` scores, and `/ops/ui` renders
+      recent radar runs with score distribution columns.
 
 Anti-mirage gate:
 

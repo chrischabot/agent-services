@@ -420,6 +420,12 @@ PR, implementation note, or final report:
       `scripts/radar-model-score-production-proof` proves a live OpenAI
       overlay on a fresh public RSS/GitHub/arXiv/Hacker News worker run without
       mutating heuristic selected rows or source-quality accounting.
+- [x] Add radar run-level heuristic score distribution metrics: completed runs
+      write `metadata.score_distribution` with count/status/min/max/average and
+      p10/p50/p90 for `heuristic_v1` rows only, `ops_snapshot` includes recent
+      radar runs, `/ops/ui` renders a Radar Runs table with score columns, and
+      severe tests prove the metrics are visible without relying only on
+      source-quality rows.
 - [x] Add repeatable production-data scheduled-delivery proof:
       `scripts/radar-scheduled-delivery-production-proof` creates a disposable
       scheduled profile over real public RSS/GitHub/arXiv/Hacker News sources,

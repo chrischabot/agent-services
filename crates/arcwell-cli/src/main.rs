@@ -5935,6 +5935,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Cursors", snapshot.cursors.len()),
         ("Sources", snapshot.watch_sources.len()),
         ("Source health", snapshot.source_health.len()),
+        ("Radar runs", snapshot.radar_runs.len()),
         ("Radar source quality", snapshot.radar_source_quality.len()),
         ("Radar deliveries", snapshot.radar_deliveries.len()),
         ("Source cards", snapshot.source_cards.len()),
@@ -6086,6 +6087,57 @@ code,pre{white-space:pre-wrap;word-break:break-word}
                     health.last_error.clone().unwrap_or_default(),
                 ]
             }),
+    ));
+    html.push_str(&ops_table(
+        "Radar Runs",
+        &[
+            "run",
+            "status",
+            "raw",
+            "scored",
+            "selected",
+            "avg score",
+            "p50",
+            "p90",
+            "window",
+        ],
+        snapshot.radar_runs.iter().take(100).map(|run| {
+            let distribution = run
+                .metadata
+                .get("score_distribution")
+                .unwrap_or(&Value::Null);
+            vec![
+                short_id(&run.id),
+                format!("{} / {}", run.status, run.stage),
+                run.raw_count.to_string(),
+                distribution
+                    .get("score_count")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| run.scored_count.to_string()),
+                distribution
+                    .get("selected_count")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| run.filtered_count.to_string()),
+                distribution
+                    .get("average")
+                    .and_then(Value::as_f64)
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_default(),
+                distribution
+                    .get("p50")
+                    .and_then(Value::as_f64)
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_default(),
+                distribution
+                    .get("p90")
+                    .and_then(Value::as_f64)
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_default(),
+                format!("{} -> {}", run.window_start, run.window_end),
+            ]
+        }),
     ));
     html.push_str(&ops_table(
         "Radar Source Quality",
@@ -15687,6 +15739,14 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         store.run_radar_profile(&profile.id, None).unwrap();
 
         let snapshot = store.ops_snapshot().unwrap();
+        assert_eq!(snapshot.radar_runs.len(), 1);
+        assert!(
+            snapshot.radar_runs[0]
+                .metadata
+                .pointer("/score_distribution/score_count")
+                .and_then(Value::as_u64)
+                .is_some()
+        );
         assert_eq!(snapshot.radar_source_quality.len(), 1);
         assert_eq!(snapshot.radar_source_quality[0].status, "low_signal");
         assert!(
@@ -15713,6 +15773,8 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
             false,
         );
         assert!(html.contains("Radar source quality"));
+        assert!(html.contains("Radar Runs"));
+        assert!(html.contains("avg score"));
         assert!(html.contains("Radar Source Quality"));
         assert!(html.contains("low_signal"));
         assert!(html.contains("non-healthy radar source-quality window"));

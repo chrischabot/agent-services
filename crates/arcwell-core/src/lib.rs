@@ -3046,6 +3046,7 @@ pub struct ImportRunFinish {
 pub struct OpsSnapshot {
     pub health: HealthReport,
     pub x_stats: XStatsReport,
+    pub radar_runs: Vec<RadarRun>,
     pub radar_source_quality: Vec<RadarSourceQuality>,
     pub radar_deliveries: Vec<RadarDelivery>,
     pub jobs: Vec<WikiJob>,
@@ -19922,6 +19923,8 @@ impl Store {
             initial_scores_inserted
         };
         let source_quality_windows = self.record_radar_source_quality_window(&run_id)?;
+        let radar_scores = self.list_radar_scores(&run_id)?;
+        let score_distribution = radar_score_distribution_json(&radar_scores);
         let selected_items = self.count_radar_selected_scores(&run_id)?;
         let raw_count = source_cards.len() as i64;
         let now = now();
@@ -19952,6 +19955,7 @@ impl Store {
         run_metadata["exact_dedup_groups"] = json!(exact_dedup_groups);
         run_metadata["semantic_dedup_groups"] = json!(semantic_dedup_groups);
         run_metadata["source_quality_windows"] = json!(source_quality_windows);
+        run_metadata["score_distribution"] = score_distribution;
         self.conn.execute(
             r#"
             UPDATE radar_runs
@@ -22651,6 +22655,7 @@ impl Store {
         Ok(OpsSnapshot {
             health: self.health()?,
             x_stats: self.x_stats()?,
+            radar_runs: self.list_radar_runs()?.into_iter().take(50).collect(),
             radar_source_quality: self.list_all_radar_source_quality()?,
             radar_deliveries: self.list_radar_deliveries(None)?,
             jobs: self.list_wiki_jobs()?,
@@ -33020,6 +33025,48 @@ fn expected_radar_source_quality_counts(
         }
     }
     expected
+}
+
+fn radar_score_distribution_json(scores: &[RadarScore]) -> Value {
+    let heuristic_scores = scores
+        .iter()
+        .filter(|score| score.score_kind == "heuristic_v1")
+        .collect::<Vec<_>>();
+    let mut values = heuristic_scores
+        .iter()
+        .map(|score| score.score)
+        .filter(|score| score.is_finite())
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut status_counts = BTreeMap::<String, usize>::new();
+    for score in &heuristic_scores {
+        *status_counts.entry(score.status.clone()).or_insert(0) += 1;
+    }
+    let average = if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    };
+    json!({
+        "score_kind": "heuristic_v1",
+        "schema_version": 1,
+        "score_count": heuristic_scores.len(),
+        "finite_score_count": values.len(),
+        "selected_count": status_counts.get("selected").copied().unwrap_or(0),
+        "below_threshold_count": status_counts.get("below_threshold").copied().unwrap_or(0),
+        "over_profile_limit_count": status_counts.get("over_profile_limit").copied().unwrap_or(0),
+        "duplicate_count": heuristic_scores
+            .iter()
+            .filter(|score| score.status.starts_with("duplicate_"))
+            .count(),
+        "status_counts": status_counts,
+        "min": values.first().copied(),
+        "max": values.last().copied(),
+        "average": average,
+        "p10": percentile_sorted(&values, 0.10),
+        "p50": percentile_sorted(&values, 0.50),
+        "p90": percentile_sorted(&values, 0.90),
+    })
 }
 
 fn radar_source_health_for_item<'a>(
@@ -47819,6 +47866,39 @@ reason = "radar model score denied"
                 .and_then(Value::as_u64),
             Some(2)
         );
+        let score_distribution = report
+            .run
+            .metadata
+            .get("score_distribution")
+            .expect("run score distribution");
+        assert_eq!(
+            score_distribution.get("score_kind").and_then(Value::as_str),
+            Some("heuristic_v1")
+        );
+        assert_eq!(
+            score_distribution
+                .get("score_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            score_distribution
+                .get("selected_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            score_distribution
+                .get("average")
+                .and_then(Value::as_f64)
+                .is_some()
+        );
+        assert!(
+            score_distribution
+                .get("p90")
+                .and_then(Value::as_f64)
+                .is_some()
+        );
         let stage = store.read_radar_stage(&report.run.id).unwrap();
         let score_by_item = stage
             .scores
@@ -47890,6 +47970,18 @@ reason = "radar model score denied"
         assert!(audit.ok, "{audit:?}");
         assert_eq!(audit.source_quality_count, 2);
         let ops = store.ops_snapshot().unwrap();
+        let ops_run = ops
+            .radar_runs
+            .iter()
+            .find(|run| run.id == report.run.id)
+            .expect("radar run visible in ops snapshot");
+        assert_eq!(
+            ops_run
+                .metadata
+                .pointer("/score_distribution/score_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
         assert_eq!(ops.radar_source_quality.len(), 2);
         assert!(
             ops.health

@@ -7283,12 +7283,15 @@ fn summarize_radar_run_scores(snapshot: &OpsSnapshot) -> String {
         .get("score_distribution")
         .unwrap_or(&Value::Null);
     format!(
-        "{} scored; selected:{} over-limit:{} below:{} duplicate:{} p50:{}",
+        "{} scored; selected:{} over-limit:{} below:{} duplicate:{} source-quota:{} category-quota:{} other:{} p50:{}",
         radar_distribution_u64(distribution, "score_count").unwrap_or(run.scored_count as u64),
         radar_distribution_u64(distribution, "selected_count").unwrap_or(run.filtered_count as u64),
         radar_distribution_u64(distribution, "over_profile_limit_count").unwrap_or(0),
         radar_distribution_u64(distribution, "below_threshold_count").unwrap_or(0),
         radar_distribution_u64(distribution, "duplicate_count").unwrap_or(0),
+        radar_distribution_status_count(distribution, "source_quota"),
+        radar_distribution_status_count(distribution, "category_quota"),
+        radar_distribution_other_count(distribution),
         radar_distribution_f64(distribution, "p50")
             .map(|value| format!("{value:.2}"))
             .unwrap_or_else(|| "n/a".to_string())
@@ -7304,24 +7307,58 @@ fn render_radar_score_bar(distribution: &Value) -> String {
     let over = radar_distribution_u64(distribution, "over_profile_limit_count").unwrap_or(0);
     let below = radar_distribution_u64(distribution, "below_threshold_count").unwrap_or(0);
     let duplicate = radar_distribution_u64(distribution, "duplicate_count").unwrap_or(0);
+    let source_quota = radar_distribution_status_count(distribution, "source_quota");
+    let category_quota = radar_distribution_status_count(distribution, "category_quota");
+    let other = radar_distribution_other_count(distribution);
     let mut html = "<div class=\"bar\" aria-label=\"radar score distribution\">".to_string();
-    for (class, count) in [
-        ("selected", selected),
-        ("over", over),
-        ("below", below),
-        ("duplicate", duplicate),
+    for (class, label, count) in [
+        ("selected", "selected", selected),
+        ("over", "over_profile_limit", over),
+        ("below", "below_threshold", below),
+        ("duplicate", "duplicate", duplicate),
+        ("quota", "source_quota", source_quota),
+        ("quota", "category_quota", category_quota),
+        ("other", "other_status", other),
     ] {
         if count == 0 {
             continue;
         }
         let width = ((count as f64 / total as f64) * 100.0).clamp(1.0, 100.0);
         html.push_str(&format!(
-            "<span class=\"{}\" title=\"{}:{}\" style=\"width:{:.1}%\"></span>",
-            class, class, count, width
+            "<span class=\"{}\" title=\"{}:{}\" aria-label=\"{}:{}\" style=\"width:{:.1}%\"></span>",
+            class, label, count, label, count, width
         ));
     }
     html.push_str("</div>");
     html
+}
+
+fn radar_distribution_status_count(distribution: &Value, status: &str) -> u64 {
+    distribution
+        .get("status_counts")
+        .and_then(|counts| counts.get(status))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn radar_distribution_other_count(distribution: &Value) -> u64 {
+    let total = radar_distribution_u64(distribution, "score_count").unwrap_or(0);
+    let shown = radar_distribution_u64(distribution, "selected_count")
+        .unwrap_or(0)
+        .saturating_add(
+            radar_distribution_u64(distribution, "over_profile_limit_count").unwrap_or(0),
+        )
+        .saturating_add(radar_distribution_u64(distribution, "below_threshold_count").unwrap_or(0))
+        .saturating_add(radar_distribution_u64(distribution, "duplicate_count").unwrap_or(0))
+        .saturating_add(radar_distribution_status_count(
+            distribution,
+            "source_quota",
+        ))
+        .saturating_add(radar_distribution_status_count(
+            distribution,
+            "category_quota",
+        ));
+    total.saturating_sub(shown)
 }
 
 fn radar_distribution_u64(distribution: &Value, key: &str) -> Option<u64> {
@@ -15999,6 +16036,86 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         assert!(html.contains("class=\"over\""));
         assert!(html.contains("score_distribution"));
         assert!(!html.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn severe_ops_ui_radar_score_distribution_renders_quota_and_other_buckets() {
+        // CLAIM: Radar score distribution bars do not hide real non-selected
+        // statuses such as balance quota rejections or future status buckets.
+        // PRECONDITIONS: Run metadata may contain full status_counts beyond the
+        // top-level selected/below/over/duplicate counters.
+        // ORACLE: Quota and other-status buckets are named in both the summary
+        // and generated bar.
+        // SEVERITY: Severe because a partial chart can make rejected items look
+        // like missing data instead of explicit ranking outcomes.
+        let paths = test_paths("ops-ui-radar-score-distribution-quota");
+        let store = Store::open(paths).unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Quota distribution launch".to_string(),
+                url: "https://example.com/quota-distribution-launch".to_string(),
+                source_type: "article".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Launch security agent distribution fixture.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "rss", "source_detail": "quota-feed" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "ops-distribution-quota-radar".to_string(),
+                description: "Ops distribution quota radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(1),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "Quota distribution" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        let mut snapshot = store.ops_snapshot().unwrap();
+        let run = snapshot
+            .radar_runs
+            .iter_mut()
+            .find(|run| run.id == report.run.id)
+            .unwrap();
+        run.metadata["score_distribution"] = json!({
+            "score_kind": "heuristic_v1",
+            "schema_version": 1,
+            "score_count": 7,
+            "finite_score_count": 7,
+            "selected_count": 1,
+            "below_threshold_count": 1,
+            "over_profile_limit_count": 1,
+            "duplicate_count": 1,
+            "status_counts": {
+                "selected": 1,
+                "below_threshold": 1,
+                "over_profile_limit": 1,
+                "duplicate_url": 1,
+                "source_quota": 1,
+                "category_quota": 1,
+                "future_rejected": 1
+            },
+            "min": 1.0,
+            "max": 7.0,
+            "average": 4.0,
+            "p10": 1.5,
+            "p50": 4.0,
+            "p90": 6.5
+        });
+
+        let html = render_ops_ui(&snapshot);
+        assert!(html.contains("source-quota:1"));
+        assert!(html.contains("category-quota:1"));
+        assert!(html.contains("other:1"));
+        assert!(html.contains("title=\"source_quota:1\""));
+        assert!(html.contains("title=\"category_quota:1\""));
+        assert!(html.contains("title=\"other_status:1\""));
     }
 
     #[test]

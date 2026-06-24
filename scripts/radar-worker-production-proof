@@ -171,13 +171,20 @@ assert(stage.run && stage.run.id === runId, "stage should read the worker-create
 assert(stage.run.status === "scored", "worker-created run should be scored", stage.run);
 assert(Array.isArray(stage.items) && stage.items.length >= 10, "stage should contain real normalized items", { count: stage.items?.length });
 assert(Array.isArray(stage.scores) && stage.scores.length >= stage.items.length, "stage should contain score overlays", { items: stage.items?.length, scores: stage.scores?.length });
+const heuristicScores = stage.scores.filter((score) => score.score_kind === "heuristic_v1");
 const scoreDistribution = stage.run.metadata?.score_distribution || {};
 assert(scoreDistribution.score_kind === "heuristic_v1", "run metadata should record heuristic score distribution", scoreDistribution);
-assert(Number(scoreDistribution.score_count || 0) === stage.items.length, "score distribution should cover heuristic score rows", { scoreDistribution, item_count: stage.items.length });
+assert(Number(scoreDistribution.score_count || 0) === heuristicScores.length, "score distribution should cover heuristic score rows", { scoreDistribution, heuristic_score_count: heuristicScores.length });
 assert(Number(scoreDistribution.selected_count || 0) === Number(stage.run.filtered_count || 0), "score distribution selected count should match run filtered count", { scoreDistribution, run: stage.run });
-assert(Number.isFinite(Number(scoreDistribution.average)), "score distribution should include average score", scoreDistribution);
-assert(Number.isFinite(Number(scoreDistribution.p50)), "score distribution should include p50 score", scoreDistribution);
-assert(Number.isFinite(Number(scoreDistribution.p90)), "score distribution should include p90 score", scoreDistribution);
+for (const field of ["score_count", "finite_score_count", "selected_count", "below_threshold_count", "over_profile_limit_count", "duplicate_count", "min", "max", "average", "p10", "p50", "p90"]) {
+  assert(typeof scoreDistribution[field] === "number", `score distribution ${field} should be numeric`, scoreDistribution);
+}
+const statusCountTotal = Object.values(scoreDistribution.status_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+assert(statusCountTotal === scoreDistribution.score_count, "status_counts should sum to score_count", { scoreDistribution, statusCountTotal });
+assert(scoreDistribution.min <= scoreDistribution.p10, "score distribution min <= p10", scoreDistribution);
+assert(scoreDistribution.p10 <= scoreDistribution.p50, "score distribution p10 <= p50", scoreDistribution);
+assert(scoreDistribution.p50 <= scoreDistribution.p90, "score distribution p50 <= p90", scoreDistribution);
+assert(scoreDistribution.p90 <= scoreDistribution.max, "score distribution p90 <= max", scoreDistribution);
 assert(audit.ok === true, "radar audit should pass", audit);
 assert(audit.item_count === stage.items.length, "audit item count should match stage", audit);
 assert(summaryWrite.audit_status === "audit_ok", "summary write should require audit_ok", summaryWrite);
@@ -220,6 +227,15 @@ assert(hasHealthy("hackernews", "topstories"), "ops should show healthy Hacker N
 const opsRun = (ops.radar_runs || []).find((run) => run.id === runId);
 assert(opsRun, "ops snapshot should expose the radar run", ops.radar_runs);
 assert(opsRun.metadata?.score_distribution?.score_kind === "heuristic_v1", "ops radar run should expose score distribution", opsRun);
+const opsDistribution = opsRun.metadata.score_distribution;
+for (const field of ["score_kind", "schema_version", "score_count", "finite_score_count", "selected_count", "below_threshold_count", "over_profile_limit_count", "duplicate_count", "min", "max", "average", "p10", "p50", "p90"]) {
+  assert(opsDistribution[field] === scoreDistribution[field], `ops score distribution should match run metadata field ${field}`, { field, scoreDistribution, opsDistribution });
+}
+assert(
+  JSON.stringify(opsDistribution.status_counts || {}) === JSON.stringify(scoreDistribution.status_counts || {}),
+  "ops score distribution status_counts should match run metadata",
+  { scoreDistribution, opsDistribution }
+);
 
 const proofPacket = {
   proof_name: "radar-worker-production-proof",
@@ -275,8 +291,10 @@ const proofPacket = {
     min: scoreDistribution.min,
     max: scoreDistribution.max,
     average: scoreDistribution.average,
+    p10: scoreDistribution.p10,
     p50: scoreDistribution.p50,
     p90: scoreDistribution.p90,
+    status_counts: scoreDistribution.status_counts,
   },
   cursor_keys: [...cursorKeys].filter((key) =>
     key === `rss:${rssUrl}` ||

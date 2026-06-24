@@ -134,7 +134,7 @@ PR, implementation note, or final report:
       pending reviews.
       - [x] Radar run score-distribution summaries are now persisted in run
             metadata and visible in `ops_snapshot` plus `/ops/ui` with
-            filter/detail coverage and severe escaping tests.
+            generated score bars, detail links, and severe escaping tests.
 - [ ] Add live-provider probe summaries to ops only where probes are cheap,
       safe, redacted, and policy/cost aware.
 - [ ] Keep Obsidian/Markdown as the wiki editing surface; do not duplicate wiki
@@ -431,7 +431,7 @@ PR, implementation note, or final report:
       source-quality rows. `scripts/radar-worker-production-proof` now also
       verifies the distribution in run metadata and ops over real public
       RSS/GitHub/arXiv/Hacker News data at
-      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T101940Z-98028`.
+      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T102233Z-28818`.
 - [x] Add repeatable production-data scheduled-delivery proof:
       `scripts/radar-scheduled-delivery-production-proof` creates a disposable
       scheduled profile over real public RSS/GitHub/arXiv/Hacker News sources,

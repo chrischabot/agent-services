@@ -1127,16 +1127,16 @@ Delivery routes:
 
 Checklist:
 
-- [ ] Add recipient authorization lookup.
+- [x] Add recipient authorization lookup.
 - [ ] Add delivery profile config for channel, recipient, quiet hours, max
       frequency, and summary format.
-- [ ] Add policy check before delivery.
-- [ ] Add cost check where provider delivery has cost.
-- [ ] Add idempotency keys per run/summary/recipient.
+- [x] Add policy check before delivery.
+- [x] Add cost check where provider delivery has cost.
+- [x] Add idempotency keys per run/summary/recipient.
 - [ ] Add quiet-hours deferral.
 - [ ] Add retry with bounded attempts and dead-letter behavior.
-- [ ] Add delivery attempt records linked to `radar_deliveries`.
-- [ ] Add delivery status to ops snapshot.
+- [x] Add delivery attempt records linked to `radar_deliveries`.
+- [x] Add delivery status to ops snapshot and `/ops/ui`.
 - [x] Add manual `radar deliver` confirmation path with CLI/MCP/slash surfaces,
       durable `radar_deliveries`, idempotency, authorization/policy gates,
       provider-failure recording, and local severe tests.
@@ -1544,7 +1544,8 @@ Exit gate:
 - [ ] Retry/dead-letter.
 - [ ] Scheduled worker runs.
 - [ ] Source-quality rollups.
-- [ ] Ops/doctor visibility.
+- [x] Ops snapshot/UI visibility for manual delivery attempts.
+- [ ] Doctor visibility and broader delivery controls.
 
 Exit gate:
 

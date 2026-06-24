@@ -1023,6 +1023,10 @@ A model-backed report may be marked complete only when:
   stop reason and still run the model-backed gate when requested, while stale
   settled snapshots reopen to `continue` if active fact-checking adds new
   blockers.
+- Done: severe stop-rule coverage now proves missing statements, time/source/
+  iteration caps, open critical/error challenges, strong refutations, required
+  active fact-check blockers, invalid provider-call/cost caps, and explicit
+  user stop cannot silently become settled convergence.
 - Done: convergence exposes `research_convergence_host_search_tasks` as the
   exact Codex/host handoff queue for per-challenge host-native search; matching
   proof refreshes existing challenge rows, while wrong-query selected results

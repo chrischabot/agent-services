@@ -65525,6 +65525,190 @@ The platform has achieved zero escapes in production since 2024.
     }
 
     #[test]
+    fn severe_research_convergence_stop_rules_block_false_settlement() {
+        // CLAIM: convergence stop rules cannot mark a run settled while severe
+        // blockers, high-impact unknown facts, caps, missing statements, or user
+        // stop conditions remain.
+        // PRECONDITIONS: Direct stop-rule matrix plus a stopped research run.
+        // POSTCONDITIONS: blockers prevent `settled`, hard caps stop
+        // incomplete, no-progress can settle only with no blockers, and a user
+        // stopped run rejects further convergence mutation.
+        // ORACLE: stop-reason matrix and persisted stopped-run behavior.
+        // SEVERITY: Severe because long-running research can otherwise look
+        // converged merely because it exhausted time, source, iteration, or
+        // no-progress budgets while serious disproof work remains open.
+        let config = ResearchConvergenceConfig {
+            max_iterations: 4,
+            max_seconds: 60,
+            max_sources: 10,
+            max_provider_calls: 2,
+            cost_cap_usd: 1.0,
+            source_novelty_threshold: 0.05,
+            confidence_delta_threshold: 0.03,
+            no_progress_iteration_limit: 2,
+            require_active_fact_check: true,
+            allow_long_run: false,
+            no_write: false,
+            editorial_provider: None,
+            editorial_model_name: None,
+            editorial_endpoint: None,
+            editorial_timeout_seconds: None,
+        };
+        let statement = ResearchStatement {
+            id: "rstmt-stop-rule".to_string(),
+            run_id: "run-stop-rule".to_string(),
+            iteration_id: "riter-stop-rule".to_string(),
+            parent_statement_id: None,
+            stable_key: "stop-rule".to_string(),
+            statement_type: "fact".to_string(),
+            text: "The system uses deterministic verification before execution.".to_string(),
+            scope: Some("system".to_string()),
+            temporal_scope: None,
+            confidence: 0.86,
+            certainty_label: "high".to_string(),
+            status: "survived".to_string(),
+            importance: "high".to_string(),
+            evidence: json!({ "claim_ids": ["claim-stop-rule"] }),
+            counterevidence: json!([]),
+            assumptions: json!([]),
+            caveats: json!([]),
+            created_by_role: "statement_compiler".to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        let statements = vec![statement];
+
+        assert_eq!(
+            convergence_stop_reason(1, &[], 0, 0, 0, 0, 1, 2, 0.0, 0.0, 0, &config),
+            "no_analytical_statements"
+        );
+        assert_eq!(
+            convergence_stop_reason(1, &statements, 0, 0, 0, 0, 1, 2, 0.0, 0.0, 60, &config),
+            "max_seconds"
+        );
+        assert_eq!(
+            convergence_stop_reason(1, &statements, 0, 0, 0, 0, 10, 2, 0.0, 0.0, 0, &config),
+            "max_sources"
+        );
+        for (critical, error, strong, unknown, label) in [
+            (1, 0, 0, 0, "critical challenge"),
+            (0, 1, 0, 0, "error challenge"),
+            (0, 0, 1, 0, "strong refutation"),
+            (0, 0, 0, 1, "unknown high-impact fact check"),
+        ] {
+            assert_eq!(
+                convergence_stop_reason(
+                    1,
+                    &statements,
+                    critical,
+                    error,
+                    strong,
+                    unknown,
+                    1,
+                    99,
+                    0.0,
+                    0.0,
+                    0,
+                    &config
+                ),
+                "continue",
+                "{label} must block no-progress settlement"
+            );
+            assert_eq!(
+                convergence_stop_reason(
+                    4,
+                    &statements,
+                    critical,
+                    error,
+                    strong,
+                    unknown,
+                    1,
+                    99,
+                    0.0,
+                    0.0,
+                    0,
+                    &config
+                ),
+                "max_iterations",
+                "{label} must stop incomplete at the iteration cap, not settle"
+            );
+        }
+        let mut active_fact_check_optional = config.clone();
+        active_fact_check_optional.require_active_fact_check = false;
+        assert_eq!(
+            convergence_stop_reason(
+                1,
+                &statements,
+                0,
+                0,
+                0,
+                1,
+                1,
+                2,
+                0.0,
+                0.0,
+                0,
+                &active_fact_check_optional
+            ),
+            "settled",
+            "unknown high-impact fact checks block settlement only when active fact-checking is required"
+        );
+        assert_eq!(
+            convergence_stop_reason(1, &statements, 0, 0, 0, 0, 1, 2, 0.0, 0.0, 0, &config),
+            "settled",
+            "no-progress settlement is allowed only after blocker-free iterations"
+        );
+        assert_eq!(
+            convergence_stop_reason(4, &statements, 0, 0, 0, 0, 1, 0, 0.5, 0.5, 0, &config),
+            "max_iterations",
+            "iteration cap is incomplete when novelty/edit movement prevents no-progress settlement"
+        );
+        let mut editorial_without_calls = research_convergence_test_input("run-stop-rule");
+        editorial_without_calls.editorial_provider = Some("mock".to_string());
+        assert!(
+            normalize_research_convergence_config(&editorial_without_calls)
+                .unwrap_err()
+                .to_string()
+                .contains("max_provider_calls")
+        );
+        let mut bad_cost_cap = research_convergence_test_input("run-stop-rule");
+        bad_cost_cap.cost_cap_usd = Some(f64::INFINITY);
+        assert!(
+            normalize_research_convergence_config(&bad_cost_cap)
+                .unwrap_err()
+                .to_string()
+                .contains("cost_cap_usd")
+        );
+
+        let store = test_store("research-convergence-user-stop-rules");
+        let workflow = store
+            .create_deep_research_run("user stopped convergence")
+            .unwrap();
+        seed_research_convergence_claim(
+            &store,
+            &workflow.run.id,
+            "The system uses deterministic verification before execution.",
+        );
+        let stopped = store.stop_research_run(&workflow.run.id).unwrap();
+        assert_eq!(stopped.run.status, "stopped");
+        let error = store
+            .run_research_convergence_step(research_convergence_test_input(&workflow.run.id))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("not open for convergence"),
+            "user-stopped runs must not accept more convergence work: {error}"
+        );
+        assert!(
+            store
+                .list_research_iterations(&workflow.run.id)
+                .unwrap()
+                .is_empty(),
+            "user stop must prevent partial convergence ledgers"
+        );
+    }
+
+    #[test]
     fn severe_worker_research_convergence_resumes_replays_idempotently_and_writes_report() {
         // CLAIM: convergence can be resumed by the worker and replayed after terminal state without duplicate progress.
         // ORACLE: a manual first iteration plus queued worker run settles the ledger, writes one judgment, and replay is a no-op.

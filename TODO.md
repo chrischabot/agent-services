@@ -359,7 +359,7 @@ PR, implementation note, or final report:
       harness with OAuth refresh, source-health/cursor, audit, summary, ops,
       artifact redaction checks, and a blocked proof packet when live auth
       fails. Latest local run
-      `.arcwell-dev/proofs/radar-x-production-proof-20260624T113752Z-35025`
+      `.arcwell-dev/proofs/radar-x-production-proof-20260624T113929Z-51642`
       is not a pass: OAuth refresh failed, app-bearer fallback returned 401,
       and the proof packet kept existing local X projection separate from
       current authenticated live fetch proof.
@@ -646,10 +646,15 @@ PR, implementation note, or final report:
       statement change count, confidence deltas, open critical/high challenges,
       strong refutations, active fact-check summaries, evaluator scores,
       elapsed time, cost, and stop-rule JSON.
-- [ ] Severe-test stop rules so critical unresolved challenges, strong
+- [x] Severe-test stop rules so critical unresolved challenges, strong
       refutations without revisions, wrong high-impact fact checks, no-progress
       loops, time caps, cost caps, provider-call caps, and user stop all block
-      `settled` or stop incomplete as appropriate.
+      `settled` or stop incomplete as appropriate:
+      `severe_research_convergence_stop_rules_block_false_settlement` proves
+      no analytical statements, time/source/iteration caps, open critical/error
+      challenges, strong refutations, required active fact-check blockers,
+      provider-call/cost-cap config rejection, blocker-free no-progress
+      settlement, and user-stopped runs cannot create fake convergence ledgers.
 - [ ] Performance-test convergence metrics with 10,000 candidate sources,
       2,000 source cards, 50,000 claims, 5,000 statements, 20,000
       challenges/disproofs, 100 iterations, large report appendices, and

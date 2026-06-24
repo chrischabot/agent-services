@@ -34,6 +34,28 @@ Do not use this skill for:
 - commands whose success is directly observable and does not imply broader
   capability readiness
 
+## Trigger Contract
+
+This skill should be selected before work begins, not after a final summary,
+when any of these are true:
+
+- The user asks for "done", "complete", "production", "real data",
+  "quality gates", "proof", "anti-mirage", or worries about half-finished work.
+- The task creates or changes a capability claim in `STATUS.md`, `TODO.md`,
+  README files, plugin commands, MCP tool descriptions, skills, or docs.
+- The task promotes a workflow from design to implementation, from local proof
+  to production-data proof, or from manual execution to scheduled operation.
+- The task touches ingestion, indexing, ranking, summarization, report writing,
+  delivery, workers, source health, cursors, secrets, provider calls, cost
+  policy, or ops visibility.
+- The task is large enough that a prompt, schema, command, or mock could look
+  like completion without proving the underlying behavior.
+
+If the user explicitly invokes another Arcwell skill for substantial feature
+work, apply this skill as a companion quality gate whenever the work changes
+what Arcwell claims to support. Use the domain skill for the workflow details
+and this skill for claim discipline, proof levels, and promotion language.
+
 ## Core Rules
 
 - Do not call a feature done because a file, prompt, schema, README, command,

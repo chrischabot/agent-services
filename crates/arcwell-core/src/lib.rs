@@ -18654,13 +18654,31 @@ impl Store {
         source_card_ids: &[String],
     ) -> Result<DigestCandidate> {
         validate_query(topic)?;
+        let source_card_ids = source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         if source_card_ids.is_empty() {
             bail!("digest candidate requires at least one source card");
         }
-        for id in source_card_ids {
+        for id in &source_card_ids {
             validate_id(id)?;
             self.read_source_card(id)?
                 .with_context(|| format!("source card not found: {id}"))?;
+        }
+        let source_card_ids_json = serde_json::to_string(&source_card_ids)?;
+        if let Some(existing) = self
+            .conn
+            .query_row(
+                "SELECT id, topic, score, reason, status, source_card_ids_json, created_at, updated_at FROM digest_candidates WHERE topic = ?1 AND source_card_ids_json = ?2 ORDER BY updated_at DESC LIMIT 1",
+                params![topic, source_card_ids_json],
+                digest_candidate_from_row,
+            )
+            .optional()?
+        {
+            return Ok(existing);
         }
         let (score, reason) = score_digest_candidate(topic, source_card_ids.len());
         let status = if score >= 0.75 { "ready" } else { "pending" };
@@ -18678,7 +18696,7 @@ impl Store {
                 score,
                 reason,
                 status,
-                serde_json::to_string(source_card_ids)?,
+                source_card_ids_json,
                 timestamp
             ],
         )?;
@@ -47308,6 +47326,69 @@ ARXIV=( "cat:cs.AI" )
         let page = store.read_wiki_page(&page_id).unwrap().unwrap();
         assert!(page.content.contains("Vercel Eve"));
         assert!(page.content.contains(&card.id));
+    }
+
+    #[test]
+    fn severe_digest_candidate_dedupes_normalized_source_links() {
+        // CLAIM: Digest candidate creation is idempotent for the same topic and
+        // source-card set, even when callers repeat or reorder IDs.
+        // ORACLE: one durable candidate row, stable candidate id, and sorted
+        // unique source-card linkage.
+        // SEVERITY: Severe because X/watch pipelines can otherwise make a
+        // duplicate-filled digest queue look more complete than it is.
+        let store = test_store("digest-candidate-dedupe");
+        let first = store
+            .add_source_card(SourceCardInput {
+                title: "First X item".to_string(),
+                url: "https://example.com/first".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "First watched-source item.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "First watched-source item exists.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.8,
+                }],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "first" }),
+            })
+            .unwrap();
+        let second = store
+            .add_source_card(SourceCardInput {
+                title: "Second X item".to_string(),
+                url: "https://example.com/second".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Second watched-source item.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "Second watched-source item exists.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.8,
+                }],
+                retrieved_at: None,
+                metadata: json!({ "x_id": "second" }),
+            })
+            .unwrap();
+        let first_call = store
+            .create_digest_candidate(
+                "X watch proof",
+                &[second.id.clone(), first.id.clone(), second.id.clone()],
+            )
+            .unwrap();
+        let second_call = store
+            .create_digest_candidate("X watch proof", &[first.id.clone(), second.id.clone()])
+            .unwrap();
+
+        assert_eq!(second_call.id, first_call.id);
+        let candidates = store.list_digest_candidates().unwrap();
+        assert_eq!(candidates.len(), 1);
+        let expected = [first.id, second.id]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(candidates[0].source_card_ids, expected);
+        assert_eq!(candidates[0].status, "ready");
     }
 
     #[test]

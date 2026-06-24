@@ -275,7 +275,7 @@ Skills are the primary reusable behavior surface. In Codex they appear as `$...`
 - `$arcwell-codex:wiki-research`: search and write source-backed wiki pages.
 - `$arcwell-codex:deep-research`: run the deep-only research workflow: source-map, gather, extract, refute, synthesize, audit, and write back.
 - `$arcwell-codex:research-audit`: adversarially check sources, claims, provenance, and uncertainty.
-- `$arcwell-codex:anti-mirage`: prevent fake-done status by requiring explicit claims, refutation tests, production-data proof gates, ops visibility, and honest promotion language for substantial features.
+- `$arcwell-codex:anti-mirage`: prevent fake-done status by requiring explicit claims, refutation tests, production-data proof gates, ops visibility, and honest promotion language for substantial features; trigger it before substantial work that changes Arcwell capability claims, real-data pipelines, scheduled operation, delivery, reports, or done/production status.
 - `$arcwell-codex:research-brief`: render concise artifacts from already-collected wiki/source-card evidence.
 - `$arcwell-codex:x-research`: import, search, report, and evaluate X evidence safely.
 - `$arcwell-codex:tidal-control`: list, inspect, create, and update TIDAL playlists, add resolved tracks, and favorite tracks/playlists from an existing authenticated TIDAL desktop session.

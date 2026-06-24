@@ -159,6 +159,11 @@ typing part of the name. Use the displayed command name from the picker.
 - `/radar-stage` uses `radar_stage_read`.
 - `/radar-summarize` uses `radar_summarize`.
 - `/radar-summary` uses `radar_summary_read`.
+- `/radar-deliver` uses `radar_deliver_summary` for manual authorized delivery
+  of an existing `audit_ok` radar summary through Telegram/email channel send
+  paths; it is not scheduled delivery proof.
+- `/radar-deliveries` uses `radar_delivery_list` for durable radar delivery
+  rows.
 - `/radar-audit` uses `radar_audit_run`.
 - `/radar-source-quality` uses `radar_source_quality` for a specific run id.
 - `/radar-source-quality-trends` uses `radar_source_quality_trends` for local

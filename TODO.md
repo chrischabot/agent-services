@@ -367,13 +367,32 @@ PR, implementation note, or final report:
       windows, with bounded CLI/MCP/slash surfaces and severe tests for thin
       history filtering, decaying/failing sources, hostile locators, ranking,
       and invalid limits.
+- [x] Run source-quality ranking production-data proof over repeated live public
+      GitHub/arXiv/Hacker News radar runs:
+      `scripts/radar-source-quality-trends-proof` preserved
+      `.arcwell-dev/proofs/radar-source-quality-trends-proof-20260624T090251Z-4856`,
+      wrote two scored runs, 50 radar items/scores total, six source-quality
+      windows, three trend rows, clean audits, and healthy cursors/source-health
+      for the three public source families.
 - [x] Add local deterministic semantic/topic dedupe after initial scoring, with
       `semantic_topic` dedupe groups, `duplicate_topic` score rows, preserved
       evidence, source-quality duplicate accounting, and audit drift coverage.
-- [ ] Add model-backed synthesis, delivery attempts, production-data semantic
-      dedupe review, production-data balance review, production-data
-      source-quality trends, broader ops controls, and status promotion only
-      after real-data gates pass.
+- [x] Run copied-home production-data semantic/topic dedupe review over real
+      existing source cards:
+      `.arcwell-dev/proofs/radar-semantic-production-review-20260624T090459Z`
+      projected 16 Copilot source-card items, wrote 3 `semantic_topic` groups,
+      marked 5 `duplicate_topic` scores, selected 8 items, produced 16
+      source-quality windows, and passed `radar audit` with zero findings.
+- [x] Add local/manual radar summary delivery attempts through authorized
+      Telegram/email channel send paths, with CLI/MCP/slash surfaces, durable
+      `radar_deliveries` rows linked to channel delivery attempts, idempotency
+      replay, authorization/policy-denial blocking, provider-failure recording,
+      and token-redaction severe tests.
+- [ ] Add model-backed synthesis, live production delivery proof, scheduled
+      delivery, production-data semantic dedupe breadth across more profiles,
+      production-data balance review, seven-day source-quality trend/decay
+      proof, broader ops controls, and status promotion only after real-data
+      gates pass.
 - [ ] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; keep real local agent/author addresses only in ignored
       env or secret config.

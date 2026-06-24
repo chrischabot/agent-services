@@ -801,6 +801,48 @@ pub struct RadarSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadarDeliveryInput {
+    pub run_id: String,
+    pub language: String,
+    pub format: String,
+    pub channel: String,
+    pub recipient_ref: String,
+    pub idempotency_key: Option<String>,
+    pub telegram_bot_token: Option<String>,
+    pub email_account_id: Option<String>,
+    pub email_api_token: Option<String>,
+    pub email_from: Option<String>,
+    pub api_base: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadarDelivery {
+    pub id: String,
+    pub run_id: String,
+    pub summary_id: String,
+    pub channel: String,
+    pub recipient_ref: String,
+    pub status: String,
+    pub policy_decision_id: Option<String>,
+    pub cost_decision_id: Option<String>,
+    pub delivery_attempt_id: Option<String>,
+    pub quiet_hours_deferred_until: Option<String>,
+    pub idempotency_key: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadarDeliveryReport {
+    pub delivery: RadarDelivery,
+    pub summary: RadarSummary,
+    pub channel_message: Option<ChannelMessage>,
+    pub channel_delivery_attempt: Option<ChannelDeliveryAttempt>,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarAuditFinding {
     pub severity: String,
     pub code: String,
@@ -2927,6 +2969,7 @@ pub struct OpsSnapshot {
     pub health: HealthReport,
     pub x_stats: XStatsReport,
     pub radar_source_quality: Vec<RadarSourceQuality>,
+    pub radar_deliveries: Vec<RadarDelivery>,
     pub jobs: Vec<WikiJob>,
     pub edge_events: Vec<EdgeEvent>,
     pub cursors: Vec<CursorState>,
@@ -4356,6 +4399,7 @@ impl Store {
         self.apply_schema_migration(11, "radar_source_quality_windows", false, None, |conn| {
             migrate_radar_source_quality_windows_on(conn)
         })?;
+        repair_radar_source_quality_run_scope_on(&self.conn)?;
         self.conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
             params![SCHEMA_VERSION.to_string()],
@@ -5460,6 +5504,14 @@ impl Store {
         if non_healthy_radar_source_quality > 0 {
             warnings.push(format!(
                 "Radar source quality: {non_healthy_radar_source_quality} non-healthy source-quality window(s)"
+            ));
+        }
+        let non_successful_radar_deliveries = self.count_query(
+            "SELECT COUNT(*) FROM radar_deliveries WHERE status IN ('failed', 'blocked')",
+        )?;
+        if non_successful_radar_deliveries > 0 {
+            warnings.push(format!(
+                "Radar delivery: {non_successful_radar_deliveries} failed or blocked delivery attempt(s)"
             ));
         }
         Ok(HealthReport {
@@ -19602,6 +19654,332 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn deliver_radar_summary(&self, input: RadarDeliveryInput) -> Result<RadarDeliveryReport> {
+        validate_id(&input.run_id)?;
+        let language = normalize_radar_summary_language(&input.language)?;
+        let format = normalize_radar_summary_format(&input.format)?;
+        let channel = normalize_radar_delivery_channel(&input.channel)?;
+        let recipient_ref = normalize_radar_delivery_recipient(&channel, &input.recipient_ref)?;
+        let summary = self
+            .read_radar_summary(&input.run_id, &language, &format)?
+            .with_context(|| format!("radar summary not found for run {}", input.run_id))?;
+        if summary.audit_status != "audit_ok" {
+            bail!(
+                "radar delivery requires audit_ok summary; found {}",
+                summary.audit_status
+            );
+        }
+        let idempotency_key = normalize_radar_delivery_idempotency_key(
+            input.idempotency_key.as_deref(),
+            &summary,
+            &channel,
+            &recipient_ref,
+        )?;
+        let delivery =
+            if let Some(existing) = self.get_radar_delivery_by_idempotency_key(&idempotency_key)? {
+                if matches!(existing.status.as_str(), "sent" | "pending" | "deferred") {
+                    return self.radar_delivery_report(existing, summary, true);
+                }
+                existing
+            } else {
+                self.insert_radar_delivery_start(
+                    &input.run_id,
+                    &summary.id,
+                    &channel,
+                    &recipient_ref,
+                    &idempotency_key,
+                )?
+            };
+        let send_result = (|| -> Result<(ChannelMessage, ChannelDeliveryAttempt)> {
+            match channel.as_str() {
+                "telegram" => {
+                    if !self.channel_subject_can_send("telegram", &recipient_ref)? {
+                        bail!("telegram subject is not authorized to send: {recipient_ref}");
+                    }
+                    let bot_token = input
+                        .telegram_bot_token
+                        .as_deref()
+                        .context("telegram radar delivery requires telegram_bot_token")?;
+                    let chat_id = recipient_ref
+                        .strip_prefix("telegram:chat:")
+                        .unwrap_or(&recipient_ref);
+                    self.send_telegram_message(
+                        bot_token,
+                        chat_id,
+                        &summary.body_markdown,
+                        input.api_base.as_deref(),
+                    )
+                    .map(|report| (report.message, report.delivery))
+                }
+                "email" => {
+                    if !self.channel_subject_can_send("email", &recipient_ref)? {
+                        bail!("email subject is not authorized to send: {recipient_ref}");
+                    }
+                    let account_id = input
+                        .email_account_id
+                        .as_deref()
+                        .context("email radar delivery requires email_account_id")?;
+                    let api_token = input
+                        .email_api_token
+                        .as_deref()
+                        .context("email radar delivery requires email_api_token")?;
+                    let from = input
+                        .email_from
+                        .as_deref()
+                        .context("email radar delivery requires email_from")?;
+                    let to = recipient_ref
+                        .strip_prefix("email:")
+                        .unwrap_or(&recipient_ref);
+                    self.send_cloudflare_email(
+                        account_id,
+                        api_token,
+                        from,
+                        to,
+                        &summary.title,
+                        &summary.body_markdown,
+                        None,
+                        None,
+                        input.api_base.as_deref(),
+                    )
+                    .map(|report| (report.message, report.delivery))
+                }
+                other => bail!("unsupported radar delivery channel: {other}"),
+            }
+        })();
+
+        match send_result {
+            Ok((message, attempt)) => {
+                let status = if attempt.ok { "sent" } else { "failed" };
+                let error =
+                    if attempt.ok {
+                        None
+                    } else {
+                        Some(attempt.error.clone().unwrap_or_else(|| {
+                            format!("provider status {}", attempt.provider_status)
+                        }))
+                    };
+                let delivery = self.update_radar_delivery_result(
+                    &delivery.id,
+                    status,
+                    Some(&attempt.id),
+                    error.as_deref(),
+                )?;
+                self.refresh_radar_delivery_count(&input.run_id, attempt.ok)?;
+                Ok(RadarDeliveryReport {
+                    delivery,
+                    summary,
+                    channel_message: Some(message),
+                    channel_delivery_attempt: Some(attempt),
+                    idempotent_replay: false,
+                })
+            }
+            Err(error) => {
+                let error_text = sanitize_radar_delivery_error(&error.to_string())?;
+                let delivery = self.update_radar_delivery_result(
+                    &delivery.id,
+                    "blocked",
+                    None,
+                    Some(&error_text),
+                )?;
+                self.refresh_radar_delivery_count(&input.run_id, false)?;
+                Ok(RadarDeliveryReport {
+                    delivery,
+                    summary,
+                    channel_message: None,
+                    channel_delivery_attempt: None,
+                    idempotent_replay: false,
+                })
+            }
+        }
+    }
+
+    pub fn list_radar_deliveries(&self, run_id: Option<&str>) -> Result<Vec<RadarDelivery>> {
+        if let Some(run_id) = run_id {
+            validate_id(run_id)?;
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT id, run_id, summary_id, channel, recipient_ref, status,
+                       policy_decision_id, cost_decision_id, delivery_attempt_id,
+                       quiet_hours_deferred_until, idempotency_key, error, created_at, updated_at
+                FROM radar_deliveries
+                WHERE run_id = ?1
+                ORDER BY updated_at DESC
+                "#,
+            )?;
+            return rows(stmt.query_map(params![run_id], radar_delivery_from_row)?);
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, run_id, summary_id, channel, recipient_ref, status,
+                   policy_decision_id, cost_decision_id, delivery_attempt_id,
+                   quiet_hours_deferred_until, idempotency_key, error, created_at, updated_at
+            FROM radar_deliveries
+            ORDER BY updated_at DESC
+            "#,
+        )?;
+        rows(stmt.query_map([], radar_delivery_from_row)?)
+    }
+
+    fn get_radar_delivery_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<RadarDelivery>> {
+        validate_query(idempotency_key)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, run_id, summary_id, channel, recipient_ref, status,
+                       policy_decision_id, cost_decision_id, delivery_attempt_id,
+                       quiet_hours_deferred_until, idempotency_key, error, created_at, updated_at
+                FROM radar_deliveries
+                WHERE idempotency_key = ?1
+                "#,
+                params![idempotency_key],
+                radar_delivery_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn get_radar_delivery(&self, id: &str) -> Result<Option<RadarDelivery>> {
+        validate_id(id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, run_id, summary_id, channel, recipient_ref, status,
+                       policy_decision_id, cost_decision_id, delivery_attempt_id,
+                       quiet_hours_deferred_until, idempotency_key, error, created_at, updated_at
+                FROM radar_deliveries
+                WHERE id = ?1
+                "#,
+                params![id],
+                radar_delivery_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn insert_radar_delivery_start(
+        &self,
+        run_id: &str,
+        summary_id: &str,
+        channel: &str,
+        recipient_ref: &str,
+        idempotency_key: &str,
+    ) -> Result<RadarDelivery> {
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.conn.execute(
+            r#"
+            INSERT INTO radar_deliveries
+              (id, run_id, summary_id, channel, recipient_ref, status,
+               policy_decision_id, cost_decision_id, delivery_attempt_id,
+               quiet_hours_deferred_until, idempotency_key, error, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, NULL, NULL, NULL, ?6, NULL, ?7, ?7)
+            "#,
+            params![
+                id,
+                run_id,
+                summary_id,
+                channel,
+                recipient_ref,
+                idempotency_key,
+                timestamp
+            ],
+        )?;
+        self.get_radar_delivery(&id)?
+            .with_context(|| format!("inserted radar delivery not found: {id}"))
+    }
+
+    fn update_radar_delivery_result(
+        &self,
+        id: &str,
+        status: &str,
+        delivery_attempt_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<RadarDelivery> {
+        validate_id(id)?;
+        validate_radar_delivery_status(status)?;
+        if let Some(delivery_attempt_id) = delivery_attempt_id {
+            validate_id(delivery_attempt_id)?;
+        }
+        if let Some(error) = error {
+            validate_notes(error)?;
+        }
+        let updated_at = now();
+        self.conn.execute(
+            r#"
+            UPDATE radar_deliveries
+            SET status = ?2,
+                delivery_attempt_id = ?3,
+                error = ?4,
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+            params![id, status, delivery_attempt_id, error, updated_at],
+        )?;
+        self.get_radar_delivery(id)?
+            .with_context(|| format!("radar delivery not found after update: {id}"))
+    }
+
+    fn refresh_radar_delivery_count(&self, run_id: &str, delivered: bool) -> Result<()> {
+        validate_id(run_id)?;
+        let delivery_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM radar_deliveries WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        let updated_at = now();
+        self.conn.execute(
+            r#"
+            UPDATE radar_runs
+            SET delivery_count = ?2,
+                status = CASE
+                    WHEN ?3 = 1 AND status IN ('scored', 'summarized', 'delivered') THEN 'delivered'
+                    ELSE status
+                END,
+                stage = CASE
+                    WHEN ?3 = 1 AND stage IN ('scored', 'summarized', 'delivered') THEN 'delivered'
+                    ELSE stage
+                END,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![run_id, delivery_count, bool_to_i64(delivered), updated_at],
+        )?;
+        Ok(())
+    }
+
+    fn radar_delivery_report(
+        &self,
+        delivery: RadarDelivery,
+        summary: RadarSummary,
+        idempotent_replay: bool,
+    ) -> Result<RadarDeliveryReport> {
+        let channel_delivery_attempt = delivery
+            .delivery_attempt_id
+            .as_deref()
+            .map(|id| {
+                self.get_channel_delivery_attempt(id)?
+                    .with_context(|| format!("channel delivery attempt not found: {id}"))
+            })
+            .transpose()?;
+        let channel_message = channel_delivery_attempt
+            .as_ref()
+            .map(|attempt| {
+                self.get_channel_message(&attempt.message_id)?
+                    .with_context(|| format!("channel message not found: {}", attempt.message_id))
+            })
+            .transpose()?;
+        Ok(RadarDeliveryReport {
+            delivery,
+            summary,
+            channel_message,
+            channel_delivery_attempt,
+            idempotent_replay,
+        })
+    }
+
     pub fn list_radar_items(&self, run_id: &str) -> Result<Vec<RadarItem>> {
         validate_id(run_id)?;
         let mut stmt = self.conn.prepare(
@@ -20971,6 +21349,7 @@ impl Store {
             health: self.health()?,
             x_stats: self.x_stats()?,
             radar_source_quality: self.list_all_radar_source_quality()?,
+            radar_deliveries: self.list_radar_deliveries(None)?,
             jobs: self.list_wiki_jobs()?,
             edge_events: self.list_edge_events()?,
             cursors: self.list_cursors()?,
@@ -28341,6 +28720,29 @@ fn migrate_radar_source_quality_windows_on(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn repair_radar_source_quality_run_scope_on(conn: &Connection) -> Result<()> {
+    ensure_radar_schema_on(conn)?;
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'radar_source_quality'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(create_sql) = create_sql else {
+        return Ok(());
+    };
+    let normalized = create_sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if !normalized.contains("unique(run_id,source_kind,locator,window_start,window_end)") {
+        migrate_radar_source_quality_windows_on(conn)?;
+    }
+    Ok(())
+}
+
 fn ensure_radar_schema_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -29812,6 +30214,25 @@ fn radar_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RadarSumm
     })
 }
 
+fn radar_delivery_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RadarDelivery> {
+    Ok(RadarDelivery {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        summary_id: row.get(2)?,
+        channel: row.get(3)?,
+        recipient_ref: row.get(4)?,
+        status: row.get(5)?,
+        policy_decision_id: row.get(6)?,
+        cost_decision_id: row.get(7)?,
+        delivery_attempt_id: row.get(8)?,
+        quiet_hours_deferred_until: row.get(9)?,
+        idempotency_key: row.get(10)?,
+        error: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
 fn normalize_radar_profile_input(mut input: RadarProfileInput) -> Result<RadarProfileInput> {
     validate_key(&input.name)?;
     input.name = input.name.trim().to_string();
@@ -30260,6 +30681,70 @@ fn normalize_radar_summary_format(format: &str) -> Result<String> {
         "markdown" => Ok(format),
         _ => bail!("radar summary format must be markdown"),
     }
+}
+
+fn normalize_radar_delivery_channel(channel: &str) -> Result<String> {
+    let channel = channel.trim().to_ascii_lowercase();
+    match channel.as_str() {
+        "telegram" | "email" => Ok(channel),
+        _ => bail!("radar delivery channel must be telegram or email"),
+    }
+}
+
+fn normalize_radar_delivery_recipient(channel: &str, recipient_ref: &str) -> Result<String> {
+    match channel {
+        "telegram" => {
+            let chat_id = recipient_ref
+                .trim()
+                .strip_prefix("telegram:chat:")
+                .unwrap_or_else(|| recipient_ref.trim());
+            validate_query(chat_id)?;
+            Ok(format!("telegram:chat:{chat_id}"))
+        }
+        "email" => {
+            let email = normalize_email_address(recipient_ref)
+                .context("invalid radar delivery email recipient")?;
+            Ok(format!("email:{email}"))
+        }
+        other => bail!("unsupported radar delivery channel: {other}"),
+    }
+}
+
+fn normalize_radar_delivery_idempotency_key(
+    explicit: Option<&str>,
+    summary: &RadarSummary,
+    channel: &str,
+    recipient_ref: &str,
+) -> Result<String> {
+    if let Some(explicit) = explicit {
+        validate_query(explicit)?;
+        return Ok(explicit.trim().to_string());
+    }
+    Ok(format!(
+        "radar-delivery-{}",
+        &sha256(
+            format!(
+                "{}\n{}\n{}\n{}\n{}",
+                summary.run_id, summary.id, summary.language, channel, recipient_ref
+            )
+            .as_bytes()
+        )[..32]
+    ))
+}
+
+fn validate_radar_delivery_status(status: &str) -> Result<()> {
+    match status {
+        "pending" | "sent" | "failed" | "blocked" | "deferred" => Ok(()),
+        other => bail!("unsupported radar delivery status: {other}"),
+    }
+}
+
+fn sanitize_radar_delivery_error(error: &str) -> Result<String> {
+    let mut sanitized = redact_secret_like_text(error);
+    sanitized = sanitized.replace('\0', "");
+    let sanitized = excerpt(sanitized.trim(), 1_000);
+    validate_notes(&sanitized)?;
+    Ok(sanitized)
 }
 
 fn radar_score_status_counts(scores: &[RadarScore]) -> BTreeMap<String, usize> {
@@ -42123,6 +42608,106 @@ mod tests {
     }
 
     #[test]
+    fn severe_schema_reopens_recorded_v11_radar_source_quality_with_old_unique() {
+        // CLAIM: homes that already recorded migration 11 before run-scoped
+        // uniqueness was hardened are repaired on open, not bricked at the first
+        // radar source-quality write.
+        // ORACLE: a schema_version=11 database with `run_id` present but the old
+        // source/window-only unique constraint accepts two rows for the same
+        // source/window in different runs after Store::open.
+        // SEVERITY: Severe because this exact stale-v11 shape appears in copied
+        // production homes and turns radar runs into runtime SQL failures.
+        let paths = test_paths("schema-fixture-radar-source-quality-stale-v11");
+        paths.ensure().unwrap();
+        let conn = Connection::open(&paths.db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '11');
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              destructive INTEGER NOT NULL DEFAULT 0,
+              backup_id TEXT,
+              applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations
+              (version, name, destructive, backup_id, applied_at)
+            VALUES
+              (11, 'radar_source_quality_windows', 0, NULL, '2026-06-24T00:00:00Z');
+            CREATE TABLE radar_source_quality (
+              id TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL,
+              locator TEXT NOT NULL,
+              window_start TEXT NOT NULL,
+              window_end TEXT NOT NULL,
+              raw_count INTEGER NOT NULL DEFAULT 0,
+              accepted_count INTEGER NOT NULL DEFAULT 0,
+              average_score REAL,
+              score_p50 REAL,
+              score_p90 REAL,
+              signal_to_noise REAL,
+              duplicate_rate REAL,
+              delivery_contribution_count INTEGER NOT NULL DEFAULT 0,
+              failure_count INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              run_id TEXT NOT NULL DEFAULT '',
+              UNIQUE(source_kind, locator, window_start, window_end)
+            );
+            INSERT INTO radar_source_quality
+              (id, run_id, source_kind, locator, window_start, window_end,
+               raw_count, accepted_count, status, created_at)
+            VALUES
+              ('legacy-v11-quality', 'old-run', 'rss', 'https://example.com/feed.xml',
+               '2026-06-24T00:00:00Z', '2026-06-24T01:00:00Z',
+               1, 1, 'healthy', '2026-06-24T01:00:00Z');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(paths).unwrap();
+        let create_sql: String = store
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'radar_source_quality'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized = create_sql
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        assert!(
+            normalized.contains("unique(run_id,source_kind,locator,window_start,window_end)"),
+            "{create_sql}"
+        );
+        for run_id in ["run-a", "run-b"] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO radar_source_quality
+                      (id, run_id, source_kind, locator, window_start, window_end,
+                       raw_count, accepted_count, status, created_at)
+                    VALUES
+                      (?1, ?2, 'rss', 'https://example.com/feed.xml',
+                       '2026-06-24T02:00:00Z', '2026-06-24T03:00:00Z',
+                       1, 1, 'healthy', '2026-06-24T03:00:00Z')
+                    "#,
+                    params![format!("quality-{run_id}"), run_id],
+                )
+                .unwrap();
+        }
+        let rows = store.list_all_radar_source_quality().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().any(|row| row.id == "legacy-v11-quality"));
+    }
+
+    #[test]
     fn severe_import_run_ledger_redacts_errors_and_surfaces_in_ops() {
         // CLAIM: import attempts leave durable aggregate audit records without
         // storing raw transcript content or secret-bearing error strings.
@@ -46171,6 +46756,443 @@ reason = "RSS live fetch denied for radar test"
             error.contains("requires at least one selected score"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn severe_radar_manual_delivery_links_summary_to_authorized_channel_attempt_idempotently() {
+        // CLAIM: manual radar delivery is a real bridge from an audit-ok radar
+        // summary to an authorized channel send, with durable radar and channel
+        // delivery rows.
+        // ORACLE: local HTTP provider receives the send, radar_deliveries links
+        // to channel_delivery_attempts, run delivery_count advances once, and
+        // replaying the same idempotency key does not send or insert again.
+        // SEVERITY: Severe because a rendered digest can look delivered unless
+        // durable attempt state proves the provider path was actually reached.
+        let store = test_store("radar-manual-delivery");
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Radar delivery agent launch".to_string(),
+                url: "https://example.com/radar-delivery-agent-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Agent launch source card supports radar delivery proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "delivery-radar".to_string(),
+                description: "Delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "delivery agent" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        let summary = store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+        let api = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+
+        let delivered = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-test-key".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some(api),
+            })
+            .unwrap();
+
+        assert_eq!(delivered.summary.id, summary.id);
+        assert_eq!(delivered.delivery.status, "sent");
+        assert_eq!(delivered.delivery.channel, "telegram");
+        assert_eq!(delivered.delivery.recipient_ref, "telegram:chat:123");
+        assert_eq!(delivered.delivery.error, None);
+        assert!(!delivered.idempotent_replay);
+        let attempt = delivered
+            .channel_delivery_attempt
+            .as_ref()
+            .expect("channel attempt");
+        assert_eq!(
+            delivered.delivery.delivery_attempt_id.as_deref(),
+            Some(attempt.id.as_str())
+        );
+        assert!(attempt.ok);
+        let message = delivered.channel_message.as_ref().expect("channel message");
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.channel, "telegram");
+        assert!(message.body.contains("GENERATED_RADAR_SUMMARY"));
+        assert!(message.body.contains(&card.id));
+
+        let run = store.read_radar_run(&report.run.id).unwrap().unwrap();
+        assert_eq!(run.delivery_count, 1);
+        assert_eq!(run.stage, "delivered");
+        assert_eq!(
+            store
+                .list_radar_deliveries(Some(&report.run.id))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let replayed = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:123".to_string(),
+                idempotency_key: Some("radar-delivery-test-key".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some("http://127.0.0.1:9".to_string()),
+            })
+            .unwrap();
+        assert!(replayed.idempotent_replay);
+        assert_eq!(replayed.delivery.id, delivered.delivery.id);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_radar_deliveries(Some(&report.run.id))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn severe_radar_delivery_blocks_without_authorization_or_policy_side_effect_confusion() {
+        // CLAIM: radar delivery refuses unauthorized or policy-denied sends before
+        // provider/channel messages, while still leaving an inspectable radar
+        // delivery row and policy decision where applicable.
+        // ORACLE: no channel messages or channel attempts are written, blocked
+        // radar delivery rows contain redacted errors, and policy decisions record
+        // deny effects.
+        // SEVERITY: Severe because delivery is a cross-service trust boundary.
+        let store = test_store("radar-delivery-blocked");
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar blocked delivery launch".to_string(),
+                url: "https://example.com/radar-blocked-delivery-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports blocked radar delivery proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "blocked-delivery-radar".to_string(),
+                description: "Blocked delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "blocked delivery" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+
+        let unauthorized = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-unauthorized".to_string()),
+                telegram_bot_token: Some("TOKEN_SHOULD_NOT_LEAK_123".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some("http://127.0.0.1:9".to_string()),
+            })
+            .unwrap();
+        assert_eq!(unauthorized.delivery.status, "blocked");
+        assert!(
+            unauthorized
+                .delivery
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("not authorized")
+        );
+        assert!(
+            !serde_json::to_string(&unauthorized)
+                .unwrap()
+                .contains("TOKEN_SHOULD_NOT_LEAK")
+        );
+        assert!(unauthorized.channel_message.is_none());
+        assert!(unauthorized.channel_delivery_attempt.is_none());
+        assert!(store.list_channel_messages().unwrap().is_empty());
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "deny-radar-delivery-send"
+effect = "deny"
+action = "channel.send"
+reason = "radar delivery disabled during test"
+provider = "telegram"
+channel = "telegram"
+"#,
+        );
+        let denied = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-policy-denied".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some("http://127.0.0.1:9".to_string()),
+            })
+            .unwrap();
+        assert_eq!(denied.delivery.status, "blocked");
+        assert!(
+            denied
+                .delivery
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("policy denied channel.send")
+        );
+        assert!(store.list_channel_messages().unwrap().is_empty());
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_radar_deliveries(Some(&report.run.id))
+                .unwrap()
+                .len(),
+            2
+        );
+        let decisions = store.list_policy_decisions(10).unwrap();
+        assert!(decisions.iter().any(|decision| {
+            decision.action == "channel.send" && !decision.allowed && decision.effect == "deny"
+        }));
+    }
+
+    #[test]
+    fn severe_radar_delivery_blocked_idempotency_key_can_retry_after_authorization() {
+        // CLAIM: an authorization mistake creates inspectable blocked evidence,
+        // but does not permanently poison the default/idempotent retry path after
+        // the operator fixes channel authorization.
+        // ORACLE: the second call with the same idempotency key reaches the local
+        // provider, updates the original radar delivery row to sent, and does not
+        // report an idempotent replay.
+        // SEVERITY: Severe because "blocked once, blocked forever" would make
+        // delivery remediation look successful in logs while never reaching a
+        // provider.
+        let store = test_store("radar-delivery-blocked-retry");
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar retry delivery launch".to_string(),
+                url: "https://example.com/radar-retry-delivery-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports retryable radar delivery proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "retry-delivery-radar".to_string(),
+                description: "Retry delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "retry delivery" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+
+        let blocked = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-retry-key".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some("http://127.0.0.1:9".to_string()),
+            })
+            .unwrap();
+        assert_eq!(blocked.delivery.status, "blocked");
+        assert!(blocked.channel_delivery_attempt.is_none());
+
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        let api = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+        let delivered = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-retry-key".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some(api),
+            })
+            .unwrap();
+        assert_eq!(delivered.delivery.id, blocked.delivery.id);
+        assert_eq!(delivered.delivery.status, "sent");
+        assert!(!delivered.idempotent_replay);
+        assert!(delivered.channel_delivery_attempt.is_some());
+        assert_eq!(
+            store
+                .list_radar_deliveries(Some(&report.run.id))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn severe_radar_delivery_provider_failure_is_failed_attempt_not_successful_delivery() {
+        // CLAIM: provider failures are durable failed radar delivery attempts,
+        // not silent success and not lost channel-delivery state.
+        // ORACLE: HTTP 429 produces a failed radar delivery linked to a failed
+        // channel delivery attempt with retry_at; the run is not promoted to
+        // delivered.
+        // SEVERITY: Severe because provider failure is the easiest way for a
+        // delivery system to become a fake success counter.
+        let store = test_store("radar-delivery-provider-failure");
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar failed delivery launch".to_string(),
+                url: "https://example.com/radar-failed-delivery-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports failed radar delivery proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "failed-delivery-radar".to_string(),
+                description: "Failed delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "failed delivery" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+        let api = mock_status_server(
+            "429 Too Many Requests",
+            "retry-after: 60\r\n",
+            r#"{"ok":false,"description":"Too Many Requests"}"#,
+            "application/json",
+        );
+
+        let failed = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-provider-failure".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some(api),
+            })
+            .unwrap();
+        assert_eq!(failed.delivery.status, "failed");
+        let attempt = failed
+            .channel_delivery_attempt
+            .expect("failed channel attempt");
+        assert!(!attempt.ok);
+        assert_eq!(attempt.provider_status, 429);
+        assert!(attempt.retry_at.is_some());
+        assert_eq!(
+            failed.delivery.delivery_attempt_id.as_deref(),
+            Some(attempt.id.as_str())
+        );
+        let message = failed.channel_message.expect("failed channel message");
+        assert_eq!(message.status, "failed");
+        let run = store.read_radar_run(&report.run.id).unwrap().unwrap();
+        assert_eq!(run.delivery_count, 1);
+        assert_eq!(run.stage, "summarized");
     }
 
     #[test]

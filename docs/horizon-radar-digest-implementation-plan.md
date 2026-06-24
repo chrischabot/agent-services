@@ -1137,16 +1137,18 @@ Checklist:
 - [ ] Add retry with bounded attempts and dead-letter behavior.
 - [ ] Add delivery attempt records linked to `radar_deliveries`.
 - [ ] Add delivery status to ops snapshot.
-- [ ] Add manual `radar deliver` confirmation path.
+- [x] Add manual `radar deliver` confirmation path with CLI/MCP/slash surfaces,
+      durable `radar_deliveries`, idempotency, authorization/policy gates,
+      provider-failure recording, and local severe tests.
 - [ ] Add scheduled delivery only after manual delivery is proven.
 
 Anti-mirage gate:
 
-- [ ] Generating a summary is not delivery.
+- [x] Generating a summary is not delivery.
 - [ ] Sending to a test chat/address is not production delivery unless it uses
       the real Arcwell authorization, policy, cost, delivery-attempt, and retry
       surfaces.
-- [ ] A failed delivery cannot be hidden by marking the run completed unless
+- [x] A failed delivery cannot be hidden by marking the run completed unless
       delivery was explicitly optional.
 
 Production-data proof:
@@ -1213,9 +1215,14 @@ Production-data proof:
       windows through CLI/MCP/slash/resource access and are severe-tested for
       thin history, decay/failure labels, hostile locators, ranking, and invalid
       bounds.
+- [x] Repeated live-run source-quality ranking proof passed at
+      `.arcwell-dev/proofs/radar-source-quality-trends-proof-20260624T090251Z-4856`:
+      two public GitHub/arXiv/Hacker News runs wrote 50 radar items/scores, six
+      source-quality windows, three trend rows, clean audits, healthy
+      source-health, and cursors for all three public source families.
 - [ ] Run at least seven days of real scheduled or manually repeated
       production radar runs before claiming decay/quality trend behavior.
-- [ ] Show at least one source-quality ranking generated from real local run
+- [x] Show at least one source-quality ranking generated from real local run
       history.
 - [ ] Show at least one recommended source and one overlap warning, with the
       local evidence used.
@@ -1532,7 +1539,7 @@ Exit gate:
 
 ### Phase 6: Delivery And Scheduling
 
-- [ ] Manual authorized delivery.
+- [x] Manual authorized delivery.
 - [ ] Quiet-hours deferral.
 - [ ] Retry/dead-letter.
 - [ ] Scheduled worker runs.

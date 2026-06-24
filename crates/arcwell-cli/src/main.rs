@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
     AppPaths, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
-    RadarProfileInput, RenderedPageSnapshotInput, ResearchActiveFactCheckInput,
+    RadarDeliveryInput, RadarProfileInput, RenderedPageSnapshotInput, ResearchActiveFactCheckInput,
     ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
     ResearchConvergenceProviderSearchInput, ResearchConvergenceStartInput,
     ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
@@ -974,6 +974,14 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
     ("radar-stage", SlashAliasTarget::Mcp("radar_stage_read")),
     ("radar-summarize", SlashAliasTarget::Mcp("radar_summarize")),
     ("radar-summary", SlashAliasTarget::Mcp("radar_summary_read")),
+    (
+        "radar-deliver",
+        SlashAliasTarget::Mcp("radar_deliver_summary"),
+    ),
+    (
+        "radar-deliveries",
+        SlashAliasTarget::Mcp("radar_delivery_list"),
+    ),
     ("radar-audit", SlashAliasTarget::Mcp("radar_audit_run")),
     (
         "radar-source-quality",
@@ -2255,6 +2263,33 @@ enum RadarSubcommand {
         language: String,
         #[arg(long, default_value = "markdown")]
         format: String,
+    },
+    Deliver {
+        run_id: String,
+        #[arg(long, default_value = "telegram")]
+        channel: String,
+        #[arg(long)]
+        recipient: String,
+        #[arg(long, default_value = "en")]
+        language: String,
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long)]
+        bot_token: Option<String>,
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long)]
+        api_token: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        api_base: Option<String>,
+    },
+    Deliveries {
+        #[arg(long)]
+        run_id: Option<String>,
     },
     Audit {
         run_id: String,
@@ -3733,6 +3768,62 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
             language,
             format,
         } => print_json(&store.read_radar_summary(&run_id, &language, &format)?),
+        RadarSubcommand::Deliver {
+            run_id,
+            channel,
+            recipient,
+            language,
+            format,
+            idempotency_key,
+            bot_token,
+            account_id,
+            api_token,
+            from,
+            api_base,
+        } => {
+            let channel_normalized = channel.trim().to_ascii_lowercase();
+            let telegram_bot_token = if channel_normalized == "telegram" {
+                Some(telegram_bot_token(&store, bot_token.as_deref())?)
+            } else {
+                None
+            };
+            let email_account_id = if channel_normalized == "email" {
+                Some(cloudflare_account_id(&store, account_id.as_deref())?)
+            } else {
+                None
+            };
+            let email_api_token = if channel_normalized == "email" {
+                Some(cloudflare_api_token(&store, api_token.as_deref())?)
+            } else {
+                None
+            };
+            let email_from = if channel_normalized == "email" {
+                Some(
+                    from.as_deref()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| agent_email_from(&store).ok())
+                        .unwrap_or_else(|| "agent@example.com".to_string()),
+                )
+            } else {
+                None
+            };
+            print_json(&store.deliver_radar_summary(RadarDeliveryInput {
+                run_id,
+                language,
+                format,
+                channel,
+                recipient_ref: recipient,
+                idempotency_key,
+                telegram_bot_token,
+                email_account_id,
+                email_api_token,
+                email_from,
+                api_base,
+            })?)
+        }
+        RadarSubcommand::Deliveries { run_id } => {
+            print_json(&store.list_radar_deliveries(run_id.as_deref())?)
+        }
         RadarSubcommand::Audit { run_id } => print_json(&store.audit_radar_run(&run_id)?),
         RadarSubcommand::SourceQuality { run_id } => {
             print_json(&store.list_radar_source_quality(&run_id)?)
@@ -5729,6 +5820,11 @@ fn render_ops_ui_with_options(
         .iter()
         .filter(|attempt| !attempt.ok)
         .count();
+    let failed_radar_deliveries = snapshot
+        .radar_deliveries
+        .iter()
+        .filter(|delivery| matches!(delivery.status.as_str(), "failed" | "blocked"))
+        .count();
     let health_score = ops_health_score(snapshot);
     let mut html = String::new();
     html.push_str(
@@ -5794,11 +5890,13 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Sources", snapshot.watch_sources.len()),
         ("Source health", snapshot.source_health.len()),
         ("Radar source quality", snapshot.radar_source_quality.len()),
+        ("Radar deliveries", snapshot.radar_deliveries.len()),
         ("Source cards", snapshot.source_cards.len()),
         ("Projects", snapshot.projects.len()),
         ("Project statuses", snapshot.project_status_snapshots.len()),
         ("Channels", snapshot.channel_messages.len()),
         ("Telegram failures", failed_deliveries),
+        ("Radar delivery failures", failed_radar_deliveries),
         ("Import runs", snapshot.import_runs.len()),
         ("Memory candidates", snapshot.memory_candidates.len()),
         ("Procedure candidates", snapshot.procedure_candidates.len()),
@@ -5983,6 +6081,38 @@ code,pre{white-space:pre-wrap;word-break:break-word}
                         .unwrap_or_default(),
                     quality.failure_count.to_string(),
                     format!("{} -> {}", quality.window_start, quality.window_end),
+                ]
+            }),
+    ));
+    html.push_str(&ops_table(
+        "Radar Deliveries",
+        &[
+            "run",
+            "summary",
+            "channel",
+            "recipient",
+            "status",
+            "channel attempt",
+            "error",
+            "updated",
+        ],
+        filtered_radar_deliveries(snapshot, options)
+            .into_iter()
+            .take(100)
+            .map(|delivery| {
+                vec![
+                    short_id(&delivery.run_id),
+                    short_id(&delivery.summary_id),
+                    delivery.channel.clone(),
+                    delivery.recipient_ref.clone(),
+                    delivery.status.clone(),
+                    delivery
+                        .delivery_attempt_id
+                        .as_deref()
+                        .map(short_id)
+                        .unwrap_or_default(),
+                    delivery.error.clone().unwrap_or_default(),
+                    delivery.updated_at.clone(),
                 ]
             }),
     ));
@@ -6405,6 +6535,11 @@ fn ops_health_score(snapshot: &OpsSnapshot) -> OpsHealthScore {
         .iter()
         .filter(|quality| quality.status != "healthy")
         .count() as i64;
+    let failed_radar_deliveries = snapshot
+        .radar_deliveries
+        .iter()
+        .filter(|delivery| matches!(delivery.status.as_str(), "failed" | "blocked"))
+        .count() as i64;
     let bad_secrets = snapshot
         .secret_health
         .iter()
@@ -6451,6 +6586,11 @@ fn ops_health_score(snapshot: &OpsSnapshot) -> OpsHealthScore {
     if failed_deliveries > 0 {
         issues.push(format!("{failed_deliveries} failed channel deliveries"));
     }
+    if failed_radar_deliveries > 0 {
+        issues.push(format!(
+            "{failed_radar_deliveries} failed or blocked radar delivery attempt(s)"
+        ));
+    }
     if x_drift > 0 {
         issues.push(format!("{x_drift} X drift/source-health issue(s)"));
     }
@@ -6465,6 +6605,7 @@ fn ops_health_score(snapshot: &OpsSnapshot) -> OpsHealthScore {
         + (dead_edge * 8)
         + (failed_sources * 5)
         + (non_healthy_radar_source_quality * 4)
+        + (failed_radar_deliveries * 4)
         + (bad_secrets * 6)
         + (failed_deliveries * 4)
         + (x_drift * 6)
@@ -6807,6 +6948,44 @@ fn filtered_radar_source_quality<'a>(
     rows
 }
 
+fn filtered_radar_deliveries<'a>(
+    snapshot: &'a OpsSnapshot,
+    options: &OpsUiOptions,
+) -> Vec<&'a arcwell_core::RadarDelivery> {
+    let mut rows = snapshot
+        .radar_deliveries
+        .iter()
+        .filter(|delivery| {
+            matches_status(&delivery.status, options)
+                && matches_query(
+                    options,
+                    [
+                        delivery.run_id.as_str(),
+                        delivery.summary_id.as_str(),
+                        delivery.channel.as_str(),
+                        delivery.recipient_ref.as_str(),
+                        delivery.status.as_str(),
+                        delivery.delivery_attempt_id.as_deref().unwrap_or_default(),
+                        delivery.error.as_deref().unwrap_or_default(),
+                    ],
+                )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| match normalized_sort(options) {
+        "updated_asc" => left.updated_at.cmp(&right.updated_at),
+        "status" => left
+            .status
+            .cmp(&right.status)
+            .then(left.updated_at.cmp(&right.updated_at)),
+        "kind" => left
+            .channel
+            .cmp(&right.channel)
+            .then(left.recipient_ref.cmp(&right.recipient_ref)),
+        _ => right.updated_at.cmp(&left.updated_at),
+    });
+    rows
+}
+
 fn filtered_secret_health<'a>(
     snapshot: &'a OpsSnapshot,
     options: &OpsUiOptions,
@@ -7107,6 +7286,7 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                 { "uri": "arcwell://radar-profiles", "name": "Radar Profiles", "mimeType": "application/json" },
                 { "uri": "arcwell://radar-source-quality", "name": "Radar Source Quality", "mimeType": "application/json" },
                 { "uri": "arcwell://radar-source-quality-trends", "name": "Radar Source Quality Trends", "mimeType": "application/json" },
+                { "uri": "arcwell://radar-deliveries", "name": "Radar Deliveries", "mimeType": "application/json" },
                 { "uri": "arcwell://edge-events", "name": "Edge Inbox Events", "mimeType": "application/json" },
                 { "uri": "arcwell://channels", "name": "Channel Messages", "mimeType": "application/json" },
                 { "uri": "arcwell://projects", "name": "Projects", "mimeType": "application/json" },
@@ -7144,6 +7324,7 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                 "arcwell://radar-source-quality-trends" => {
                     json!(store.list_radar_source_quality_trends(2, 100)?)
                 }
+                "arcwell://radar-deliveries" => json!(store.list_radar_deliveries(None)?),
                 "arcwell://edge-events" => json!(store.list_edge_events()?),
                 "arcwell://channels" => json!(store.list_channel_messages()?),
                 "arcwell://projects" => json!(store.list_projects()?),
@@ -8713,6 +8894,75 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
                 store.read_radar_summary(&run_id, &language, &format)?
             ))
         }
+        "radar_deliver_summary" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            let channel = optional_string(&arguments, "channel", "telegram");
+            let recipient_ref = required_string(&arguments, "recipient_ref")?;
+            let language = optional_string(&arguments, "language", "en");
+            let format = optional_string(&arguments, "format", "markdown");
+            let idempotency_key = arguments
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let api_base = arguments
+                .get("api_base")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let channel_normalized = channel.trim().to_ascii_lowercase();
+            let telegram_bot_token = if channel_normalized == "telegram" {
+                Some(telegram_bot_token(
+                    &store,
+                    arguments.get("bot_token").and_then(Value::as_str),
+                )?)
+            } else {
+                None
+            };
+            let email_account_id = if channel_normalized == "email" {
+                Some(cloudflare_account_id(
+                    &store,
+                    arguments.get("account_id").and_then(Value::as_str),
+                )?)
+            } else {
+                None
+            };
+            let email_api_token = if channel_normalized == "email" {
+                Some(cloudflare_api_token(
+                    &store,
+                    arguments.get("api_token").and_then(Value::as_str),
+                )?)
+            } else {
+                None
+            };
+            let email_from = if channel_normalized == "email" {
+                Some(
+                    arguments
+                        .get("from")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .or_else(|| agent_email_from(&store).ok())
+                        .unwrap_or_else(|| "agent@example.com".to_string()),
+                )
+            } else {
+                None
+            };
+            Ok(json!(store.deliver_radar_summary(RadarDeliveryInput {
+                run_id,
+                language,
+                format,
+                channel,
+                recipient_ref,
+                idempotency_key,
+                telegram_bot_token,
+                email_account_id,
+                email_api_token,
+                email_from,
+                api_base,
+            })?))
+        }
+        "radar_delivery_list" => {
+            let run_id = arguments.get("run_id").and_then(Value::as_str);
+            Ok(json!(store.list_radar_deliveries(run_id)?))
+        }
         "radar_audit_run" => {
             let run_id = required_string(&arguments, "run_id")?;
             Ok(json!(store.audit_radar_run(&run_id)?))
@@ -10220,6 +10470,29 @@ fn mcp_tools() -> Vec<Value> {
                     "Summary format; only markdown is supported.",
                 ),
             ],
+        ),
+        tool_with_schema(
+            "radar_deliver_summary",
+            "Deliver an existing audit-ok radar summary through authorized Telegram or Cloudflare Email send paths and record a durable radar delivery row linked to the channel delivery attempt. This is a manual delivery attempt, not scheduled operation.",
+            json!({
+                "run_id": string_schema("Radar run id."),
+                "recipient_ref": string_schema("Telegram chat id or email address."),
+                "channel": string_schema("telegram or email; default telegram."),
+                "language": string_schema("Language code, default en."),
+                "format": string_schema("Summary format, default markdown."),
+                "idempotency_key": string_schema("Optional stable key to prevent duplicate delivery."),
+                "bot_token": string_schema("Optional Telegram bot token; otherwise env/local secret is used."),
+                "account_id": string_schema("Optional Cloudflare account id for email delivery."),
+                "api_token": string_schema("Optional Cloudflare Email/API token for email delivery."),
+                "from": string_schema("Optional email sender address."),
+                "api_base": string_schema("Optional provider API base for authorized local/staging tests.")
+            }),
+            &["run_id", "recipient_ref"],
+        ),
+        tool(
+            "radar_delivery_list",
+            "List durable radar delivery rows, optionally filtered by run id.",
+            [("run_id", "string", "Optional radar run id.")],
         ),
         tool(
             "radar_audit_run",
@@ -11972,7 +12245,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 132);
+        assert_eq!(command_names.len(), 134);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -13402,6 +13675,68 @@ reason = "MCP secret writes are denied for this token"
                 .and_then(Value::as_bool),
             Some(true)
         );
+        call_mcp_tool(
+            &paths,
+            "channel_authorize",
+            json!({
+                "channel": "telegram",
+                "subject": "telegram:chat:123",
+                "can_send": true
+            }),
+        )
+        .unwrap();
+        let api_base = mock_base_server(r#"{"ok":true}"#, "application/json");
+        let delivery = call_mcp_tool(
+            &paths,
+            "radar_deliver_summary",
+            json!({
+                "run_id": run_id,
+                "channel": "telegram",
+                "recipient_ref": "123",
+                "bot_token": "TOKEN",
+                "api_base": api_base,
+                "idempotency_key": "mcp-radar-delivery"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            delivery.pointer("/delivery/status").and_then(Value::as_str),
+            Some("sent")
+        );
+        assert_eq!(
+            delivery
+                .pointer("/channel_delivery_attempt/ok")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            delivery
+                .pointer("/delivery/recipient_ref")
+                .and_then(Value::as_str),
+            Some("telegram:chat:123")
+        );
+        let replayed_delivery = call_mcp_tool(
+            &paths,
+            "radar_deliver_summary",
+            json!({
+                "run_id": run_id,
+                "channel": "telegram",
+                "recipient_ref": "123",
+                "bot_token": "TOKEN",
+                "api_base": "http://127.0.0.1:9",
+                "idempotency_key": "mcp-radar-delivery"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            replayed_delivery
+                .get("idempotent_replay")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let deliveries =
+            call_mcp_tool(&paths, "radar_delivery_list", json!({ "run_id": run_id })).unwrap();
+        assert_eq!(deliveries.as_array().map(Vec::len), Some(1));
 
         let queued = call_mcp_tool(
             &paths,
@@ -13478,6 +13813,8 @@ reason = "MCP secret writes are denied for this token"
             "radar_stage_read",
             "radar_summarize",
             "radar_summary_read",
+            "radar_deliver_summary",
+            "radar_delivery_list",
             "radar_audit_run",
             "radar_source_quality",
             "radar_source_quality_trends",
@@ -15306,6 +15643,100 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         assert!(html.contains("Radar Source Quality"));
         assert!(html.contains("low_signal"));
         assert!(html.contains("non-healthy radar source-quality window"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn severe_ops_ui_surfaces_radar_delivery_failures_without_raw_html() {
+        // CLAIM: Radar delivery attempts are operator-visible in ops, affect
+        // health scoring when blocked/failed, and render recipient/error text as
+        // escaped data.
+        // ORACLE: A blocked radar delivery appears in ops_snapshot and the HTML
+        // table, while hostile recipient markup never renders raw.
+        // SEVERITY: Severe because delivery failure rows are untrusted channel
+        // boundary data and hiding them would make digest delivery look healthier
+        // than it is.
+        let paths = test_paths("ops-ui-radar-delivery");
+        let store = Store::open(paths).unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar delivery ops launch".to_string(),
+                url: "https://example.com/radar-delivery-ops-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports radar delivery ops proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "ops-delivery-radar".to_string(),
+                description: "Ops delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "delivery ops" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+        let hostile_chat = "123<script>alert(1)</script>";
+        let delivery = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: hostile_chat.to_string(),
+                idempotency_key: Some("ops-radar-delivery-hostile".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some("http://127.0.0.1:9".to_string()),
+            })
+            .unwrap();
+        assert_eq!(delivery.delivery.status, "blocked");
+
+        let snapshot = store.ops_snapshot().unwrap();
+        assert_eq!(snapshot.radar_deliveries.len(), 1);
+        assert_eq!(snapshot.radar_deliveries[0].status, "blocked");
+        assert!(
+            snapshot
+                .health
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Radar delivery")
+                    && warning.contains("failed or blocked")),
+            "{:?}",
+            snapshot.health.warnings
+        );
+
+        let html = render_ops_ui_with_options(
+            &snapshot,
+            &OpsUiOptions {
+                q: Some("script".to_string()),
+                status: Some("blocked".to_string()),
+                sort: "status".to_string(),
+                detail: None,
+                notice: None,
+            },
+            None,
+            false,
+        );
+        assert!(html.contains("Radar deliveries"));
+        assert!(html.contains("Radar Deliveries"));
+        assert!(html.contains("blocked"));
+        assert!(html.contains("failed or blocked radar delivery attempt"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));
     }

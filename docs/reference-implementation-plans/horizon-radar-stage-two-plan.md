@@ -200,8 +200,8 @@ Ops:
 
 ## Proof Gates
 
-- Missing: production-data semantic/topic dedupe review, production-data balance
-  review, source recommendation, model enrichment, delivery attempts, and
+- Missing: production-data balance review, source recommendation, model
+  enrichment, live production delivery proof, scheduled delivery, and
   scheduled/recurring operation remain absent or unproven.
 - Scaffold: stage-two command names and data-model ideas exist in planning
   docs.
@@ -212,16 +212,19 @@ Ops:
   foreground and queued worker execution, provider-denial blocked runs, invalid
   enqueue, malformed balance caps, source/category dominance, semantic dedupe
   evidence preservation, same-product/different-event separation, dedupe score
-  drift, generated-summary/no-delivery boundaries, FTS drift, corrupt dedupe
-  groups, and prompt-injection-as-evidence rendering.
+  drift, generated-summary/no-delivery boundaries, manual radar delivery
+  authorization/idempotency/provider-failure boundaries, FTS drift, corrupt
+  dedupe groups, and prompt-injection-as-evidence rendering.
 - Production Data Proof: copied-home source-card projection, foreground public
-  RSS/GitHub/arXiv/Hacker News live fetch, and worker-drained public
-  RSS/GitHub/arXiv/Hacker News runs have passed real-data proof packets.
+  RSS/GitHub/arXiv/Hacker News live fetch, worker-drained public
+  RSS/GitHub/arXiv/Hacker News runs, copied-home semantic/topic dedupe review,
+  and repeated live-run source-quality ranking have passed real-data proof
+  packets.
 - Partial: Reddit has local proof but anonymous live attempts hit HTTP 403; X
   is limited to existing local source-card/canonical projections until
   authenticated live proof passes.
 - Operational: scheduled runs, retries, stale/failed source-health recovery,
-  delivery attempts, and ops controls still need proof.
+  scheduled delivery, and ops controls still need proof.
 - Done: every claimed source family satisfies the real-data gate and the docs
   distinguish fetch, digest, and delivery claims.
 

@@ -132,6 +132,9 @@ PR, implementation note, or final report:
 - [ ] Add charts and stale-state summaries for queue age, failed deliveries,
       backup freshness, source health, credential health, costs, work runs, and
       pending reviews.
+      - [x] Radar run score-distribution summaries are now persisted in run
+            metadata and visible in `ops_snapshot` plus `/ops/ui` with
+            filter/detail coverage and severe escaping tests.
 - [ ] Add live-provider probe summaries to ops only where probes are cheap,
       safe, redacted, and policy/cost aware.
 - [ ] Keep Obsidian/Markdown as the wiki editing surface; do not duplicate wiki
@@ -425,7 +428,10 @@ PR, implementation note, or final report:
       p10/p50/p90 for `heuristic_v1` rows only, `ops_snapshot` includes recent
       radar runs, `/ops/ui` renders a Radar Runs table with score columns, and
       severe tests prove the metrics are visible without relying only on
-      source-quality rows.
+      source-quality rows. `scripts/radar-worker-production-proof` now also
+      verifies the distribution in run metadata and ops over real public
+      RSS/GitHub/arXiv/Hacker News data at
+      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T101940Z-98028`.
 - [x] Add repeatable production-data scheduled-delivery proof:
       `scripts/radar-scheduled-delivery-production-proof` creates a disposable
       scheduled profile over real public RSS/GitHub/arXiv/Hacker News sources,

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
     AppPaths, DoctorOptions, ImportRunFinish, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
-    RadarDeliveryInput, RadarProfileInput, RenderedPageSnapshotInput, ResearchActiveFactCheckInput,
-    ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
+    RadarDeliveryInput, RadarProfileInput, RadarRun, RenderedPageSnapshotInput,
+    ResearchActiveFactCheckInput, ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
     ResearchConvergenceProviderSearchInput, ResearchConvergenceStartInput,
     ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
     ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
@@ -5902,6 +5902,9 @@ th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:8px;vertical-align
 th{background:#eef2f6}
 a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}
 code,pre{white-space:pre-wrap;word-break:break-word}
+.bar{display:flex;gap:2px;align-items:stretch;min-width:120px;height:12px}
+.bar span{display:block;min-width:1px;border-radius:2px}
+.bar .selected{background:#1f883d}.bar .over{background:#9a6700}.bar .below{background:#6e7781}.bar .duplicate{background:#8250df}.bar .quota{background:#bf8700}.bar .other{background:#57606a}
 .scroll{overflow:auto}
 @media (max-width:720px){main{padding:14px}h1{font-size:24px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ops-form{grid-template-columns:1fr}th,td{font-size:12px;padding:7px}}
 @media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}.muted,.metric span,.ops-form label{color:#8b949e}.metric,table,.detail,.notice,input,select,button{background:#161b22;border-color:#30363d}th,td{border-color:#30363d}th{background:#21262d}a{color:#58a6ff}}
@@ -6088,7 +6091,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
                 ]
             }),
     ));
-    html.push_str(&ops_table(
+    html.push_str(&ops_table_with_raw_columns(
         "Radar Runs",
         &[
             "run",
@@ -6096,48 +6099,44 @@ code,pre{white-space:pre-wrap;word-break:break-word}
             "raw",
             "scored",
             "selected",
+            "distribution",
             "avg score",
             "p50",
             "p90",
             "window",
         ],
-        snapshot.radar_runs.iter().take(100).map(|run| {
-            let distribution = run
-                .metadata
-                .get("score_distribution")
-                .unwrap_or(&Value::Null);
-            vec![
-                short_id(&run.id),
-                format!("{} / {}", run.status, run.stage),
-                run.raw_count.to_string(),
-                distribution
-                    .get("score_count")
-                    .and_then(Value::as_u64)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| run.scored_count.to_string()),
-                distribution
-                    .get("selected_count")
-                    .and_then(Value::as_u64)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| run.filtered_count.to_string()),
-                distribution
-                    .get("average")
-                    .and_then(Value::as_f64)
-                    .map(|value| format!("{value:.2}"))
-                    .unwrap_or_default(),
-                distribution
-                    .get("p50")
-                    .and_then(Value::as_f64)
-                    .map(|value| format!("{value:.2}"))
-                    .unwrap_or_default(),
-                distribution
-                    .get("p90")
-                    .and_then(Value::as_f64)
-                    .map(|value| format!("{value:.2}"))
-                    .unwrap_or_default(),
-                format!("{} -> {}", run.window_start, run.window_end),
-            ]
-        }),
+        filtered_radar_runs(snapshot, options)
+            .into_iter()
+            .take(100)
+            .map(|run| {
+                let distribution = run
+                    .metadata
+                    .get("score_distribution")
+                    .unwrap_or(&Value::Null);
+                vec![
+                    detail_link("radar-run", &run.id, &short_id(&run.id)),
+                    format!("{} / {}", run.status, run.stage),
+                    run.raw_count.to_string(),
+                    radar_distribution_u64(distribution, "score_count")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| run.scored_count.to_string()),
+                    radar_distribution_u64(distribution, "selected_count")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| run.filtered_count.to_string()),
+                    render_radar_score_bar(distribution),
+                    radar_distribution_f64(distribution, "average")
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    radar_distribution_f64(distribution, "p50")
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    radar_distribution_f64(distribution, "p90")
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    format!("{} -> {}", run.window_start, run.window_end),
+                ]
+            }),
+        &[0, 5],
     ));
     html.push_str(&ops_table(
         "Radar Source Quality",
@@ -6806,6 +6805,7 @@ fn render_ops_summary(snapshot: &OpsSnapshot, score: &OpsHealthScore) -> String 
                     .map(|quality| quality.status.as_str()),
             ),
         ),
+        ("Radar run scores", summarize_radar_run_scores(snapshot)),
         (
             "Credential statuses",
             summarize_counts(
@@ -6870,6 +6870,11 @@ fn render_ops_detail(snapshot: &OpsSnapshot, detail: &str) -> String {
             .iter()
             .find(|secret| secret.name == id)
             .and_then(|secret| serde_json::to_value(secret).ok()),
+        "radar-run" => snapshot
+            .radar_runs
+            .iter()
+            .find(|run| run.id == id)
+            .and_then(|run| serde_json::to_value(run).ok()),
         _ => None,
     };
     match value {
@@ -7042,6 +7047,39 @@ fn filtered_radar_source_quality<'a>(
             .cmp(&right.source_kind)
             .then(left.locator.cmp(&right.locator)),
         _ => right.created_at.cmp(&left.created_at),
+    });
+    rows
+}
+
+fn filtered_radar_runs<'a>(snapshot: &'a OpsSnapshot, options: &OpsUiOptions) -> Vec<&'a RadarRun> {
+    let mut rows = snapshot
+        .radar_runs
+        .iter()
+        .filter(|run| {
+            matches_status(&run.status, options)
+                && matches_query(
+                    options,
+                    [
+                        run.id.as_str(),
+                        run.profile_id.as_str(),
+                        run.status.as_str(),
+                        run.stage.as_str(),
+                        run.error.as_deref().unwrap_or_default(),
+                    ],
+                )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| match normalized_sort(options) {
+        "updated_asc" => left.updated_at.cmp(&right.updated_at),
+        "status" => left
+            .status
+            .cmp(&right.status)
+            .then(left.updated_at.cmp(&right.updated_at)),
+        "kind" => left
+            .profile_id
+            .cmp(&right.profile_id)
+            .then(left.updated_at.cmp(&right.updated_at)),
+        _ => right.updated_at.cmp(&left.updated_at),
     });
     rows
 }
@@ -7230,6 +7268,68 @@ fn summarize_x_portable_export(stats: &XStatsReport) -> String {
         }
         None => "not exported".to_string(),
     }
+}
+
+fn summarize_radar_run_scores(snapshot: &OpsSnapshot) -> String {
+    let Some(run) = snapshot
+        .radar_runs
+        .iter()
+        .find(|run| run.metadata.get("score_distribution").is_some())
+    else {
+        return "none".to_string();
+    };
+    let distribution = run
+        .metadata
+        .get("score_distribution")
+        .unwrap_or(&Value::Null);
+    format!(
+        "{} scored; selected:{} over-limit:{} below:{} duplicate:{} p50:{}",
+        radar_distribution_u64(distribution, "score_count").unwrap_or(run.scored_count as u64),
+        radar_distribution_u64(distribution, "selected_count").unwrap_or(run.filtered_count as u64),
+        radar_distribution_u64(distribution, "over_profile_limit_count").unwrap_or(0),
+        radar_distribution_u64(distribution, "below_threshold_count").unwrap_or(0),
+        radar_distribution_u64(distribution, "duplicate_count").unwrap_or(0),
+        radar_distribution_f64(distribution, "p50")
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "n/a".to_string())
+    )
+}
+
+fn render_radar_score_bar(distribution: &Value) -> String {
+    let total = radar_distribution_u64(distribution, "score_count").unwrap_or(0);
+    if total == 0 {
+        return "<span class=\"muted\">No scores</span>".to_string();
+    }
+    let selected = radar_distribution_u64(distribution, "selected_count").unwrap_or(0);
+    let over = radar_distribution_u64(distribution, "over_profile_limit_count").unwrap_or(0);
+    let below = radar_distribution_u64(distribution, "below_threshold_count").unwrap_or(0);
+    let duplicate = radar_distribution_u64(distribution, "duplicate_count").unwrap_or(0);
+    let mut html = "<div class=\"bar\" aria-label=\"radar score distribution\">".to_string();
+    for (class, count) in [
+        ("selected", selected),
+        ("over", over),
+        ("below", below),
+        ("duplicate", duplicate),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        let width = ((count as f64 / total as f64) * 100.0).clamp(1.0, 100.0);
+        html.push_str(&format!(
+            "<span class=\"{}\" title=\"{}:{}\" style=\"width:{:.1}%\"></span>",
+            class, class, count, width
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+fn radar_distribution_u64(distribution: &Value, key: &str) -> Option<u64> {
+    distribution.get(key).and_then(Value::as_u64)
+}
+
+fn radar_distribution_f64(distribution: &Value, key: &str) -> Option<f64> {
+    distribution.get(key).and_then(Value::as_f64)
 }
 
 fn detail_link(kind: &str, id: &str, label: &str) -> String {
@@ -15760,6 +15860,12 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
             snapshot.health.warnings
         );
 
+        let unfiltered_html = render_ops_ui(&snapshot);
+        assert!(unfiltered_html.contains("Radar Runs"));
+        assert!(unfiltered_html.contains("avg score"));
+        assert!(unfiltered_html.contains("aria-label=\"radar score distribution\""));
+        assert!(unfiltered_html.contains("class=\"below\""));
+
         let html = render_ops_ui_with_options(
             &snapshot,
             &OpsUiOptions {
@@ -15779,6 +15885,119 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         assert!(html.contains("low_signal"));
         assert!(html.contains("non-healthy radar source-quality window"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn severe_ops_ui_surfaces_radar_run_score_distribution() {
+        // CLAIM: Recent radar runs expose persisted heuristic score distribution
+        // in ops_snapshot and the rendered operator UI.
+        // PRECONDITIONS: A radar run can select only a subset of scored rows.
+        // ORACLE: The run metadata contains distribution counts and /ops/ui shows
+        // the summary, detail link, and bounded bar without rendering source text.
+        // SEVERITY: Severe because a score chart that is only fabricated in HTML
+        // or only hidden in JSON would make ranking health look inspectable while
+        // still being operationally hollow.
+        let paths = test_paths("ops-ui-radar-score-distribution");
+        let store = Store::open(paths).unwrap();
+        for (title, url, summary, retrieved_at) in [
+            (
+                "Ops distribution launch benchmark",
+                "https://example.com/ops-distribution-launch",
+                "Launch benchmark for a model agent platform with substantive source-card text."
+                    .repeat(20),
+                "2026-06-24T00:00:00Z",
+            ),
+            (
+                "Ops distribution security release",
+                "https://example.com/ops-distribution-security",
+                "Security vulnerability release for an open source MCP agent runtime.".to_string(),
+                "2026-06-24T00:00:00Z",
+            ),
+            (
+                "Ops distribution quiet note",
+                "https://example.com/ops-distribution-quiet",
+                "Tiny update.".to_string(),
+                "2026-06-24T00:00:00Z",
+            ),
+        ] {
+            store
+                .add_source_card(SourceCardInput {
+                    title: title.to_string(),
+                    url: url.to_string(),
+                    source_type: "article".to_string(),
+                    provider: "fixture".to_string(),
+                    summary,
+                    claims: vec![],
+                    retrieved_at: Some(retrieved_at.to_string()),
+                    metadata: json!({
+                        "source_kind": "rss",
+                        "source_detail": "https://example.com/ops-distribution-feed.xml?<script>alert(1)</script>"
+                    }),
+                })
+                .unwrap();
+        }
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "ops-distribution-radar".to_string(),
+                description: "Ops distribution radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(1),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "Ops distribution" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        let snapshot = store.ops_snapshot().unwrap();
+        let run = snapshot
+            .radar_runs
+            .iter()
+            .find(|run| run.id == report.run.id)
+            .expect("radar run should appear in ops snapshot");
+        let distribution = run
+            .metadata
+            .get("score_distribution")
+            .expect("score distribution metadata should be persisted");
+        assert_eq!(
+            distribution.get("score_count").and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            distribution.get("selected_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            distribution
+                .get("over_profile_limit_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                >= 1,
+            "{distribution}"
+        );
+
+        let html = render_ops_ui_with_options(
+            &snapshot,
+            &OpsUiOptions {
+                q: Some(report.run.id.clone()),
+                status: None,
+                sort: "updated_desc".to_string(),
+                detail: Some(format!("radar-run:{}", report.run.id)),
+                notice: None,
+            },
+            None,
+            false,
+        );
+        assert!(html.contains("Radar run scores"));
+        assert!(html.contains("3 scored; selected:1"));
+        assert!(html.contains("over-limit:"));
+        assert!(html.contains("Radar Runs"));
+        assert!(html.contains("radar score distribution"));
+        assert!(html.contains("class=\"over\""));
+        assert!(html.contains("score_distribution"));
         assert!(!html.contains("<script>alert(1)</script>"));
     }
 

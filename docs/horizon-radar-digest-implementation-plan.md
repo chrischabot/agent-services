@@ -183,14 +183,17 @@ Evidence:
   profile/window inputs are rejected before inert jobs are inserted.
 - Repeatable worker-drained production-data proof script
   `scripts/radar-worker-production-proof` preserved proof packet
-  `.arcwell-dev/proofs/radar-worker-production-proof-20260624T082527Z-74723/artifacts/proof-packet.json`.
+  `.arcwell-dev/proofs/radar-worker-production-proof-20260624T101940Z-98028/artifacts/proof-packet.json`.
   It queued one `radar_run` and completed it through `worker run-once` against
   real public RSS, GitHub owner, arXiv, and Hacker News selectors. The worker
   completed one radar job plus four adapter jobs, wrote 45 source cards, 45
   wiki pages, 45 radar items, 45 FTS rows, 45 score rows, four healthy
   source-health rows, and four cursors; selected 30 items; returned
   `radar audit ok=true`; and wrote
-  `radar-summary-5b04716d7eed4115061f4bd0261586de` with `not_delivery=true`.
+  `radar-summary-8a0b164802dc8b0f525ee8085fdb6c78` with
+  `not_delivery=true`. The same proof also verifies run metadata and ops expose
+  `score_distribution` for `heuristic_v1` rows with `score_count=45`,
+  `selected_count=30`, finite `average`, `p50`, and `p90`.
 - Reddit disposable live proof is not yet production-data proof. Preserved
   attempts under `/tmp/arcwell-radar-reddit-proof-20260624T075239Z` and
   `/tmp/arcwell-radar-reddit-debug-20260624T075408Z` show the Arcwell binary
@@ -954,7 +957,10 @@ Checklist:
 - [x] Add heuristic score distribution metrics to run metadata and ops:
       `score_distribution` now records run-level count/status/min/max/average
       and p10/p50/p90 metrics for `heuristic_v1` scores, and `/ops/ui` renders
-      recent radar runs with score distribution columns.
+      recent radar runs with score distribution columns. Production-data proof
+      passed in
+      `.arcwell-dev/proofs/radar-worker-production-proof-20260624T101940Z-98028/artifacts/proof-packet.json`
+      over 45 live public RSS/GitHub/arXiv/Hacker News items.
 
 Anti-mirage gate:
 

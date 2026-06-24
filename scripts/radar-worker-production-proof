@@ -171,6 +171,13 @@ assert(stage.run && stage.run.id === runId, "stage should read the worker-create
 assert(stage.run.status === "scored", "worker-created run should be scored", stage.run);
 assert(Array.isArray(stage.items) && stage.items.length >= 10, "stage should contain real normalized items", { count: stage.items?.length });
 assert(Array.isArray(stage.scores) && stage.scores.length >= stage.items.length, "stage should contain score overlays", { items: stage.items?.length, scores: stage.scores?.length });
+const scoreDistribution = stage.run.metadata?.score_distribution || {};
+assert(scoreDistribution.score_kind === "heuristic_v1", "run metadata should record heuristic score distribution", scoreDistribution);
+assert(Number(scoreDistribution.score_count || 0) === stage.items.length, "score distribution should cover heuristic score rows", { scoreDistribution, item_count: stage.items.length });
+assert(Number(scoreDistribution.selected_count || 0) === Number(stage.run.filtered_count || 0), "score distribution selected count should match run filtered count", { scoreDistribution, run: stage.run });
+assert(Number.isFinite(Number(scoreDistribution.average)), "score distribution should include average score", scoreDistribution);
+assert(Number.isFinite(Number(scoreDistribution.p50)), "score distribution should include p50 score", scoreDistribution);
+assert(Number.isFinite(Number(scoreDistribution.p90)), "score distribution should include p90 score", scoreDistribution);
 assert(audit.ok === true, "radar audit should pass", audit);
 assert(audit.item_count === stage.items.length, "audit item count should match stage", audit);
 assert(summaryWrite.audit_status === "audit_ok", "summary write should require audit_ok", summaryWrite);
@@ -210,6 +217,9 @@ assert(hasHealthy("rss", rssUrl), "ops should show healthy RSS source", health);
 assert(hasHealthy("github", githubOwner), "ops should show healthy GitHub source", health);
 assert(hasHealthy("arxiv", arxivQuery), "ops should show healthy arXiv source", health);
 assert(hasHealthy("hackernews", "topstories"), "ops should show healthy Hacker News source", health);
+const opsRun = (ops.radar_runs || []).find((run) => run.id === runId);
+assert(opsRun, "ops snapshot should expose the radar run", ops.radar_runs);
+assert(opsRun.metadata?.score_distribution?.score_kind === "heuristic_v1", "ops radar run should expose score distribution", opsRun);
 
 const proofPacket = {
   proof_name: "radar-worker-production-proof",
@@ -257,6 +267,16 @@ const proofPacket = {
     item_count: summaryRead.item_ids.length,
     source_card_count: summaryRead.source_card_ids.length,
     not_delivery: summaryRead.metadata.not_delivery,
+  },
+  score_distribution: {
+    score_kind: scoreDistribution.score_kind,
+    score_count: scoreDistribution.score_count,
+    selected_count: scoreDistribution.selected_count,
+    min: scoreDistribution.min,
+    max: scoreDistribution.max,
+    average: scoreDistribution.average,
+    p50: scoreDistribution.p50,
+    p90: scoreDistribution.p90,
   },
   cursor_keys: [...cursorKeys].filter((key) =>
     key === `rss:${rssUrl}` ||

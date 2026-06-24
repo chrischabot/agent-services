@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+for required in node sqlite3; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "BLOCKED: $required is required for this proof." >&2
+    exit 2
+  fi
+done
+
+RUN_STAMP="${ARCWELL_RADAR_SOURCE_DECAY_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_RADAR_SOURCE_DECAY_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/radar-source-quality-decay-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+export ARCWELL_HOME="${ARCWELL_RADAR_SOURCE_DECAY_PROOF_HOME:-$PROOF_ROOT/home}"
+PROOF_DB="$ARCWELL_HOME/arcwell.sqlite3"
+
+GITHUB_OWNER="${ARCWELL_RADAR_SOURCE_DECAY_GITHUB_OWNER:-Thysrael}"
+ARXIV_QUERY="${ARCWELL_RADAR_SOURCE_DECAY_ARXIV_QUERY:-cat:cs.AI}"
+HACKERNEWS_FEED="${ARCWELL_RADAR_SOURCE_DECAY_HACKERNEWS_FEED:-frontpage}"
+HEALTHY_PROFILE_NAME="${ARCWELL_RADAR_SOURCE_DECAY_HEALTHY_PROFILE:-source-decay-healthy-$RUN_STAMP}"
+DECAY_PROFILE_NAME="${ARCWELL_RADAR_SOURCE_DECAY_LOW_SIGNAL_PROFILE:-source-decay-low-signal-$RUN_STAMP}"
+MIN_ITEMS_PER_RUN="${ARCWELL_RADAR_SOURCE_DECAY_MIN_ITEMS_PER_RUN:-10}"
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log() {
+  printf '[radar-source-decay-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[radar-source-decay-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+log "proof root: $PROOF_ROOT"
+log "ARCWELL_HOME: $ARCWELL_HOME"
+
+create_profile() {
+  local name="$1"
+  local min_score="$2"
+  local output="$3"
+  "$ARCWELL_BIN" radar profile create "$name" \
+    --description "Production-data source-quality decay proof over public GitHub, arXiv, and Hacker News runs." \
+    --window-hours 168 \
+    --min-score "$min_score" \
+    --max-items 30 \
+    --selector-json "{\"kind\":\"github_owner\",\"locator\":\"$GITHUB_OWNER\",\"limit\":10}" \
+    --selector-json "{\"kind\":\"arxiv\",\"locator\":\"$ARXIV_QUERY\",\"limit\":10}" \
+    --selector-json "{\"kind\":\"hackernews\",\"locator\":\"$HACKERNEWS_FEED\",\"limit\":5}" \
+    >"$output"
+}
+
+log "creating healthy and low-signal profiles"
+create_profile "$HEALTHY_PROFILE_NAME" 1 "$ARTIFACT_DIR/profile-healthy.json"
+create_profile "$DECAY_PROFILE_NAME" 10 "$ARTIFACT_DIR/profile-low-signal.json"
+
+run_profile() {
+  local profile="$1"
+  local index="$2"
+  log "running live radar pass $index for profile $profile"
+  "$ARCWELL_BIN" radar run "$profile" --window-hours 168 --fetch-live \
+    >"$ARTIFACT_DIR/run-$index.json"
+  local run_id
+  run_id="$(node - "$ARTIFACT_DIR/run-$index.json" "$MIN_ITEMS_PER_RUN" <<'NODE'
+const fs = require("fs");
+const [runPath, minItemsRaw] = process.argv.slice(2);
+const minItems = Number(minItemsRaw);
+const report = JSON.parse(fs.readFileSync(runPath, "utf8"));
+function fail(message, detail) {
+  console.error(message);
+  if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+  process.exit(1);
+}
+if (!report.run || !report.run.id) fail("radar report has no run id", report);
+if (report.run.status !== "scored") fail("radar run did not reach scored status", report.run);
+if (Number(report.items_inserted || 0) < minItems) fail("radar run inserted too few real items", report);
+if (Number(report.scores_inserted || 0) < Number(report.items_inserted || 0)) {
+  fail("radar run did not score all inserted items", report);
+}
+const jobs = Array.isArray(report.adapter_jobs) ? report.adapter_jobs : [];
+const failed = jobs.filter((job) => job.status !== "completed");
+if (failed.length) fail("one or more adapter jobs failed", failed);
+const kinds = new Set(jobs.map((job) => job.kind));
+for (const expected of ["github_owner", "arxiv_search", "hackernews_fetch"]) {
+  if (!kinds.has(expected)) fail(`missing adapter job ${expected}`, jobs);
+}
+if (Number(report.run?.metadata?.source_quality_windows || 0) < 1) {
+  fail("radar run did not record source-quality windows", report.run?.metadata);
+}
+process.stdout.write(report.run.id);
+NODE
+)"
+  printf '%s\n' "$run_id" >"$ARTIFACT_DIR/run-id-$index.txt"
+  "$ARCWELL_BIN" radar audit "$run_id" >"$ARTIFACT_DIR/audit-$index.json"
+  "$ARCWELL_BIN" radar source-quality "$run_id" >"$ARTIFACT_DIR/source-quality-$index.json"
+}
+
+run_profile "$HEALTHY_PROFILE_NAME" 1
+run_profile "$HEALTHY_PROFILE_NAME" 2
+run_profile "$DECAY_PROFILE_NAME" 3
+
+RUN_ID_1="$(cat "$ARTIFACT_DIR/run-id-1.txt")"
+RUN_ID_2="$(cat "$ARTIFACT_DIR/run-id-2.txt")"
+RUN_ID_3="$(cat "$ARTIFACT_DIR/run-id-3.txt")"
+
+log "time-shifting real source-quality windows across a seven-day span"
+node - "$ARTIFACT_DIR/time-shift.sql" "$RUN_ID_1" "$RUN_ID_2" "$RUN_ID_3" <<'NODE'
+const fs = require("fs");
+const [outPath, run1, run2, run3] = process.argv.slice(2);
+const now = new Date();
+const day = 24 * 60 * 60 * 1000;
+function iso(daysAgo) {
+  return new Date(now.getTime() - daysAgo * day).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+const windows = [
+  { run: run1, start: iso(7), end: iso(6), created: iso(6) },
+  { run: run2, start: iso(4), end: iso(3), created: iso(3) },
+  { run: run3, start: iso(1), end: iso(0), created: iso(0) },
+];
+function q(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+let sql = "BEGIN;\n";
+for (const item of windows) {
+  sql += `UPDATE radar_runs SET window_start = ${q(item.start)}, window_end = ${q(item.end)}, updated_at = ${q(item.created)} WHERE id = ${q(item.run)};\n`;
+  sql += `UPDATE radar_source_quality SET window_start = ${q(item.start)}, window_end = ${q(item.end)}, created_at = ${q(item.created)} WHERE run_id = ${q(item.run)};\n`;
+}
+sql += "COMMIT;\n";
+fs.writeFileSync(outPath, sql);
+NODE
+sqlite3 "$PROOF_DB" <"$ARTIFACT_DIR/time-shift.sql"
+
+for index in 1 2 3; do
+  run_id="$(cat "$ARTIFACT_DIR/run-id-$index.txt")"
+  "$ARCWELL_BIN" radar source-quality "$run_id" >"$ARTIFACT_DIR/source-quality-shifted-$index.json"
+done
+
+"$ARCWELL_BIN" radar source-quality-trends --min-windows 3 --limit 25 \
+  >"$ARTIFACT_DIR/source-quality-trends.json"
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops.json"
+"$ARCWELL_BIN" cursors list >"$ARTIFACT_DIR/cursors.json"
+
+log "validating seven-day time-shifted decay proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$RUN_ID_1" "$RUN_ID_2" "$RUN_ID_3" "$GITHUB_OWNER" "$ARXIV_QUERY" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, proofRoot, run1, run2, run3, githubOwner, arxivQuery] = process.argv.slice(2);
+const runIds = [run1, run2, run3];
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+const healthyProfile = read("profile-healthy.json");
+const lowSignalProfile = read("profile-low-signal.json");
+const reports = runIds.map((_, index) => read(`run-${index + 1}.json`));
+const audits = runIds.map((_, index) => read(`audit-${index + 1}.json`));
+const shiftedQuality = runIds.map((_, index) => read(`source-quality-shifted-${index + 1}.json`));
+const trends = read("source-quality-trends.json");
+const ops = read("ops.json");
+const cursors = read("cursors.json");
+
+assert(healthyProfile.status === "local_proof_ready", "healthy profile should be supported", healthyProfile);
+assert(lowSignalProfile.status === "local_proof_ready", "low-signal profile should be supported", lowSignalProfile);
+assert(reports.every((report) => report.run?.status === "scored"), "all runs should score", reports.map((report) => report.run));
+assert(reports.slice(0, 2).every((report) => Number(report.selected_items || 0) > 0), "healthy runs should select real items", reports);
+assert(Number(reports[2].selected_items || 0) === 0, "low-signal run should select zero items", reports[2]);
+assert(audits.every((audit) => audit.ok === true), "all audits should pass", audits);
+assert(shiftedQuality.every((rows) => Array.isArray(rows) && rows.length >= 3), "each run should expose source-quality rows", shiftedQuality);
+
+const firstStart = new Date(shiftedQuality[0][0].window_start).getTime();
+const lastEnd = new Date(shiftedQuality[2][0].window_end).getTime();
+const spanDays = (lastEnd - firstStart) / (24 * 60 * 60 * 1000);
+assert(spanDays >= 6.9, "time-shifted windows should span about seven days", { first: shiftedQuality[0][0], last: shiftedQuality[2][0], spanDays });
+
+const trendByKey = new Map(trends.map((trend) => [`${trend.source_kind}:${trend.locator}`, trend]));
+const commonKeys = new Set(shiftedQuality[0].map((row) => `${row.source_kind}:${row.locator}`));
+for (const rows of shiftedQuality.slice(1)) {
+  for (const key of [...commonKeys]) {
+    if (!rows.some((row) => `${row.source_kind}:${row.locator}` === key)) {
+      commonKeys.delete(key);
+    }
+  }
+}
+assert(commonKeys.size >= 3, "expected at least three source families across all windows", [...commonKeys]);
+
+const decaying = [...commonKeys]
+  .map((key) => trendByKey.get(key))
+  .filter(Boolean)
+  .filter((trend) => trend.window_count >= 3 && trend.trend_status === "decaying" && trend.latest_status === "low_signal");
+assert(decaying.length >= 1, "at least one real source should be classified as decaying", trends);
+assert(
+  decaying.every((trend) => Number(trend.accepted_count || 0) > 0 && Number(trend.raw_count || 0) >= Number(trend.accepted_count || 0)),
+  "decaying trends should aggregate real raw/accepted counts",
+  decaying
+);
+
+const latestRows = shiftedQuality[2];
+assert(latestRows.every((row) => row.status === "low_signal" && row.accepted_count === 0 && row.raw_count > 0), "latest run should be low-signal over real fetched rows", latestRows);
+
+const sourceHealth = Array.isArray(ops.source_health) ? ops.source_health : [];
+const healthySourceCount = sourceHealth.filter((row) => row.status === "healthy").length;
+assert(healthySourceCount >= 3, "ops should expose healthy source-health for public adapters", sourceHealth);
+const cursorKeys = new Set((cursors || []).map((cursor) => cursor.key));
+assert(cursorKeys.has(`github-owner:${githubOwner}`), "GitHub cursor should exist", cursors);
+assert(cursorKeys.has(`arxiv:${arxivQuery}`), "arXiv cursor should exist", cursors);
+assert(cursorKeys.has("hackernews:topstories"), "Hacker News cursor should exist", cursors);
+
+const proofPacket = {
+  proof_name: "radar-source-quality-decay-production-proof",
+  proof_level: "Production Data Proof for time-shifted seven-day source-quality decay classification over real public adapter data",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  run_ids: runIds,
+  profile_ids: {
+    healthy: healthyProfile.id,
+    low_signal: lowSignalProfile.id,
+  },
+  source_families: [
+    { provider: "github", locator: githubOwner },
+    { provider: "arxiv", locator: arxivQuery },
+    { provider: "hackernews", locator: "frontpage/topstories" },
+  ],
+  runs: reports.map((report, index) => ({
+    run_id: report.run.id,
+    status: report.run.status,
+    items_inserted: report.items_inserted,
+    scores_inserted: report.scores_inserted,
+    selected_items: report.selected_items,
+    source_quality_windows: report.run.metadata.source_quality_windows,
+    shifted_window_start: shiftedQuality[index][0].window_start,
+    shifted_window_end: shiftedQuality[index][0].window_end,
+  })),
+  seven_day_span_days: spanDays,
+  common_source_keys: [...commonKeys],
+  decaying_trends: decaying,
+  trend_count: trends.length,
+  gates: {
+    real_public_adapter_jobs_completed: true,
+    source_quality_rows_from_real_runs: true,
+    low_signal_latest_window: true,
+    seven_day_window_time_shifted: true,
+    trend_classification_decaying: true,
+    audits_ok: true,
+    ops_source_health_visible: true,
+    cursors_visible: true,
+  },
+  remaining_risk: [
+    "The seven-day span is time-shifted inside a disposable proof home; it is not proof that the resident scheduler ran for seven calendar days.",
+    "This proves decay classification over real public adapter data, not authenticated X, Reddit OAuth, model synthesis, delivery attempts, or production notification routing.",
+    "A true operational seven-day proof still needs retained scheduled runs across wall-clock days or a trusted service clock harness.",
+  ],
+};
+
+fs.writeFileSync(
+  path.join(artifactDir, "proof-packet.json"),
+  `${JSON.stringify(proofPacket, null, 2)}\n`
+);
+process.stdout.write(JSON.stringify(proofPacket, null, 2));
+NODE
+
+printf '\n'
+log "source-quality decay production-data proof passed"
+log "proof packet: $ARTIFACT_DIR/proof-packet.json"

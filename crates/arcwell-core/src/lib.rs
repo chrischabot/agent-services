@@ -843,6 +843,15 @@ pub struct RadarDeliveryReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadarDeliveryReconcileReport {
+    pub inspected: usize,
+    pub sent: usize,
+    pub failed: usize,
+    pub dead_lettered: usize,
+    pub updated: Vec<RadarDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarAuditFinding {
     pub severity: String,
     pub code: String,
@@ -984,6 +993,7 @@ pub struct WorkerRunReport {
     pub jobs: Vec<WikiJob>,
     pub watch_poll: Option<WatchSourcePollEnqueueReport>,
     pub telegram_retry: Option<TelegramRetryReport>,
+    pub radar_delivery_reconcile: Option<RadarDeliveryReconcileReport>,
     pub warnings: Vec<String>,
 }
 
@@ -12582,6 +12592,12 @@ impl Store {
             jobs.push(self.execute_wiki_job(job)?);
         }
         let (telegram_retry, warnings) = self.retry_due_telegram_deliveries_for_worker(10)?;
+        let radar_delivery_reconcile = self.reconcile_radar_delivery_attempts(3)?;
+        let radar_delivery_reconcile = if radar_delivery_reconcile.inspected > 0 {
+            Some(radar_delivery_reconcile)
+        } else {
+            None
+        };
         let completed = jobs.iter().filter(|job| job.status == "completed").count();
         let failed = jobs.iter().filter(|job| job.status == "failed").count();
         let dead_lettered = jobs
@@ -12597,6 +12613,7 @@ impl Store {
             jobs,
             watch_poll,
             telegram_retry,
+            radar_delivery_reconcile,
             warnings,
         })
     }
@@ -19818,6 +19835,102 @@ impl Store {
             "#,
         )?;
         rows(stmt.query_map([], radar_delivery_from_row)?)
+    }
+
+    pub fn reconcile_radar_delivery_attempts(
+        &self,
+        max_attempts_per_message: i64,
+    ) -> Result<RadarDeliveryReconcileReport> {
+        let max_attempts_per_message = max_attempts_per_message.clamp(1, 20);
+        let due = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT rd.id,
+                       rd.run_id,
+                       latest.id,
+                       latest.message_id,
+                       latest.ok,
+                       latest.attempt,
+                       latest.provider_status,
+                       latest.error
+                FROM radar_deliveries rd
+                JOIN channel_delivery_attempts linked
+                  ON linked.id = rd.delivery_attempt_id
+                JOIN channel_delivery_attempts latest
+                  ON latest.message_id = linked.message_id
+                WHERE rd.status IN ('pending', 'failed')
+                  AND latest.attempt = (
+                    SELECT MAX(d2.attempt)
+                    FROM channel_delivery_attempts d2
+                    WHERE d2.message_id = linked.message_id
+                  )
+                ORDER BY rd.updated_at ASC, rd.id ASC
+                "#,
+            )?;
+            rows(stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? != 0,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })?)?
+        };
+
+        let mut report = RadarDeliveryReconcileReport {
+            inspected: due.len(),
+            sent: 0,
+            failed: 0,
+            dead_lettered: 0,
+            updated: Vec::new(),
+        };
+        for (
+            delivery_id,
+            run_id,
+            latest_attempt_id,
+            message_id,
+            ok,
+            attempt,
+            provider_status,
+            error,
+        ) in due
+        {
+            let (status, error_text) = if ok {
+                report.sent += 1;
+                ("sent", None)
+            } else if attempt >= max_attempts_per_message {
+                report.dead_lettered += 1;
+                self.update_channel_message_status(&message_id, "dead_lettered")?;
+                (
+                    "dead_lettered",
+                    Some(sanitize_radar_delivery_error(&format!(
+                        "delivery retry exhausted after {attempt} attempt(s): {}",
+                        error.unwrap_or_else(|| format!("provider status {provider_status}"))
+                    ))?),
+                )
+            } else {
+                report.failed += 1;
+                (
+                    "failed",
+                    Some(sanitize_radar_delivery_error(&error.unwrap_or_else(
+                        || format!("provider status {provider_status}"),
+                    ))?),
+                )
+            };
+            let delivery = self.update_radar_delivery_result(
+                &delivery_id,
+                status,
+                Some(&latest_attempt_id),
+                error_text.as_deref(),
+            )?;
+            self.refresh_radar_delivery_count(&run_id, ok)?;
+            report.updated.push(delivery);
+        }
+        Ok(report)
     }
 
     fn get_radar_delivery_by_idempotency_key(
@@ -30734,7 +30847,7 @@ fn normalize_radar_delivery_idempotency_key(
 
 fn validate_radar_delivery_status(status: &str) -> Result<()> {
     match status {
-        "pending" | "sent" | "failed" | "blocked" | "deferred" => Ok(()),
+        "pending" | "sent" | "failed" | "blocked" | "deferred" | "dead_lettered" => Ok(()),
         other => bail!("unsupported radar delivery status: {other}"),
     }
 }
@@ -47193,6 +47306,234 @@ channel = "telegram"
         let run = store.read_radar_run(&report.run.id).unwrap().unwrap();
         assert_eq!(run.delivery_count, 1);
         assert_eq!(run.stage, "summarized");
+    }
+
+    #[test]
+    fn severe_radar_delivery_worker_retry_reconciles_sent_status_to_run() {
+        // CLAIM: worker-driven channel retry is also radar delivery recovery,
+        // not a hidden transport-only success.
+        // ORACLE: after a due Telegram retry succeeds, the original radar
+        // delivery row points at the latest successful channel attempt and the
+        // radar run is promoted to delivered.
+        // SEVERITY: Severe because otherwise operators see a failed radar
+        // delivery after the provider has actually accepted the retry.
+        let store = test_store("radar-delivery-worker-retry-reconcile");
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar retry reconcile launch".to_string(),
+                url: "https://example.com/radar-retry-reconcile-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports radar retry reconciliation proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "retry-reconcile-radar".to_string(),
+                description: "Retry reconcile radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "retry reconcile" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+        let failing_base = mock_status_server(
+            "429 Too Many Requests",
+            "retry-after: 1\r\n",
+            r#"{"ok":false,"description":"Too Many Requests"}"#,
+            "application/json",
+        );
+        let failed = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-worker-retry-reconcile".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some(failing_base),
+            })
+            .unwrap();
+        assert_eq!(failed.delivery.status, "failed");
+        let first_message = failed.channel_message.expect("failed channel message");
+        store
+            .conn
+            .execute(
+                "UPDATE channel_delivery_attempts SET retry_at = ?1 WHERE message_id = ?2",
+                params!["2000-01-01T00:00:00.000000000+00:00", first_message.id],
+            )
+            .unwrap();
+        let ok_base = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &ok_base, "telegram")
+            .unwrap();
+
+        let worker = store.run_worker_once(1).unwrap();
+        let retry = worker.telegram_retry.expect("worker retry report");
+        assert_eq!(retry.sent, 1);
+        let reconcile = worker
+            .radar_delivery_reconcile
+            .expect("radar delivery reconciliation");
+        assert_eq!(reconcile.inspected, 1);
+        assert_eq!(reconcile.sent, 1);
+        assert_eq!(reconcile.updated[0].status, "sent");
+
+        let deliveries = store.list_radar_deliveries(Some(&report.run.id)).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "sent");
+        let attempts = store
+            .list_channel_delivery_attempts(Some(&first_message.id))
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        let latest_success = attempts.iter().find(|attempt| attempt.ok).unwrap();
+        assert_eq!(
+            deliveries[0].delivery_attempt_id.as_deref(),
+            Some(latest_success.id.as_str())
+        );
+        let run = store.read_radar_run(&report.run.id).unwrap().unwrap();
+        assert_eq!(run.stage, "delivered");
+    }
+
+    #[test]
+    fn severe_radar_delivery_reconcile_dead_letters_exhausted_retry_chain() {
+        // CLAIM: radar delivery retry has a terminal exhausted state and does
+        // not keep resending after the configured attempt ceiling.
+        // ORACLE: three failed attempts reconcile to a dead_lettered radar
+        // delivery, the channel message leaves the retry candidate set, and a
+        // subsequent Telegram retry finds no due work.
+        // SEVERITY: Severe because repeated provider failure can otherwise
+        // become an unattended delivery storm.
+        let store = test_store("radar-delivery-dead-letter-reconcile");
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:123", false, false, true)
+            .unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Radar dead letter launch".to_string(),
+                url: "https://example.com/radar-dead-letter-launch".to_string(),
+                source_type: "web".to_string(),
+                provider: "fixture".to_string(),
+                summary: "Source card supports radar delivery dead-letter proof.".to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-24T00:00:00Z".to_string()),
+                metadata: json!({ "source_kind": "manual" }),
+            })
+            .unwrap();
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "dead-letter-delivery-radar".to_string(),
+                description: "Dead letter delivery radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(10),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "dead letter" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let report = store.run_radar_profile(&profile.id, None).unwrap();
+        store
+            .summarize_radar_run(&report.run.id, "en", "markdown")
+            .unwrap();
+        let failing_base = mock_status_server(
+            "429 Too Many Requests",
+            "retry-after: 1\r\n",
+            r#"{"ok":false,"description":"Too Many Requests"}"#,
+            "application/json",
+        );
+        let failed = store
+            .deliver_radar_summary(RadarDeliveryInput {
+                run_id: report.run.id.clone(),
+                language: "en".to_string(),
+                format: "markdown".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "123".to_string(),
+                idempotency_key: Some("radar-delivery-dead-letter".to_string()),
+                telegram_bot_token: Some("TOKEN".to_string()),
+                email_account_id: None,
+                email_api_token: None,
+                email_from: None,
+                api_base: Some(failing_base),
+            })
+            .unwrap();
+        let message = failed.channel_message.expect("failed channel message");
+        store
+            .record_channel_delivery_attempt(
+                &message.id,
+                "telegram",
+                "telegram:chat:123",
+                false,
+                429,
+                &json!({ "ok": false }),
+                Some("provider still rate limited"),
+                Some("2000-01-01T00:00:00.000000000+00:00"),
+            )
+            .unwrap();
+        let latest = store
+            .record_channel_delivery_attempt(
+                &message.id,
+                "telegram",
+                "telegram:chat:123",
+                false,
+                429,
+                &json!({ "ok": false }),
+                Some("provider still rate limited"),
+                Some("2000-01-01T00:00:00.000000000+00:00"),
+            )
+            .unwrap();
+        assert_eq!(latest.attempt, 3);
+
+        let reconcile = store.reconcile_radar_delivery_attempts(3).unwrap();
+        assert_eq!(reconcile.inspected, 1);
+        assert_eq!(reconcile.dead_lettered, 1);
+        assert_eq!(reconcile.updated[0].status, "dead_lettered");
+        assert_eq!(
+            reconcile.updated[0].delivery_attempt_id.as_deref(),
+            Some(latest.id.as_str())
+        );
+        assert!(
+            reconcile.updated[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("retry exhausted")
+        );
+        assert_eq!(
+            store
+                .get_channel_message(&message.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "dead_lettered"
+        );
+        let ok_base = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+        let retry = store
+            .retry_due_telegram_deliveries("TOKEN", Some(&ok_base), 10)
+            .unwrap();
+        assert_eq!(retry.attempted, 0);
     }
 
     #[test]

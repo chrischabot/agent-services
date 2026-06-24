@@ -387,7 +387,12 @@ PR, implementation note, or final report:
       Telegram/email channel send paths, with CLI/MCP/slash surfaces, durable
       `radar_deliveries` rows linked to channel delivery attempts, idempotency
       replay, authorization/policy-denial blocking, provider-failure recording,
-      and token-redaction severe tests.
+      ops snapshot/UI visibility, health warnings, HTML escaping, and
+      token-redaction severe tests.
+- [x] Reconcile radar delivery retry state through the resident Telegram
+      delivery retry path: worker-driven successful retries now promote the
+      original `radar_deliveries` row and radar run, and exhausted local retry
+      chains become `dead_lettered` without continued sends.
 - [ ] Add model-backed synthesis, live production delivery proof, scheduled
       delivery, production-data semantic dedupe breadth across more profiles,
       production-data balance review, seven-day source-quality trend/decay

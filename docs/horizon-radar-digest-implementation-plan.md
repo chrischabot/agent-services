@@ -1134,7 +1134,11 @@ Checklist:
 - [x] Add cost check where provider delivery has cost.
 - [x] Add idempotency keys per run/summary/recipient.
 - [ ] Add quiet-hours deferral.
-- [ ] Add retry with bounded attempts and dead-letter behavior.
+- [x] Add local Telegram retry reconciliation for manual radar deliveries:
+      worker-driven successful retries update the original `radar_deliveries`
+      row and exhausted local retry chains become `dead_lettered`.
+- [ ] Add cross-channel/scheduled retry with bounded attempts and dead-letter
+      behavior.
 - [x] Add delivery attempt records linked to `radar_deliveries`.
 - [x] Add delivery status to ops snapshot and `/ops/ui`.
 - [x] Add manual `radar deliver` confirmation path with CLI/MCP/slash surfaces,
@@ -1160,6 +1164,8 @@ Production-data proof:
 - [ ] Prove quiet-hours deferral with a real delivery row and no provider send.
 - [ ] Prove retry/dead-letter with a controlled provider failure or disabled
       route, without leaking secrets.
+- [x] Prove local Telegram retry/dead-letter behavior with controlled provider
+      failures and no real provider send.
 
 ### Stage 9: Source Quality And Recommendation Loop
 
@@ -1419,13 +1425,13 @@ Required:
 
 ### Delivery
 
-- [ ] Unauthorized recipient blocked.
+- [x] Unauthorized recipient blocked.
 - [ ] Quiet hours defer.
-- [ ] Duplicate delivery idempotency.
-- [ ] Provider failure retry.
-- [ ] Retry exhaustion dead-letters.
-- [ ] Delivery error redacts tokens/addresses where required.
-- [ ] Policy denial records decision.
+- [x] Duplicate delivery idempotency.
+- [x] Provider failure retry for local Telegram manual delivery.
+- [x] Retry exhaustion dead-letters local Telegram manual delivery.
+- [x] Delivery error redacts tokens/addresses where required.
+- [x] Policy denial records decision.
 - [ ] Cost denial records decision.
 
 ### Ops
@@ -1433,7 +1439,7 @@ Required:
 - [ ] Radar run visible in ops.
 - [ ] Radar stale run visible in ops.
 - [ ] Radar failed source-health visible in ops.
-- [ ] Radar delivery failures visible in ops.
+- [x] Radar delivery failures visible in ops.
 - [ ] Ops UI escapes hostile item text.
 - [ ] Doctor reports radar drift.
 
@@ -1541,7 +1547,8 @@ Exit gate:
 
 - [x] Manual authorized delivery.
 - [ ] Quiet-hours deferral.
-- [ ] Retry/dead-letter.
+- [x] Local Telegram retry reconciliation/dead-letter for manual deliveries.
+- [ ] Cross-channel/scheduled retry/dead-letter.
 - [ ] Scheduled worker runs.
 - [ ] Source-quality rollups.
 - [x] Ops snapshot/UI visibility for manual delivery attempts.

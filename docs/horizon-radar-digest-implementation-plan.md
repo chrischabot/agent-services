@@ -1471,11 +1471,11 @@ Required:
 ### Delivery
 
 - [x] Unauthorized recipient blocked.
-- [ ] Quiet hours defer.
+- [x] Local quiet-hours deferral.
 - [x] Duplicate delivery idempotency.
 - [x] Provider failure retry for local Telegram manual delivery.
 - [x] Retry exhaustion dead-letters local Telegram manual delivery.
-- [x] Local scheduled Telegram delivery through resident worker.
+- [x] Local scheduled Telegram/email delivery through resident worker.
 - [x] Delivery error redacts tokens/addresses where required.
 - [x] Policy denial records decision.
 - [ ] Cost denial records decision.

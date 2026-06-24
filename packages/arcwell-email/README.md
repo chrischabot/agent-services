@@ -134,6 +134,7 @@ configured author-to-agent route, then scrubbed tracked documentation back to
 Repeatable local and guarded live smoke is:
 
 ```sh
+scripts/verify-tracked-email-placeholders
 scripts/email-live-smoke --no-live
 ARCWELL_EMAIL_LIVE_CONFIRM=route scripts/email-live-smoke --live
 ```

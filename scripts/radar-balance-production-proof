@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "BLOCKED: node is required for JSON assertions." >&2
+  exit 2
+fi
+
+RUN_STAMP="${ARCWELL_RADAR_BALANCE_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_RADAR_BALANCE_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/radar-balance-production-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+export ARCWELL_HOME="${ARCWELL_RADAR_BALANCE_PROOF_HOME:-$PROOF_ROOT/home}"
+
+RSS_URL="${ARCWELL_RADAR_BALANCE_RSS_URL:-https://hnrss.org/newest?points=100}"
+GITHUB_OWNER="${ARCWELL_RADAR_BALANCE_GITHUB_OWNER:-Thysrael}"
+ARXIV_QUERY="${ARCWELL_RADAR_BALANCE_ARXIV_QUERY:-cat:cs.AI}"
+HACKERNEWS_FEED="${ARCWELL_RADAR_BALANCE_HACKERNEWS_FEED:-frontpage}"
+PROFILE_NAME="${ARCWELL_RADAR_BALANCE_PROFILE_NAME:-balance-live-proof-$RUN_STAMP}"
+MIN_ITEMS="${ARCWELL_RADAR_BALANCE_MIN_ITEMS:-10}"
+MIN_SOURCE_QUOTA="${ARCWELL_RADAR_BALANCE_MIN_SOURCE_QUOTA:-1}"
+MAX_PER_SOURCE="${ARCWELL_RADAR_BALANCE_MAX_PER_SOURCE:-1}"
+
+case "$MAX_PER_SOURCE" in
+  ''|*[!0-9]*) echo "BLOCKED: MAX_PER_SOURCE must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$MAX_PER_SOURCE" -lt 1 ] || [ "$MAX_PER_SOURCE" -gt 10 ]; then
+  echo "BLOCKED: MAX_PER_SOURCE must be between 1 and 10" >&2
+  exit 2
+fi
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log() {
+  printf '[radar-balance-proof] %s\n' "$*"
+}
+
+log "proof root: $PROOF_ROOT"
+log "ARCWELL_HOME: $ARCWELL_HOME"
+log "creating live balanced radar profile: $PROFILE_NAME"
+
+BALANCE_METADATA_JSON="$(node -e "console.log(JSON.stringify({ balance: { max_per_source: Number(process.argv[1]) } }))" "$MAX_PER_SOURCE")"
+
+"$ARCWELL_BIN" radar profile create "$PROFILE_NAME" \
+  --description "Production-data radar balance proof over public RSS, GitHub, arXiv, and Hacker News sources." \
+  --window-hours 168 \
+  --min-score 1 \
+  --max-items 30 \
+  --selector-json "{\"kind\":\"rss\",\"locator\":\"$RSS_URL\",\"limit\":12}" \
+  --selector-json "{\"kind\":\"github_owner\",\"locator\":\"$GITHUB_OWNER\",\"limit\":12}" \
+  --selector-json "{\"kind\":\"arxiv\",\"locator\":\"$ARXIV_QUERY\",\"limit\":12}" \
+  --selector-json "{\"kind\":\"hackernews\",\"locator\":\"$HACKERNEWS_FEED\",\"limit\":8}" \
+  --metadata-json "$BALANCE_METADATA_JSON" \
+  >"$ARTIFACT_DIR/profile.json"
+
+log "enqueueing live balanced radar run"
+"$ARCWELL_BIN" radar enqueue "$PROFILE_NAME" --window-hours 168 --fetch-live \
+  >"$ARTIFACT_DIR/enqueue.json"
+
+log "draining local worker once"
+"$ARCWELL_BIN" worker run-once --max-jobs 6 >"$ARTIFACT_DIR/worker.json"
+
+RADAR_RUN_ID="$(node - "$ARTIFACT_DIR/worker.json" "$MIN_ITEMS" <<'NODE'
+const fs = require("fs");
+const [workerPath, minItemsRaw] = process.argv.slice(2);
+const minItems = Number(minItemsRaw);
+const worker = JSON.parse(fs.readFileSync(workerPath, "utf8"));
+const jobs = Array.isArray(worker.jobs) ? worker.jobs : [];
+const radarJob = jobs.find((job) => job.kind === "radar_run");
+function fail(message, detail) {
+  console.error(message);
+  if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+  process.exit(1);
+}
+if (!radarJob) fail("worker did not process a radar_run job", worker);
+if (radarJob.status !== "completed") fail("radar worker job did not complete", radarJob);
+const result = radarJob.result_json || {};
+if (result.fetch_live !== true) fail("radar worker result did not preserve fetch_live=true", result);
+if (result.status !== "scored") fail("radar run did not reach scored status", result);
+if (Number(result.items_inserted || 0) < minItems) fail("radar run inserted too few real items", result);
+if (Number(result.scores_inserted || 0) < Number(result.items_inserted || 0)) {
+  fail("radar run did not score all inserted items", result);
+}
+const adapterJobs = Array.isArray(result.adapter_jobs) ? result.adapter_jobs : [];
+const kinds = new Set(adapterJobs.map((job) => job.kind));
+for (const expected of ["rss_fetch", "github_owner", "arxiv_search", "hackernews_fetch"]) {
+  if (!kinds.has(expected)) fail(`missing adapter job ${expected}`, adapterJobs);
+}
+const failed = adapterJobs.filter((job) => job.status !== "completed");
+if (failed.length) fail("one or more adapter jobs failed", failed);
+if (!result.run_id) fail("radar worker result has no run_id", result);
+process.stdout.write(result.run_id);
+NODE
+)"
+
+log "reading stage/audit/summary/ops for run: $RADAR_RUN_ID"
+"$ARCWELL_BIN" radar stage "$RADAR_RUN_ID" >"$ARTIFACT_DIR/stage.json"
+"$ARCWELL_BIN" radar audit "$RADAR_RUN_ID" >"$ARTIFACT_DIR/audit.json"
+"$ARCWELL_BIN" radar summarize "$RADAR_RUN_ID" >"$ARTIFACT_DIR/summary-write.json"
+"$ARCWELL_BIN" radar summary "$RADAR_RUN_ID" >"$ARTIFACT_DIR/summary-read.json"
+"$ARCWELL_BIN" cursors list >"$ARTIFACT_DIR/cursors.json"
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops.json"
+
+log "validating balance proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$RADAR_RUN_ID" "$RSS_URL" "$GITHUB_OWNER" "$ARXIV_QUERY" "$HACKERNEWS_FEED" "$MAX_PER_SOURCE" "$MIN_SOURCE_QUOTA" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [
+  artifactDir,
+  proofRoot,
+  runId,
+  rssUrl,
+  githubOwner,
+  arxivQuery,
+  hackernewsFeed,
+  maxPerSourceRaw,
+  minSourceQuotaRaw,
+] = process.argv.slice(2);
+const maxPerSource = Number(maxPerSourceRaw);
+const minSourceQuota = Number(minSourceQuotaRaw);
+
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const profile = read("profile.json");
+const enqueue = read("enqueue.json");
+const worker = read("worker.json");
+const stage = read("stage.json");
+const audit = read("audit.json");
+const summaryWrite = read("summary-write.json");
+const summaryRead = read("summary-read.json");
+const cursors = read("cursors.json");
+const ops = read("ops.json");
+
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+assert(profile.status === "local_proof_ready", "profile should be supported by local projection", profile);
+assert(profile.metadata?.balance?.max_per_source === maxPerSource, "CLI profile metadata should preserve balance cap", profile.metadata);
+assert(enqueue.kind === "radar_run" && enqueue.status === "pending", "enqueue should create pending radar_run job", enqueue);
+assert(worker.processed >= 1 && worker.completed >= 1, "worker should process and complete at least one job", worker);
+assert(stage.run?.id === runId, "stage should read the worker-created run", stage.run);
+assert(stage.run.status === "scored", "worker-created run should be scored", stage.run);
+assert(stage.run.metadata?.balance_config?.max_per_source === maxPerSource, "run metadata should record active balance config", stage.run.metadata);
+assert(Array.isArray(stage.items) && stage.items.length >= 10, "stage should contain real normalized items", { count: stage.items?.length });
+assert(Array.isArray(stage.scores) && stage.scores.length >= stage.items.length, "stage should contain score overlays", { items: stage.items?.length, scores: stage.scores?.length });
+
+const itemById = new Map(stage.items.map((item) => [item.id, item]));
+const heuristicScores = stage.scores.filter((score) => score.score_kind === "heuristic_v1");
+const selectedScores = heuristicScores.filter((score) => score.status === "selected");
+const sourceQuotaScores = heuristicScores.filter((score) => score.status === "source_quota");
+assert(selectedScores.length >= 1, "balanced run should still select real items", heuristicScores);
+assert(sourceQuotaScores.length >= minSourceQuota, "balanced run should produce source_quota rows on real data", heuristicScores);
+for (const score of sourceQuotaScores) {
+  const item = itemById.get(score.item_id);
+  assert(item, "source_quota score should reference an item", score);
+  assert(item.source_card_id, "source_quota item should preserve source-card provenance", item);
+  assert(item.wiki_page_id, "source_quota item should preserve wiki provenance", item);
+  assert(String(score.reason || "").includes("source quota cap"), "source_quota score should explain the cap", score);
+  assert((score.tags || []).includes("source-quota"), "source_quota score should carry source-quota tag", score);
+}
+
+const selectedBySource = new Map();
+for (const score of selectedScores) {
+  const item = itemById.get(score.item_id);
+  assert(item, "selected score should reference an item", score);
+  const key = `${item.source_kind}:${item.source_locator}`;
+  selectedBySource.set(key, (selectedBySource.get(key) || 0) + 1);
+}
+const sourceCapViolations = [...selectedBySource.entries()].filter(([, count]) => count > maxPerSource);
+assert(sourceCapViolations.length === 0, "selected rows should respect max_per_source", { selectedBySource: [...selectedBySource], sourceCapViolations });
+
+const distribution = stage.run.metadata?.score_distribution || {};
+assert(distribution.score_kind === "heuristic_v1", "run metadata should record heuristic score distribution", distribution);
+assert(distribution.status_counts?.source_quota === sourceQuotaScores.length, "score distribution should count source_quota rows", { distribution, sourceQuotaCount: sourceQuotaScores.length });
+assert(Number(distribution.score_count || 0) === heuristicScores.length, "score distribution should cover heuristic rows", { distribution, heuristic_score_count: heuristicScores.length });
+assert(Number(distribution.selected_count || 0) === selectedScores.length, "score distribution selected_count should match scores", { distribution, selected_count: selectedScores.length });
+
+assert(audit.ok === true, "radar audit should pass", audit);
+assert(audit.item_count === stage.items.length, "audit item count should match stage", audit);
+assert(summaryWrite.audit_status === "audit_ok", "summary write should require audit_ok", summaryWrite);
+assert(summaryRead.id === summaryWrite.id, "summary read should return the written summary", { summaryWrite, summaryRead });
+assert(summaryRead.metadata?.not_delivery === true, "summary must remain non-delivery", summaryRead.metadata);
+
+const cursorKeys = new Set((cursors || []).map((cursor) => cursor.key));
+assert(cursorKeys.has(`rss:${rssUrl}`), "RSS cursor should advance after durable writes", cursors);
+assert(cursorKeys.has(`github-owner:${githubOwner}`), "GitHub cursor should advance after durable writes", cursors);
+assert(cursorKeys.has(`arxiv:${arxivQuery}`), "arXiv cursor should advance after durable writes", cursors);
+assert(cursorKeys.has("hackernews:topstories"), "Hacker News cursor should advance after durable writes", cursors);
+
+const health = Array.isArray(ops.source_health) ? ops.source_health : [];
+const hasHealthy = (provider, locatorNeedle) =>
+  health.some((row) =>
+    row.provider === provider &&
+    row.status === "healthy" &&
+    String(row.locator || row.key || "").includes(locatorNeedle)
+  );
+assert(hasHealthy("rss", rssUrl), "ops should show healthy RSS source", health);
+assert(hasHealthy("github", githubOwner), "ops should show healthy GitHub source", health);
+assert(hasHealthy("arxiv", arxivQuery), "ops should show healthy arXiv source", health);
+assert(hasHealthy("hackernews", "topstories"), "ops should show healthy Hacker News source", health);
+const opsRun = (ops.radar_runs || []).find((run) => run.id === runId);
+assert(opsRun, "ops snapshot should expose the radar run", ops.radar_runs);
+assert(opsRun.metadata?.balance_config?.max_per_source === maxPerSource, "ops radar run should expose balance config", opsRun);
+assert(opsRun.metadata?.score_distribution?.status_counts?.source_quota === sourceQuotaScores.length, "ops radar run should expose source_quota distribution", opsRun);
+
+const proofPacket = {
+  proof_name: "radar-balance-production-proof",
+  proof_level: "Production Data Proof for source balance caps over worker-drained live public radar data",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  run_id: runId,
+  profile_id: profile.id,
+  profile_name: profile.name,
+  source_families: [
+    { provider: "rss", locator: rssUrl },
+    { provider: "github", locator: githubOwner },
+    { provider: "arxiv", locator: arxivQuery },
+    { provider: "hackernews", locator: hackernewsFeed },
+  ],
+  balance_config: {
+    max_per_source: maxPerSource,
+    category_quotas: profile.metadata?.balance?.category_quotas || {},
+  },
+  worker: {
+    processed: worker.processed,
+    completed: worker.completed,
+    failed: worker.failed,
+    dead_lettered: worker.dead_lettered,
+  },
+  radar_result: {
+    status: stage.run.status,
+    stage: stage.run.stage,
+    raw_count: stage.run.raw_count,
+    scored_count: stage.run.scored_count,
+    selected_count: selectedScores.length,
+    source_quota_count: sourceQuotaScores.length,
+    selected_by_source: Object.fromEntries(selectedBySource),
+  },
+  score_distribution: {
+    score_kind: distribution.score_kind,
+    score_count: distribution.score_count,
+    selected_count: distribution.selected_count,
+    source_quota_count: distribution.status_counts?.source_quota || 0,
+    status_counts: distribution.status_counts,
+    min: distribution.min,
+    max: distribution.max,
+    average: distribution.average,
+    p50: distribution.p50,
+    p90: distribution.p90,
+  },
+  audit: {
+    ok: audit.ok,
+    item_count: audit.item_count,
+    fts_count: audit.fts_count,
+    scored_count: audit.scored_count,
+    findings: audit.findings,
+  },
+  summary: {
+    id: summaryRead.id,
+    audit_status: summaryRead.audit_status,
+    item_count: summaryRead.item_ids.length,
+    source_card_count: summaryRead.source_card_ids.length,
+    not_delivery: summaryRead.metadata.not_delivery,
+  },
+  cursor_keys: [...cursorKeys].filter((key) =>
+    key === `rss:${rssUrl}` ||
+    key === `github-owner:${githubOwner}` ||
+    key === `arxiv:${arxivQuery}` ||
+    key === "hackernews:topstories"
+  ),
+  remaining_risk: [
+    "This proves source balance caps over one worker-drained live public run in a disposable home, not category-quota behavior on unpredictable live categories.",
+    "It does not prove Reddit OAuth, authenticated X, model synthesis/enrichment, live external delivery, seven-day source-quality decay, or long-running scheduled service execution.",
+  ],
+};
+
+fs.writeFileSync(
+  path.join(artifactDir, "proof-packet.json"),
+  `${JSON.stringify(proofPacket, null, 2)}\n`
+);
+process.stdout.write(JSON.stringify(proofPacket, null, 2));
+NODE
+
+printf '\n'
+log "balance production-data proof passed"
+log "proof packet: $ARTIFACT_DIR/proof-packet.json"

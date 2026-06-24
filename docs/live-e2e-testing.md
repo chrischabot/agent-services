@@ -532,6 +532,15 @@ rule step requires a Cloudflare API token with Email Routing permissions.
 Tracked docs and examples must keep only `agent@example.com` and
 `user@example.com`.
 
+Tracked-address regression gate:
+
+```sh
+scripts/verify-tracked-email-placeholders
+```
+
+This scans git-tracked text files and fails on non-placeholder email domains.
+Use ignored local env or Arcwell secrets for real agent/author addresses.
+
 Route setup and live proof notes:
 
 - A dashboard-created live route now sends the locally configured agent address

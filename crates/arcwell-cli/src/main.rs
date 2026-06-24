@@ -2344,6 +2344,8 @@ enum RadarProfileSubcommand {
         delivery_policy_json: Option<String>,
         #[arg(long = "model-policy-json")]
         model_policy_json: Option<String>,
+        #[arg(long = "metadata-json")]
+        metadata_json: Option<String>,
     },
     List,
     Read {
@@ -3732,6 +3734,7 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
                 selector_json,
                 delivery_policy_json,
                 model_policy_json,
+                metadata_json,
             } => {
                 let mut selectors: Vec<Value> = source_card_query
                     .into_iter()
@@ -3757,6 +3760,18 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
                     .transpose()
                     .context("invalid model policy JSON")?
                     .unwrap_or_else(|| json!({ "model_scoring": "disabled" }));
+                let mut metadata = metadata_json
+                    .as_deref()
+                    .map(serde_json::from_str::<Value>)
+                    .transpose()
+                    .context("invalid metadata JSON")?
+                    .unwrap_or_else(|| json!({ "created_from": "cli" }));
+                let Some(metadata_object) = metadata.as_object_mut() else {
+                    bail!("radar profile metadata JSON must be an object");
+                };
+                metadata_object
+                    .entry("created_from".to_string())
+                    .or_insert_with(|| json!("cli"));
                 print_json(&store.create_radar_profile(RadarProfileInput {
                     name,
                     description,
@@ -3767,7 +3782,7 @@ fn radar(store: Store, args: RadarCommand) -> Result<()> {
                     source_selectors: Value::Array(selectors),
                     delivery_policy,
                     model_policy,
-                    metadata: json!({ "created_from": "cli" }),
+                    metadata,
                 })?)
             }
             RadarProfileSubcommand::List => print_json(&store.list_radar_profiles()?),
@@ -5890,7 +5905,8 @@ p{margin:4px 0 14px}.muted{color:#57606a}.notice{border-left:4px solid #1f6feb;p
 .section{margin-top:24px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .metric{border:1px solid #d8dee4;background:white;padding:10px;border-radius:6px;min-width:0}
-.metric span{display:block;color:#57606a;font-size:12px}.metric b{display:block;font-size:22px;margin-top:4px}
+.metric span{display:block;color:#57606a;font-size:12px}.metric b{display:block;font-size:22px;line-height:1.15;margin-top:4px;overflow-wrap:anywhere}
+.summary-grid .metric b{font-size:16px;line-height:1.25}
 .ops-form{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end;margin-top:18px}
 .ops-form label{display:grid;gap:4px;font-size:12px;color:#57606a}
 input,select,button{font:inherit;border:1px solid #d8dee4;border-radius:6px;background:white;color:inherit;padding:7px}
@@ -6758,7 +6774,9 @@ fn render_ops_filter_form(options: &OpsUiOptions) -> String {
 
 fn render_ops_summary(snapshot: &OpsSnapshot, score: &OpsHealthScore) -> String {
     let mut html = String::new();
-    html.push_str("<section class=\"section\"><h2>Summary</h2><section class=\"grid\">");
+    html.push_str(
+        "<section class=\"section\"><h2>Summary</h2><section class=\"grid summary-grid\">",
+    );
     for (label, value) in [
         ("Health", format!("{} ({})", score.score, score.label)),
         (
@@ -13781,6 +13799,91 @@ reason = "MCP secret writes are denied for this token"
         )
         .expect_err("host provider should instruct the agent instead of silently succeeding");
         assert!(error.to_string().contains("host-native search must be run"));
+    }
+
+    #[test]
+    fn severe_cli_radar_profile_create_preserves_metadata_json_for_balance() {
+        // CLAIM: CLI-created radar profiles can carry structured metadata such
+        // as balance caps into the same durable profile path as MCP-created
+        // profiles.
+        // ORACLE: The stored profile preserves nested balance metadata and adds
+        // a CLI provenance marker; non-object metadata fails closed.
+        // SEVERITY: Severe because production proof scripts exercise the CLI,
+        // and silently dropping metadata makes balance look configured while
+        // the scoring path runs unbalanced.
+        let paths = test_paths("cli-radar-profile-metadata");
+        radar(
+            Store::open(paths.clone()).unwrap(),
+            RadarCommand {
+                command: RadarSubcommand::Profile {
+                    command: RadarProfileSubcommand::Create {
+                        name: "cli-balance-radar".to_string(),
+                        description: "CLI balance metadata proof".to_string(),
+                        window_hours: 24,
+                        min_score: 1.0,
+                        max_items: Some(10),
+                        language: vec!["en".to_string()],
+                        source_card_query: vec!["agent".to_string()],
+                        selector_json: vec![],
+                        delivery_policy_json: None,
+                        model_policy_json: None,
+                        metadata_json: Some(
+                            r#"{"balance":{"max_per_source":1,"category_quotas":{"agent":2}}}"#
+                                .to_string(),
+                        ),
+                    },
+                },
+            },
+        )
+        .unwrap();
+
+        let store = Store::open(paths.clone()).unwrap();
+        let profile = store
+            .read_radar_profile("cli-balance-radar")
+            .unwrap()
+            .expect("profile should be readable by name");
+        assert_eq!(
+            profile
+                .metadata
+                .pointer("/balance/max_per_source")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            profile
+                .metadata
+                .pointer("/balance/category_quotas/agent")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            profile.metadata.get("created_from").and_then(Value::as_str),
+            Some("cli")
+        );
+
+        let error = radar(
+            Store::open(paths).unwrap(),
+            RadarCommand {
+                command: RadarSubcommand::Profile {
+                    command: RadarProfileSubcommand::Create {
+                        name: "bad-cli-balance-radar".to_string(),
+                        description: "Bad CLI metadata".to_string(),
+                        window_hours: 24,
+                        min_score: 1.0,
+                        max_items: Some(10),
+                        language: vec!["en".to_string()],
+                        source_card_query: vec!["agent".to_string()],
+                        selector_json: vec![],
+                        delivery_policy_json: None,
+                        model_policy_json: None,
+                        metadata_json: Some("[]".to_string()),
+                    },
+                },
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("metadata JSON must be an object"), "{error}");
     }
 
     #[test]

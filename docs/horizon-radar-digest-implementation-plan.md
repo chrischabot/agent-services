@@ -207,6 +207,15 @@ Evidence:
   capped, one category cannot exceed its quota, quota-rejected rows remain in
   `radar_scores` as `source_quota` / `category_quota` with reasons/tags, and
   rejected items retain source-card/wiki provenance.
+- Production-data source-balance proof now exists through
+  `scripts/radar-balance-production-proof`, preserved at
+  `.arcwell-dev/proofs/radar-balance-production-proof-20260624T102938Z-92096/artifacts/proof-packet.json`.
+  A worker-drained live public RSS/GitHub/arXiv/Hacker News run wrote 52
+  normalized/indexed/scored radar items, selected 4 items with at most one per
+  source, kept 36 `source_quota` rows inspectable with source-card/wiki
+  provenance, passed `radar audit`, recorded healthy source-health/cursors, and
+  wrote a non-delivery summary. Category balance remains locally proven only
+  because live category tags are source-dependent.
 
 Still not proven by this slice:
 
@@ -214,8 +223,8 @@ Still not proven by this slice:
 - Scheduled recurring radar service execution, retry/recovery, and ops UI
   controls.
 - Full recursive HN/Reddit community-thread capture.
-- Production-data semantic/topic dedupe review, production-data category/source
-  balance review, source-quality decay.
+- Production-data semantic/topic dedupe breadth across more profiles,
+  broader category-quota/multi-profile balance review, source-quality decay.
 - Model-backed interestingness, enrichment/synthesis, and delivery attempts.
 - Full production multi-source proof including authenticated/private sources.
 
@@ -1421,7 +1430,9 @@ Purpose: prove source-quality and balancing.
 
 Required:
 
-- [ ] Run with enough sources that one family would dominate without quotas.
+- [x] Run with enough sources that one family would dominate without quotas:
+      `scripts/radar-balance-production-proof` selected 4 live items from 52
+      scored rows and produced 36 inspectable `source_quota` rows.
 - [ ] Show source-quality table.
 - [ ] Show category quota effects.
 - [ ] Show overlap/dedupe groups.

@@ -123,8 +123,11 @@ PR, implementation note, or final report:
 
 - [ ] Decide whether to keep server-rendered HTML or split out a small frontend
       package before adding richer controls.
-- [ ] Add browser validation for the richer current `/ops/ui` on desktop and
-      mobile.
+- [x] Add browser validation for the richer current `/ops/ui` on desktop and
+      mobile: `scripts/ops-ui-browser-smoke` seeds a disposable authenticated
+      server, drives desktop/detail/mobile browser checks, verifies radar score
+      bars, hostile HTML escaping, no horizontal overflow, and writes screenshots
+      plus a proof packet.
 - [ ] Add manual job requeue/cancel controls only after safe public core APIs
       exist; do not fake unsupported remediation.
 - [ ] Add safe controls for retry delivery, apply/reject candidate, run doctor,
@@ -363,6 +366,13 @@ PR, implementation note, or final report:
       profile metadata, with quota rejection statuses that keep source-card
       evidence inspectable and severe tests for malformed caps, source
       dominance, category dominance, and audit-clean readback.
+- [x] Run production-data source-balance proof over live public RSS/GitHub/arXiv
+      and Hacker News data: `scripts/radar-balance-production-proof` preserved
+      `.arcwell-dev/proofs/radar-balance-production-proof-20260624T102938Z-92096`,
+      wrote 52 real radar items/scores, selected 4 items with at most one per
+      source, kept 36 `source_quota` rows inspectable with source-card/wiki
+      provenance, passed `radar audit`, recorded healthy cursors/source-health,
+      and wrote a deterministic non-delivery summary.
 - [x] Add radar source-quality ops visibility in `ops_snapshot` and `/ops/ui`
       with non-healthy health warnings, summary scoring, filtered rows, and
       severe HTML escaping coverage.
@@ -439,15 +449,24 @@ PR, implementation note, or final report:
       healthy cursor/source-health state, sends one audit-ok summary through a
       controlled Telegram endpoint, records tick/run/summary/delivery lineage,
       and proves duplicate suppression on a second worker pass.
+- [x] Add repeatable production-data source-balance proof:
+      `scripts/radar-balance-production-proof` creates a disposable profile over
+      real public RSS/GitHub/arXiv/Hacker News sources with CLI `--metadata-json`
+      balance caps, drains the worker, verifies source-quota score rows,
+      selected-by-source caps, score distribution counts, audit-ok summary,
+      cursor/source-health state, and ops visibility at
+      `.arcwell-dev/proofs/radar-balance-production-proof-20260624T102938Z-92096`.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
       production quiet-hours deferral, production-data semantic dedupe breadth
-      across more profiles, production-data balance review, live model-scoring
-      quality proof, seven-day source-quality trend/decay proof, broader ops
-      controls, and status promotion only after real-data gates pass.
-- [ ] Preserve tracked email defaults as `agent@example.com` and
-      `user@example.com`; keep real local agent/author addresses only in ignored
-      env or secret config.
+      across more profiles, broader category-quota/multi-profile balance
+      review, live model-scoring quality proof, seven-day source-quality
+      trend/decay proof, broader ops controls, and status promotion only after
+      real-data gates pass.
+- [x] Preserve tracked email defaults as `agent@example.com` and
+      `user@example.com`; `scripts/verify-tracked-email-placeholders` now scans
+      git-tracked files and fails on non-placeholder email domains so real local
+      agent/author addresses stay in ignored env or secret config.
 
 ## 6. Deep Research Quality And Host-Native Execution
 

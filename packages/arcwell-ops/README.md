@@ -18,9 +18,13 @@ Current first-pass implementation:
   candidates, work runs, procedure candidates, memory candidates, policy
   decisions/approvals, costs, and secret health.
 - `/ops/ui` includes search/status filters, stable sorting, detail views,
-  summary health scoring, queue/source/credential summaries, and one narrow
-  authenticated edge-event dead-letter control with token auth, hostile-origin
-  rejection, CSRF/idempotency checks, policy enforcement, and replay tests.
+  summary health scoring, queue/source/radar-run/radar-quality/credential
+  summaries, and one narrow authenticated edge-event dead-letter control with
+  token auth, hostile-origin rejection, CSRF/idempotency checks, policy
+  enforcement, and replay tests.
+- `scripts/ops-ui-browser-smoke` runs browser-backed desktop, detail, and
+  mobile validation against a seeded authenticated local `/ops/ui`, preserving
+  screenshots and a proof packet under `.arcwell-dev/proofs/`.
 - Broader mutating controls remain deferred until each action has explicit
   core support, auth, policy, CSRF/origin, idempotency/replay handling, and
   severe tests.
@@ -36,5 +40,5 @@ MCP resources:
 Remaining work:
 
 - Manual requeue/cancel controls with confirmation policy.
-- Browser validation for the richer filter/detail/control UI.
-- Error charts and recent failures.
+- More browser fixtures for X-specific hostile rows and future mutating controls.
+- Error charts, watchdog summaries, and recent failures.

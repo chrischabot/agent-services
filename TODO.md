@@ -412,7 +412,11 @@ PR, implementation note, or final report:
       schema-validated `model_interestingness_v1` score rows and inspectable
       prompt/output artifacts, policy/cost block live OpenAI attempts before
       credentials or score rows, malformed provider output fails closed, model
-      scores remain non-authorizing for summaries/delivery, and
+      scores remain non-authorizing for summaries/delivery, private or
+      unauthorized source-card/radar-item metadata is excluded before prompt
+      construction with auditable `model_blocked` rows, all-excluded runs skip
+      provider/cost paths, missing source-card provenance overwrites stale
+      model rows as blocked, and
       `scripts/radar-model-score-production-proof` proves a live OpenAI
       overlay on a fresh public RSS/GitHub/arXiv/Hacker News worker run without
       mutating heuristic selected rows or source-quality accounting.

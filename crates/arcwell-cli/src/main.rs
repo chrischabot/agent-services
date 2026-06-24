@@ -957,6 +957,18 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
         SlashAliasTarget::Mcp("digest_candidate_list"),
     ),
     (
+        "digest-candidate-approve",
+        SlashAliasTarget::Mcp("digest_candidate_approve"),
+    ),
+    (
+        "digest-candidate-reject",
+        SlashAliasTarget::Mcp("digest_candidate_reject"),
+    ),
+    (
+        "digest-candidate-delivery-check",
+        SlashAliasTarget::Mcp("digest_candidate_delivery_check"),
+    ),
+    (
         "radar-profile-create",
         SlashAliasTarget::Mcp("radar_profile_create"),
     ),
@@ -9082,6 +9094,35 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
             ))
         }
         "digest_candidate_list" => Ok(json!(store.list_digest_candidates()?)),
+        "digest_candidate_approve" => {
+            let id = required_string(&arguments, "id")?;
+            let reviewed_by = arguments.get("reviewed_by").and_then(Value::as_str);
+            let note = arguments.get("note").and_then(Value::as_str);
+            Ok(json!(store.approve_digest_candidate(
+                &id,
+                reviewed_by,
+                note
+            )?))
+        }
+        "digest_candidate_reject" => {
+            let id = required_string(&arguments, "id")?;
+            let reviewed_by = arguments.get("reviewed_by").and_then(Value::as_str);
+            let note = arguments.get("note").and_then(Value::as_str);
+            Ok(json!(store.reject_digest_candidate(
+                &id,
+                reviewed_by,
+                note
+            )?))
+        }
+        "digest_candidate_delivery_check" => {
+            let id = required_string(&arguments, "id")?;
+            let channel = required_string(&arguments, "channel")?;
+            let subject = required_string(&arguments, "subject")?;
+            let target = arguments.get("target").and_then(Value::as_str);
+            Ok(json!(store.check_digest_candidate_delivery(
+                &id, &channel, &subject, target
+            )?))
+        }
         "radar_profile_create" => {
             let name = required_string(&arguments, "name")?;
             let description = optional_string(&arguments, "description", "");
@@ -10683,6 +10724,42 @@ fn mcp_tools() -> Vec<Value> {
             "digest_candidate_list",
             "List interestingness/digest candidates.",
             [],
+        ),
+        tool(
+            "digest_candidate_approve",
+            "Mark a sourced digest candidate as human-reviewed and approved for later delivery gating.",
+            [
+                ("id", "string", "Digest candidate id."),
+                ("reviewed_by", "string", "Reviewer label."),
+                ("note", "string", "Review note or rationale."),
+            ],
+        ),
+        tool(
+            "digest_candidate_reject",
+            "Reject a sourced digest candidate and keep the review decision durable.",
+            [
+                ("id", "string", "Digest candidate id."),
+                ("reviewed_by", "string", "Reviewer label."),
+                ("note", "string", "Review note or rejection rationale."),
+            ],
+        ),
+        tool(
+            "digest_candidate_delivery_check",
+            "Check whether a digest candidate passes review and policy gates before any delivery attempt.",
+            [
+                ("id", "string", "Digest candidate id."),
+                (
+                    "channel",
+                    "string",
+                    "Delivery channel such as telegram or email.",
+                ),
+                (
+                    "subject",
+                    "string",
+                    "Authorized delivery subject, such as telegram:chat:123.",
+                ),
+                ("target", "string", "Optional delivery target/destination."),
+            ],
         ),
         tool(
             "radar_profile_create",
@@ -12541,7 +12618,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         command_names.sort();
-        assert_eq!(command_names.len(), 134);
+        assert_eq!(command_names.len(), 137);
         let missing = command_names
             .into_iter()
             .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))

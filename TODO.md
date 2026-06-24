@@ -242,8 +242,12 @@ PR, implementation note, or final report:
       not inflate the queue. X monitor-created candidates now also write
       idempotent `x_projections` rows linking canonical tweet ids, source-card
       ids, and digest candidate ids, and `/ops/ui` surfaces linked X digest
-      queue counts; review states, score freshness, delivery-denial audit,
-      delivery-attempt integration, and quiet-hours scheduling remain open.
+      queue counts. Digest candidates now carry durable `review_status`,
+      reviewer, review note, approve/reject MCP/slash surfaces, and a
+      fail-closed delivery check that records policy-decision audit metadata
+      while refusing unreviewed/rejected/model-score-only delivery; score
+      freshness, actual delivery-attempt integration, and quiet-hours
+      scheduling remain open.
 - [ ] Add X heuristic scoring before model scoring, with score rows as overlays,
       stale-score labels, schema-validated model output, eval fixtures,
       cost-decision rows, private-content exclusion, and proof that scores never
@@ -411,6 +415,15 @@ PR, implementation note, or final report:
       `semantic_topic` groups and 621 `duplicate_topic` rows inspectable with
       source-card/wiki provenance, passed four clean audits, and wrote four
       non-delivery summaries.
+- [x] Run live-adapter production-data semantic/topic dedupe breadth proof over
+      freshly fetched public sources:
+      `scripts/radar-live-semantic-dedupe-production-proof` preserved
+      `.arcwell-dev/proofs/radar-live-semantic-dedupe-production-proof-20260624T110348Z-17349`,
+      worker-drained real RSS, GitHub owner, arXiv, and Hacker News adapters,
+      wrote 62 radar items/FTS rows/scores, selected 48 items, kept 10
+      `semantic_topic` groups and 14 `duplicate_topic` rows inspectable with
+      source-card/wiki provenance, passed audit, and wrote a non-delivery
+      summary.
 - [x] Add local/manual radar summary delivery attempts through authorized
       Telegram/email channel send paths, with CLI/MCP/slash surfaces, durable
       `radar_deliveries` rows linked to channel delivery attempts, idempotency
@@ -480,11 +493,10 @@ PR, implementation note, or final report:
       `.arcwell-dev/proofs/radar-category-balance-production-proof-20260624T104401Z-30612`.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
-      production quiet-hours deferral, production-data semantic dedupe breadth
-      for live-fetched public runs, non-source-family taxonomy category-balance
-      review, live model-scoring quality proof, seven-day source-quality
-      trend/decay proof, broader ops controls, and status promotion only after
-      real-data gates pass.
+      production quiet-hours deferral, non-source-family taxonomy
+      category-balance review, live model-scoring quality proof, seven-day
+      source-quality trend/decay proof, broader ops controls, and status
+      promotion only after real-data gates pass.
 - [x] Preserve tracked email defaults as `agent@example.com` and
       `user@example.com`; `scripts/verify-tracked-email-placeholders` now scans
       git-tracked files and fails on non-placeholder email domains so real local
@@ -630,8 +642,10 @@ PR, implementation note, or final report:
       verifier prompt injection, self-validating source text, cross-run source
       cards, and generated-summary evidence misuse. Current coverage includes
       supported/unsupported/vague sentence extraction plus close-loop blocked
-      and provider-proof closure; prompt-injection, cross-run, and generated
-      evidence misuse fixtures still need expansion.
+      and provider-proof closure. It now also proves matched report sentences
+      are not marked `right` when their only support is generated/model-answer
+      evidence with prompt-injection text; seeded false/cross-run/verifier
+      prompt-injection fixtures still need expansion.
 - [x] Add convergence-aware report rendering: final position, what changed,
       survived/weakened/refuted statements, unresolved disproofs, source
       coverage, saturation, active fact-check summary, convergence stop reason,

@@ -152,6 +152,12 @@ Boundary:
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.
 - Full following import is available for diagnostics/backfill only; do not use it as the default monitor seed because it imports the whole social graph.
 - `x monitor-watch-sources` polls the active definitive `x_handle` watch list, imports accepted watched-source tweets into X items/source cards/wiki pages, creates digest candidates from new source cards, and records per-source `x:watch:<handle>` cursors, source-health, and `watch_monitor` sync runs.
+- X monitor-created digest candidates are linked back to canonical tweet ids
+  through `x_projections` rows, list with durable review state, and must pass an
+  explicit delivery check before any future send path. The delivery check
+  refuses unreviewed/rejected candidates, records policy-decision audit
+  metadata, and still requires an explicit delivery policy allowance after human
+  approval.
 - Resident worker due-source polling now enqueues the same per-handle watch
   monitor job for `x_handle` watch sources, rather than the weaker
   `x_recent_search from:<handle>` substitute.
@@ -213,3 +219,5 @@ Future work:
   scheduled backup integration, richer freshness/ops visibility, and broader X
   entity coverage beyond tweets.
 - Richer timeline/list adapters once API access tier/cost constraints are known.
+- Actual X digest delivery routing through Telegram/email delivery attempts,
+  quiet-hours scheduling, and score freshness labels remain future work.

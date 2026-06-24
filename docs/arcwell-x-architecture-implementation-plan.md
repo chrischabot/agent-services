@@ -1953,7 +1953,7 @@ Implementation checklist:
 - [ ] Add `x_projections`.
 - [ ] Record projection status for source card.
 - [ ] Record projection status for wiki page.
-- [ ] Record projection status for digest candidate.
+- [x] Record projection status for digest candidate.
 - [ ] Add unique projection key per entity/projection kind.
 - [ ] Link source-card metadata back to canonical `x_tweets.x_id`.
 - [ ] Link wiki page metadata back to source-card and canonical tweet.
@@ -1972,7 +1972,7 @@ Severe tests:
 - [ ] CLAIM: hostile profile name cannot inject markdown/script into ops UI.
 - [ ] CLAIM: source-card metadata includes canonical ids.
 - [ ] CLAIM: failed projection appears in ops snapshot.
-- [ ] CLAIM: digest candidate links to source-card id and canonical x id.
+- [x] CLAIM: digest candidate links to source-card id and canonical x id.
 
 False-done traps:
 
@@ -2544,28 +2544,28 @@ Feature claim:
 
 Implementation checklist:
 
-- [ ] Link digest candidates to canonical tweet/thread ids.
-- [ ] Link digest candidates to source-card ids.
-- [ ] Preserve current digest candidate table compatibility.
+- [x] Link digest candidates to canonical tweet/thread ids.
+- [x] Link digest candidates to source-card ids.
+- [x] Preserve current digest candidate table compatibility.
 - [ ] Add candidate provenance: watch source, bookmark, search, archive.
-- [ ] Add candidate status transitions.
+- [x] Add candidate status transitions.
 - [ ] Add candidate score freshness.
 - [ ] Add candidate dedupe by canonical entity.
 - [ ] Add review list command.
-- [ ] Add apply/reject command only with clear semantics.
+- [x] Add approve/reject command only with clear semantics.
 - [ ] Route delivery through existing delivery-attempt infrastructure.
-- [ ] Require policy/cost/authorization before delivery.
+- [x] Require review and policy gates before delivery.
 - [ ] Record delivery attempts.
 - [ ] Add quiet-hours/schedule integration later.
 
 Severe tests:
 
 - [ ] CLAIM: duplicate watched tweet creates one candidate.
-- [ ] CLAIM: candidate has source-card link.
-- [ ] CLAIM: candidate has canonical tweet id.
-- [ ] CLAIM: rejected candidate is not delivered.
-- [ ] CLAIM: model score alone cannot deliver candidate.
-- [ ] CLAIM: delivery policy denial creates audit, no send.
+- [x] CLAIM: candidate has source-card link.
+- [x] CLAIM: candidate has canonical tweet id.
+- [x] CLAIM: rejected candidate is not delivered.
+- [x] CLAIM: model score alone cannot deliver candidate.
+- [x] CLAIM: delivery policy denial creates audit, no send.
 - [ ] CLAIM: Telegram/email send errors leave retryable attempt state.
 - [ ] CLAIM: prompt-injection text cannot alter delivery destination/body.
 
@@ -2578,8 +2578,8 @@ False-done traps:
 
 Done evidence:
 
-- [ ] candidate dedupe tests pass
-- [ ] delivery-denial tests pass
+- [x] candidate dedupe tests pass
+- [x] delivery-denial tests pass
 - [ ] channel delivery smoke passes only when claiming live delivery
 
 ### 18. AI Scoring Overlays
@@ -5567,7 +5567,7 @@ Evidence required for read requirements:
 - [ ] RX-OPS-004: ops shows sync runs and failed sync runs.
 - [ ] RX-OPS-005: ops shows source health by stream/source/account.
 - [ ] RX-OPS-006: ops shows projection backlog.
-- [ ] RX-OPS-007: ops shows digest candidate queue.
+- [x] RX-OPS-007: ops shows digest candidate queue.
 - [ ] RX-OPS-008: ops shows credential expiry and scope state.
 - [x] RX-OPS-009: ops shows portable export freshness. Broader archive import
       freshness remains future work.

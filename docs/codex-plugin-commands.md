@@ -150,6 +150,12 @@ typing part of the name. Use the displayed command name from the picker.
 - `/source-card-read` uses `source_card_read`.
 - `/digest-candidate-create` uses `digest_candidate_create`.
 - `/digest-candidates` uses `digest_candidate_list`.
+- `/digest-candidate-approve` uses `digest_candidate_approve`; approval is
+  review state only, not delivery authorization.
+- `/digest-candidate-reject` uses `digest_candidate_reject` and keeps the
+  rejection as durable review state.
+- `/digest-candidate-delivery-check` uses `digest_candidate_delivery_check` to
+  verify review and policy gates before any delivery attempt; it does not send.
 - `/radar-profile-create` uses `radar_profile_create`.
 - `/radar-profiles` uses `radar_profile_list`.
 - `/radar-profile-read` uses `radar_profile_read`.

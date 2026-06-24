@@ -235,8 +235,18 @@ Evidence:
   621 `duplicate_topic` rows inspectable with source-card/wiki provenance,
   exposed matching run/ops score-distribution counts, passed four audits, and
   wrote four non-delivery summaries. This proves deterministic local semantic
-  dedupe breadth over real source cards, not model semantic dedupe or live
-  adapter semantic breadth.
+  dedupe breadth over real source cards, not model semantic dedupe.
+- Production-data live-adapter semantic/topic dedupe breadth proof now exists
+  through `scripts/radar-live-semantic-dedupe-production-proof`, preserved at
+  `.arcwell-dev/proofs/radar-live-semantic-dedupe-production-proof-20260624T110348Z-17349/artifacts/proof-packet.json`.
+  A worker-drained fresh public RSS/GitHub/arXiv/Hacker News run wrote 62
+  normalized/indexed/scored radar items, selected 48, kept 10
+  `semantic_topic` groups and 14 `duplicate_topic` rows inspectable with
+  source-card/wiki provenance across live source families, exposed matching
+  run/ops score-distribution counts, advanced healthy cursors/source-health,
+  passed audit, and wrote a non-delivery summary. This proves deterministic
+  local semantic dedupe on freshly fetched public adapters, not model semantic
+  dedupe or recurring service behavior.
 
 Still not proven by this slice:
 
@@ -244,8 +254,7 @@ Still not proven by this slice:
 - Scheduled recurring radar service execution, retry/recovery, and ops UI
   controls.
 - Full recursive HN/Reddit community-thread capture.
-- Live-adapter semantic/topic dedupe breadth, non-source-family taxonomy
-  category-balance review, source-quality decay.
+- Non-source-family taxonomy category-balance review and source-quality decay.
 - Model-backed interestingness, enrichment/synthesis, and delivery attempts.
 - Full production multi-source proof including authenticated/private sources.
 
@@ -1640,6 +1649,8 @@ Exit gate:
 - [x] Local deterministic semantic/topic dedupe.
 - [x] Copied-home production-data deterministic semantic/topic dedupe breadth
       over the real source-card corpus.
+- [x] Live-adapter production-data deterministic semantic/topic dedupe breadth
+      over fresh public RSS/GitHub/arXiv/Hacker News sources.
 - [x] Local deterministic category/source balancing.
 - [x] Optional local/mock model scoring overlays.
 - [ ] Optional model semantic dedupe.

@@ -43419,7 +43419,17 @@ fn render_research_convergence_report(
         .iter()
         .map(|statement| statement.id.as_str())
         .collect::<BTreeSet<_>>();
-    let current_statement_count = status.current_statements.len();
+    let defensible_current_statements = status
+        .current_statements
+        .iter()
+        .filter(|statement| statement.status != "refuted")
+        .collect::<Vec<_>>();
+    let refuted_current_statements = status
+        .current_statements
+        .iter()
+        .filter(|statement| statement.status == "refuted")
+        .collect::<Vec<_>>();
+    let current_statement_count = defensible_current_statements.len();
     let open_search_tasks = status
         .host_search_tasks
         .iter()
@@ -43430,6 +43440,21 @@ fn render_research_convergence_report(
         .iter()
         .filter(|task| task.status == "recorded")
         .count();
+    let open_blocking_challenges = challenges
+        .iter()
+        .filter(|challenge| {
+            matches!(challenge.severity.as_str(), "critical" | "error")
+                && matches!(
+                    challenge.status.as_str(),
+                    "open" | "searching" | "unresolved"
+                )
+        })
+        .collect::<Vec<_>>();
+    let unresolved_high_fact_checks = fact_checks
+        .iter()
+        .filter(|check| check.impact == "high" && check.label != "right")
+        .collect::<Vec<_>>();
+    let unresolved_strong_disproofs = status.strong_refutations.iter().collect::<Vec<_>>();
     let mut markdown = String::new();
     markdown.push_str(&format!(
         "# Iterated Research Convergence: {}\n\n",
@@ -43463,9 +43488,53 @@ fn render_research_convergence_report(
         }
     }
 
+    markdown.push_str("## Executive Caveats\n\n");
+    let mut executive_caveats = Vec::new();
+    if !refuted_current_statements.is_empty() {
+        executive_caveats.push(format!(
+            "{} latest-iteration statement(s) are refuted and are preserved only in the refuted/dropped appendix, not the current position.",
+            refuted_current_statements.len()
+        ));
+    }
+    for challenge in open_blocking_challenges.iter().take(5) {
+        executive_caveats.push(format!(
+            "`{}` `{}` challenge remains `{}` for statement `{}`: {}",
+            challenge.severity,
+            challenge.challenge_type,
+            challenge.status,
+            challenge.statement_id,
+            challenge.rationale
+        ));
+    }
+    for disproof in unresolved_strong_disproofs.iter().take(5) {
+        executive_caveats.push(format!(
+            "`{}` `{}` disproof still requires revision for statement `{}`: {}",
+            disproof.strength, disproof.verdict, disproof.statement_id, disproof.reasoning_summary
+        ));
+    }
+    for check in unresolved_high_fact_checks.iter().take(5) {
+        executive_caveats.push(format!(
+            "`{}` high-impact fact check remains for statement `{}`: {}",
+            check.label, check.statement_id, check.notes
+        ));
+    }
+    if open_search_tasks > 0 {
+        executive_caveats.push(format!(
+            "{open_search_tasks} challenge-linked host/provider search task(s) still need recorded proof."
+        ));
+    }
+    if executive_caveats.is_empty() {
+        markdown.push_str("- No executive caveats were raised by the deterministic convergence gate. Future evidence can still overturn the position.\n\n");
+    } else {
+        for caveat in executive_caveats {
+            markdown.push_str(&format!("- {}\n", escape_research_report_text(&caveat)));
+        }
+        markdown.push('\n');
+    }
+
     markdown.push_str("## Bottom Line\n\n");
     if current_statement_count == 0 {
-        markdown.push_str("There is no defensible bottom line yet because the run has not produced current analytical statements from the evidence ledger.\n\n");
+        markdown.push_str("There is no defensible bottom line yet because the latest iteration has not produced non-refuted analytical statements from the evidence ledger.\n\n");
     } else if status.settled && open_search_tasks == 0 {
         markdown.push_str(&format!(
             "The current position is provisionally defensible: `{}` statement(s) survived the recorded challenge, disproof, revision, fact-check, and host-search proof loop. The report should still be read with the residual risks below, especially if the source corpus is thin or the domain is fast-moving.\n\n",
@@ -43486,11 +43555,11 @@ fn render_research_convergence_report(
     }
 
     markdown.push_str("## Current Position\n\n");
-    if status.current_statements.is_empty() {
+    if defensible_current_statements.is_empty() {
         markdown
-            .push_str("No current analytical statements were compiled from extracted claims.\n\n");
+            .push_str("No non-refuted analytical statements remain in the latest iteration.\n\n");
     } else {
-        for statement in &status.current_statements {
+        for statement in &defensible_current_statements {
             markdown.push_str(&format!(
                 "- **{}** `{}` confidence `{:.2}`: {}\n",
                 escape_research_report_text(&statement.importance),
@@ -43515,6 +43584,34 @@ fn render_research_convergence_report(
                 if !caveat_text.is_empty() {
                     markdown.push_str(&format!(
                         "  Caveats: {}\n",
+                        escape_research_report_text(&caveat_text.join("; "))
+                    ));
+                }
+            }
+        }
+        markdown.push('\n');
+    }
+
+    if !refuted_current_statements.is_empty() {
+        markdown.push_str("## Refuted Or Dropped Statements\n\n");
+        markdown.push_str("These statements are retained for traceability. They are not part of the current position and must not be reused as conclusions without new evidence and a replacement revision.\n\n");
+        for statement in refuted_current_statements.iter().take(30) {
+            markdown.push_str(&format!(
+                "- `{}` confidence `{:.2}`: {}\n",
+                escape_research_report_text(&statement.status),
+                statement.confidence,
+                escape_research_report_text(&statement.text)
+            ));
+            if let Some(caveats) = statement.caveats.as_array() {
+                let caveat_text = caveats
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(3)
+                    .map(research_report_sentence)
+                    .collect::<Vec<_>>();
+                if !caveat_text.is_empty() {
+                    markdown.push_str(&format!(
+                        "  Why not current: {}\n",
                         escape_research_report_text(&caveat_text.join("; "))
                     ));
                 }
@@ -43554,19 +43651,8 @@ fn render_research_convergence_report(
     }
 
     markdown.push_str("## Pressure-Test Results\n\n");
-    let high_open = challenges
-        .iter()
-        .filter(|challenge| {
-            matches!(
-                challenge.status.as_str(),
-                "open" | "searching" | "unresolved"
-            ) && matches!(challenge.severity.as_str(), "critical" | "error")
-        })
-        .count();
-    let high_unknown = fact_checks
-        .iter()
-        .filter(|check| check.impact == "high" && check.label != "right")
-        .count();
+    let high_open = open_blocking_challenges.len();
+    let high_unknown = unresolved_high_fact_checks.len();
     markdown.push_str(&format!(
         "- Iterations: `{}`\n- Statements compiled: `{}`\n- Challenges generated: `{}`\n- Challenge-verifier records: `{}`\n- Revisions applied: `{}`\n- High-impact unresolved fact-checks: `{}`\n- Critical/error open challenges: `{}`\n\n",
         iterations.len(),
@@ -59895,6 +59981,132 @@ reason = "X monitor network blocked for test"
     }
 
     #[test]
+    fn severe_x_source_health_status_matrix_is_visible_to_stats_and_doctor() {
+        // CLAIM: X source-health visibility preserves distinct operational states.
+        // PRECONDITIONS: A local store contains the full X status matrix operators
+        // need to triage: healthy, stale, rate_limited, auth_failed,
+        // policy_denied, projection_failed, partial, and unknown.
+        // POSTCONDITIONS: x_stats groups every status, non-healthy drift excludes
+        // only healthy rows, health/strict doctor warn, and raw secret-shaped
+        // provider details are redacted.
+        // ORACLE: source_health_by_status, drift.non_healthy_sources, health
+        // warnings, strict doctor failures, and serialized stats.
+        // SEVERITY: Severe because collapsing these states makes an X sync look
+        // operational while hiding whether the fix is auth, quota, policy,
+        // projection repair, or provider payload quality.
+        let store = test_store("x-source-health-status-matrix");
+        let now_value = now();
+        for (index, (status, error)) in [
+            ("healthy", None),
+            ("stale", Some("last success is too old")),
+            (
+                "rate_limited",
+                Some("HTTP 429 quota token=sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ),
+            (
+                "auth_failed",
+                Some("expired X_BEARER_TOKEN value=xoxp-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ),
+            ("policy_denied", Some("policy denied provider.network")),
+            (
+                "projection_failed",
+                Some("source-card projection failed for <script>alert(1)</script>"),
+            ),
+            (
+                "partial",
+                Some("partial provider response omitted protected rows"),
+            ),
+            ("unknown", Some("unclassified provider state")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("x:watch:matrix-{index}-{status}");
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO source_health
+                      (key, provider, source_kind, locator, status, last_success_at,
+                       last_failure_at, last_error, last_item_id, last_item_date,
+                       cursor_key, cursor_value, next_run_at, updated_at)
+                    VALUES
+                      (?1, 'x', 'x_monitor', ?2, ?3,
+                       CASE WHEN ?3 = 'healthy' THEN ?4 ELSE NULL END,
+                       CASE WHEN ?3 != 'healthy' THEN ?4 ELSE NULL END,
+                       ?5, NULL, NULL, ?1, NULL, NULL, ?4)
+                    "#,
+                    params![
+                        key,
+                        format!("matrix-{index}"),
+                        status,
+                        now_value,
+                        error.map(redact_secret_like_text)
+                    ],
+                )
+                .unwrap();
+        }
+
+        let stats = store.x_stats().unwrap();
+        for status in [
+            "healthy",
+            "stale",
+            "rate_limited",
+            "auth_failed",
+            "policy_denied",
+            "projection_failed",
+            "partial",
+            "unknown",
+        ] {
+            assert_eq!(
+                stats.source_health_by_status.get(status).copied(),
+                Some(1),
+                "{status} should remain distinct"
+            );
+        }
+        assert_eq!(stats.drift.non_healthy_sources, 7);
+        let visible = serde_json::to_string(&stats).unwrap();
+        assert!(visible.contains("projection_failed"));
+        assert!(visible.contains("policy_denied"));
+        let source_health_json =
+            serde_json::to_string(&store.list_source_health().unwrap()).unwrap();
+        assert!(
+            source_health_json.contains("[REDACTED]"),
+            "{source_health_json}"
+        );
+        assert!(
+            !source_health_json.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "{source_health_json}"
+        );
+        assert!(
+            !source_health_json.contains("xoxp-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            "{source_health_json}"
+        );
+
+        let health = store.health().unwrap();
+        assert!(!health.ok);
+        assert!(
+            health
+                .warnings
+                .iter()
+                .any(|warning| warning == "X source health: 7 non-healthy source row(s)")
+        );
+        let doctor = store
+            .doctor(DoctorOptions {
+                strict: true,
+                ..DoctorOptions::default()
+            })
+            .unwrap();
+        assert!(!doctor.ok);
+        assert!(
+            doctor
+                .failures
+                .iter()
+                .any(|failure| failure == "X source health: 7 non-healthy source row(s)")
+        );
+    }
+
+    #[test]
     fn severe_x_repair_projections_restores_missing_failed_projection_idempotently() {
         // CLAIM: Canonical X tweets with missing/failed source-card projections are
         // searchable, repairable, and repaired exactly once.
@@ -62908,6 +63120,7 @@ reason = "test denies X link expansion"
             .compile_research_convergence_report(&workflow.run.id)
             .unwrap();
         assert_eq!(report.judgment.overall_decision, "reject");
+        assert!(report.artifact.body.contains("Executive Caveats"));
         assert!(report.artifact.body.contains("Blocking Findings"));
     }
 
@@ -64404,6 +64617,197 @@ The platform has achieved zero escapes in production since 2024.
             judgments.len() >= 2,
             "model-backed and plain convergence judgments should be separately inspectable"
         );
+    }
+
+    #[test]
+    fn severe_research_convergence_report_does_not_present_refuted_statements_as_current() {
+        // CLAIM: convergence reports preserve refuted statements for audit
+        // traceability without presenting them as the current position.
+        // PRECONDITIONS: the latest iteration contains one survived statement,
+        // one refuted hostile statement, an open critical challenge, and a
+        // strong unresolved disproof.
+        // POSTCONDITIONS: current-position prose excludes the refuted statement,
+        // executive caveats show the unresolved severe blocker, the refuted
+        // statement remains in a separate appendix, and hostile Markdown/HTML is
+        // escaped.
+        // ORACLE: section-scoped string checks over the compiled report body.
+        // SEVERITY: Severe because a polished report that repeats refuted
+        // claims as conclusions is worse than an incomplete report.
+        let store = test_store("research-convergence-report-refuted");
+        let workflow = store
+            .create_deep_research_run("refuted report rendering")
+            .unwrap();
+        seed_research_convergence_claim(
+            &store,
+            &workflow.run.id,
+            "The platform requires deterministic verification before execution.",
+        );
+        seed_research_convergence_claim(
+            &store,
+            &workflow.run.id,
+            "Refuted <script>alert(1)</script> conclusion should never be current.",
+        );
+        let claims = store.list_research_claims(&workflow.run.id).unwrap();
+        let survived_claim = claims
+            .iter()
+            .find(|record| record.claim.text.contains("requires deterministic"))
+            .unwrap();
+        let refuted_claim = claims
+            .iter()
+            .find(|record| record.claim.text.contains("Refuted <script>"))
+            .unwrap();
+        let iteration = store
+            .insert_research_iteration(
+                &workflow.run.id,
+                0,
+                None,
+                "running",
+                "manual report rendering severe fixture",
+                &now(),
+            )
+            .unwrap();
+        let survived_statement = store
+            .upsert_research_statement(ResearchStatement {
+                id: research_statement_id(
+                    &workflow.run.id,
+                    &iteration.id,
+                    "survived-deterministic-verification",
+                ),
+                run_id: workflow.run.id.clone(),
+                iteration_id: iteration.id.clone(),
+                parent_statement_id: None,
+                stable_key: "survived-deterministic-verification".to_string(),
+                statement_type: "fact".to_string(),
+                text: survived_claim.claim.text.clone(),
+                scope: Some("platform".to_string()),
+                temporal_scope: None,
+                confidence: 0.86,
+                certainty_label: "high".to_string(),
+                status: "survived".to_string(),
+                importance: "high".to_string(),
+                evidence: json!({
+                    "claim_ids": [survived_claim.claim.id],
+                    "source_card_ids": survived_claim.sources.iter().map(|source| source.source_card_id.clone()).collect::<Vec<_>>()
+                }),
+                counterevidence: json!([]),
+                assumptions: json!([]),
+                caveats: json!(["Still requires production environment validation."]),
+                created_by_role: "statement_compiler".to_string(),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .unwrap();
+        let refuted_statement = store
+            .upsert_research_statement(ResearchStatement {
+                id: research_statement_id(
+                    &workflow.run.id,
+                    &iteration.id,
+                    "refuted-hostile-conclusion",
+                ),
+                run_id: workflow.run.id.clone(),
+                iteration_id: iteration.id.clone(),
+                parent_statement_id: None,
+                stable_key: "refuted-hostile-conclusion".to_string(),
+                statement_type: "fact".to_string(),
+                text: refuted_claim.claim.text.clone(),
+                scope: Some("platform".to_string()),
+                temporal_scope: None,
+                confidence: 0.12,
+                certainty_label: "very_low".to_string(),
+                status: "refuted".to_string(),
+                importance: "critical".to_string(),
+                evidence: json!({
+                    "claim_ids": [refuted_claim.claim.id],
+                    "source_card_ids": refuted_claim.sources.iter().map(|source| source.source_card_id.clone()).collect::<Vec<_>>()
+                }),
+                counterevidence: json!([]),
+                assumptions: json!([]),
+                caveats: json!(["Refuted by adversarial review; do not use as conclusion."]),
+                created_by_role: "statement_compiler".to_string(),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .unwrap();
+        let challenge = store
+            .upsert_research_challenge(ResearchChallenge {
+                id: research_challenge_id(
+                    &workflow.run.id,
+                    &iteration.id,
+                    &refuted_statement.id,
+                    "contradiction",
+                ),
+                run_id: workflow.run.id.clone(),
+                iteration_id: iteration.id.clone(),
+                statement_id: refuted_statement.id.clone(),
+                challenge_type: "contradiction".to_string(),
+                severity: "critical".to_string(),
+                rationale:
+                    "Critical contradiction remains unresolved for the refuted hostile conclusion."
+                        .to_string(),
+                would_change_answer_if_true: true,
+                search_plan: json!({
+                    "queries": ["refuted hostile conclusion contradiction"],
+                    "requires_host_search_proof": true,
+                    "status": "not_searched_by_deterministic_step"
+                }),
+                required_source_families: json!(["primary", "audit"]),
+                status: "open".to_string(),
+                created_by_role: "red_teamer".to_string(),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .unwrap();
+        store
+            .insert_research_disproof(ResearchDisproof {
+                id: research_disproof_id(&workflow.run.id, &iteration.id, &challenge.id),
+                run_id: workflow.run.id.clone(),
+                iteration_id: iteration.id.clone(),
+                challenge_id: challenge.id.clone(),
+                statement_id: refuted_statement.id.clone(),
+                verdict: "refutes".to_string(),
+                strength: "strong".to_string(),
+                evidence: json!({ "fixture": "report_refuted_statement" }),
+                reasoning_summary: "The hostile conclusion is contradicted and cannot be final."
+                    .to_string(),
+                confidence_delta: -0.8,
+                requires_revision: true,
+                created_by_role: "verifier".to_string(),
+                created_at: now(),
+            })
+            .unwrap();
+
+        let report = store
+            .compile_research_convergence_report(&workflow.run.id)
+            .unwrap();
+        let body = report.artifact.body;
+        assert!(body.contains("## Executive Caveats"));
+        assert!(body.contains("critical"));
+        assert!(body.contains("strong"));
+        assert!(body.contains("## Refuted Or Dropped Statements"));
+        assert!(!body.contains("<script>alert(1)</script>"));
+        assert!(body.contains("\\<script\\>alert(1)\\</script\\>"));
+        let current_position = body
+            .split("## Current Position")
+            .nth(1)
+            .unwrap()
+            .split("## Refuted Or Dropped Statements")
+            .next()
+            .unwrap();
+        assert!(current_position.contains(&survived_statement.text));
+        assert!(
+            !current_position.contains("Refuted"),
+            "refuted statements must not appear in Current Position: {current_position}"
+        );
+        let refuted_section = body
+            .split("## Refuted Or Dropped Statements")
+            .nth(1)
+            .unwrap()
+            .split("## What Changed Through Iteration")
+            .next()
+            .unwrap();
+        assert!(refuted_section.contains("Refuted"));
+        assert!(refuted_section.contains("not part of the current position"));
+        assert_eq!(report.judgment.overall_decision, "reject");
     }
 
     #[test]

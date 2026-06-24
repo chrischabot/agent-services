@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+for required in node sqlite3; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "BLOCKED: $required is required for this proof." >&2
+    exit 2
+  fi
+done
+
+RUN_STAMP="${ARCWELL_RADAR_RANKING_REVIEW_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_RADAR_RANKING_REVIEW_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/radar-ranking-review-production-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+SOURCE_HOME="${ARCWELL_RADAR_RANKING_REVIEW_SOURCE_HOME:-${ARCWELL_HOME:-$HOME/.arcwell}}"
+SOURCE_DB="$SOURCE_HOME/arcwell.sqlite3"
+export ARCWELL_HOME="${ARCWELL_RADAR_RANKING_REVIEW_PROOF_HOME:-$PROOF_ROOT/home}"
+PROOF_DB="$ARCWELL_HOME/arcwell.sqlite3"
+
+if [ ! -f "$SOURCE_DB" ]; then
+  echo "BLOCKED: source Arcwell database not found: $SOURCE_DB" >&2
+  exit 2
+fi
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME/wiki"
+
+log() {
+  printf '[radar-ranking-review-proof] %s\n' "$*"
+}
+
+log "proof root: $PROOF_ROOT"
+log "source home: $SOURCE_HOME"
+log "copying source database into disposable proof home"
+sqlite3 "$SOURCE_DB" ".backup '$PROOF_DB'"
+sqlite3 "$PROOF_DB" <<'SQL'
+DELETE FROM secret_values;
+DELETE FROM secret_refs;
+SQL
+
+if [ -d "$SOURCE_HOME/wiki/pages" ]; then
+  mkdir -p "$ARCWELL_HOME/wiki"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a "$SOURCE_HOME/wiki/pages" "$ARCWELL_HOME/wiki/" >/dev/null
+  else
+    cp -R "$SOURCE_HOME/wiki/pages" "$ARCWELL_HOME/wiki/"
+  fi
+fi
+
+SOURCE_CARD_COUNT="$(sqlite3 "$PROOF_DB" "SELECT COUNT(*) FROM source_cards;")"
+SECRET_VALUE_COUNT="$(sqlite3 "$PROOF_DB" "SELECT COUNT(*) FROM secret_values;")"
+SECRET_REF_COUNT="$(sqlite3 "$PROOF_DB" "SELECT COUNT(*) FROM secret_refs;")"
+if [ "$SOURCE_CARD_COUNT" -lt "${ARCWELL_RADAR_RANKING_REVIEW_MIN_SOURCE_CARDS:-1000}" ]; then
+  echo "BLOCKED: copied source-card corpus is too small for ranking review: $SOURCE_CARD_COUNT" >&2
+  exit 2
+fi
+if [ "$SECRET_VALUE_COUNT" != "0" ] || [ "$SECRET_REF_COUNT" != "0" ]; then
+  echo "BLOCKED: disposable proof home still contains secret rows" >&2
+  exit 2
+fi
+
+PROFILES_JSON='[
+  {
+    "name": "agent-infrastructure",
+    "query": "agent",
+    "min_items": 200,
+    "expected_tags": ["agent"],
+    "description": "Production ranking review for agent-infrastructure source-card evidence."
+  },
+  {
+    "name": "security-sandboxing",
+    "query": "security",
+    "min_items": 35,
+    "expected_tags": ["security", "oss"],
+    "description": "Production ranking review for security and sandboxing source-card evidence."
+  },
+  {
+    "name": "market-ecosystem",
+    "query": "release",
+    "min_items": 60,
+    "expected_tags": ["release", "launch", "company"],
+    "description": "Production ranking review for launch, release, and market ecosystem source-card evidence."
+  }
+]'
+
+printf '%s\n' "$PROFILES_JSON" >"$ARTIFACT_DIR/profiles.json"
+
+node - "$ARTIFACT_DIR/profiles.json" <<'NODE' >"$ARTIFACT_DIR/profile-names.txt"
+const fs = require("fs");
+for (const profile of JSON.parse(fs.readFileSync(process.argv[2], "utf8"))) {
+  console.log(profile.name);
+}
+NODE
+
+while IFS= read -r profile_key; do
+  query="$(node - "$ARTIFACT_DIR/profiles.json" "$profile_key" <<'NODE'
+const fs = require("fs");
+const [profilesPath, name] = process.argv.slice(2);
+const profile = JSON.parse(fs.readFileSync(profilesPath, "utf8")).find((item) => item.name === name);
+process.stdout.write(profile.query);
+NODE
+)"
+  description="$(node - "$ARTIFACT_DIR/profiles.json" "$profile_key" <<'NODE'
+const fs = require("fs");
+const [profilesPath, name] = process.argv.slice(2);
+const profile = JSON.parse(fs.readFileSync(profilesPath, "utf8")).find((item) => item.name === name);
+process.stdout.write(profile.description);
+NODE
+)"
+  profile_name="ranking-review-${profile_key}-${RUN_STAMP}"
+  log "creating ranking review profile: $profile_key query=$query"
+  "$ARCWELL_BIN" radar profile create "$profile_name" \
+    --description "$description" \
+    --window-hours 8760 \
+    --min-score 1 \
+    --max-items 25 \
+    --source-card-query "$query" \
+    >"$ARTIFACT_DIR/profile-$profile_key.json"
+
+  log "running ranking review profile: $profile_name"
+  "$ARCWELL_BIN" radar run "$profile_name" >"$ARTIFACT_DIR/run-$profile_key.json"
+  run_id="$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(j.run.id)' "$ARTIFACT_DIR/run-$profile_key.json")"
+  printf '%s\n' "$run_id" >"$ARTIFACT_DIR/run-id-$profile_key.txt"
+
+  "$ARCWELL_BIN" radar stage "$run_id" >"$ARTIFACT_DIR/stage-$profile_key.json"
+  "$ARCWELL_BIN" radar audit "$run_id" >"$ARTIFACT_DIR/audit-$profile_key.json"
+  "$ARCWELL_BIN" radar summarize "$run_id" >"$ARTIFACT_DIR/summary-write-$profile_key.json"
+  "$ARCWELL_BIN" radar summary "$run_id" >"$ARTIFACT_DIR/summary-read-$profile_key.json"
+done <"$ARTIFACT_DIR/profile-names.txt"
+
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops.json"
+
+log "validating ranking review proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$SOURCE_HOME" "$SOURCE_CARD_COUNT" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, proofRoot, sourceHome, sourceCardCountRaw] = process.argv.slice(2);
+const sourceCardCount = Number(sourceCardCountRaw);
+const profiles = JSON.parse(fs.readFileSync(path.join(artifactDir, "profiles.json"), "utf8"));
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const ops = read("ops.json");
+
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+function lowerText(item) {
+  return `${item.title || ""} ${item.content_text || ""}`.toLowerCase();
+}
+
+function fieldEvidenceForReason(item, score, reason) {
+  const text = lowerText(item);
+  const tags = new Set(score.tags || []);
+  const checks = [
+    ["source-card-backed evidence", () => Boolean(item.source_card_id && item.wiki_page_id)],
+    ["launch signal", () => text.includes("launch") && tags.has("launch")],
+    ["release signal", () => text.includes("release") && tags.has("release")],
+    ["security-impact signal", () => text.includes("vulnerability") && tags.has("security")],
+    ["operational incident signal", () => text.includes("incident") && tags.has("incident")],
+    ["company/funding signal", () => text.includes("funding") && tags.has("company")],
+    ["open-source signal", () => text.includes("open source") && tags.has("oss")],
+    ["AI/model signal", () => text.includes("model") && tags.has("ai")],
+    ["agent-infrastructure signal", () => text.includes("agent") && tags.has("agent")],
+    ["MCP signal", () => text.includes("mcp") && tags.has("mcp")],
+    ["breaking-change signal", () => text.includes("breaking") && tags.has("breaking-change")],
+    ["benchmark signal", () => text.includes("benchmark") && tags.has("benchmark")],
+    ["substantive source-card text", () => String(item.content_text || "").length > 800],
+    ["hostile-source-text penalty", () => {
+      return (
+        (text.includes("ignore previous instructions") ||
+          text.includes("system prompt") ||
+          text.includes("exfiltrate")) &&
+        tags.has("prompt-injection-risk")
+      );
+    }],
+    ["fresh source timestamp signal", () => tags.has("fresh-source")],
+    ["stale source timestamp penalty", () => tags.has("stale-source")],
+    ["very stale source timestamp penalty", () => tags.has("very-stale-source")],
+    ["very stale source timestamp penalty", () => tags.has("very-stale-source")],
+    ["healthy source-health signal", () => tags.has("source-health-healthy")],
+    ["stale source-health success timestamp penalty", () => tags.has("source-health-stale")],
+  ];
+  const exact = checks.find(([label]) => label === reason);
+  if (exact) return exact[1]();
+  if (reason.startsWith("source-health ") && reason.endsWith(" penalty")) {
+    return tags.has("source-health-nonhealthy");
+  }
+  if (reason.startsWith("duplicate suppressed by dedupe group ")) {
+    return score.status.startsWith("duplicate_") && tags.has("duplicate");
+  }
+  if (reason.startsWith("primary item ")) {
+    return score.status.startsWith("duplicate_") && tags.has("duplicate");
+  }
+  if (reason.startsWith("source quota cap ")) {
+    return score.status === "source_quota" && tags.has("source-quota");
+  }
+  if (reason.startsWith("category quota cap ")) {
+    return score.status === "category_quota" && tags.has("category-quota");
+  }
+  return false;
+}
+
+function reasonSignals(score) {
+  return String(score.reason || "")
+    .split(/[,;]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => part !== "source-card-backed evidence").length;
+}
+
+function average(values) {
+  assert(values.length > 0, "cannot average empty values");
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function sourceFamily(item) {
+  return item.metadata?.source_kind || item.provider || item.source_kind || "unknown";
+}
+
+function reviewRows(scores, itemById) {
+  return scores.map((score, index) => {
+    const item = itemById.get(score.item_id);
+    assert(item, "review score should reference a stage item", score);
+    return {
+      rank: index + 1,
+      item_id: score.item_id,
+      source_card_id: item.source_card_id,
+      wiki_page_id: item.wiki_page_id,
+      title: item.title,
+      source_family: sourceFamily(item),
+      score: score.score,
+      status: score.status,
+      reason: score.reason,
+      tags: score.tags,
+      url: item.canonical_url || item.source_locator,
+    };
+  });
+}
+
+function markdownTable(rows) {
+  const lines = [
+    "| Rank | Score | Status | Source | Title | Reason |",
+    "| ---: | ---: | --- | --- | --- | --- |",
+  ];
+  for (const row of rows) {
+    const title = String(row.title || "").replace(/\|/g, "\\|").slice(0, 140);
+    const reason = String(row.reason || "").replace(/\|/g, "\\|").slice(0, 220);
+    lines.push(`| ${row.rank} | ${row.score.toFixed(2)} | ${row.status} | ${row.source_family} | ${title} | ${reason} |`);
+  }
+  return lines.join("\n");
+}
+
+function validateProfile(config) {
+  const profile = read(`profile-${config.name}.json`);
+  const runReport = read(`run-${config.name}.json`);
+  const stage = read(`stage-${config.name}.json`);
+  const audit = read(`audit-${config.name}.json`);
+  const summaryWrite = read(`summary-write-${config.name}.json`);
+  const summaryRead = read(`summary-read-${config.name}.json`);
+  const itemById = new Map(stage.items.map((item) => [item.id, item]));
+  const heuristicScores = stage.scores.filter((score) => score.score_kind === "heuristic_v1");
+  const selectedScores = heuristicScores.filter((score) => score.status === "selected");
+  const sortedDesc = [...heuristicScores].sort((left, right) => right.score - left.score || String(left.item_id).localeCompare(String(right.item_id)));
+  const sortedAsc = [...heuristicScores].sort((left, right) => left.score - right.score || String(left.item_id).localeCompare(String(right.item_id)));
+  const top25 = sortedDesc.slice(0, 25);
+  const bottom25 = sortedAsc.slice(0, 25);
+  const sourceFamilies = new Set(stage.items.map(sourceFamily));
+  const distribution = stage.run.metadata?.score_distribution || {};
+
+  assert(profile.status === "local_proof_ready", `${config.name}: profile should be source-card-backed`, profile);
+  assert(runReport.run?.id === stage.run?.id, `${config.name}: run report and stage should agree`, { run: runReport.run, stage: stage.run });
+  assert(stage.run?.status === "scored", `${config.name}: run should be scored`, stage.run);
+  assert(stage.items.length >= config.min_items, `${config.name}: real corpus query returned too few items`, { count: stage.items.length, min: config.min_items });
+  assert(heuristicScores.length === stage.items.length, `${config.name}: every item should have one heuristic score`, { items: stage.items.length, heuristicScores: heuristicScores.length });
+  assert(selectedScores.length === 25, `${config.name}: profile should select exactly max_items=25`, { selected: selectedScores.length });
+  assert(top25.length === 25 && bottom25.length === 25, `${config.name}: top and bottom review sets should each contain 25 items`, { top: top25.length, bottom: bottom25.length });
+  assert(new Set(heuristicScores.map((score) => score.score.toFixed(4))).size >= 3, `${config.name}: ranking should not be a flat score list`, heuristicScores.slice(0, 10));
+
+  for (const score of heuristicScores) {
+    assert(Number.isFinite(score.score) && score.score >= 0 && score.score <= 10, `${config.name}: score should stay within bounds`, score);
+    assert(String(score.reason || "").trim().length > 0, `${config.name}: score reason cannot be empty`, score);
+    const item = itemById.get(score.item_id);
+    assert(item, `${config.name}: score should reference an item`, score);
+    assert(item.source_card_id && item.wiki_page_id, `${config.name}: scored item should preserve provenance`, item);
+    const reasons = String(score.reason)
+      .split(/[,;]\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    assert(reasons.length > 0, `${config.name}: score should have at least one reason`, score);
+    for (const reason of reasons) {
+      assert(fieldEvidenceForReason(item, score, reason), `${config.name}: score reason lacks observable item evidence: ${reason}`, { item, score });
+    }
+  }
+
+  const topAverage = average(top25.map((score) => score.score));
+  const bottomAverage = average(bottom25.map((score) => score.score));
+  assert(topAverage > bottomAverage + 0.35, `${config.name}: top 25 average should materially exceed bottom 25 average`, { topAverage, bottomAverage });
+  assert(
+    average(top25.map(reasonSignals)) >= average(bottom25.map(reasonSignals)),
+    `${config.name}: top 25 should have at least as many explicit positive/negative signals as bottom 25`,
+    { topSignals: average(top25.map(reasonSignals)), bottomSignals: average(bottom25.map(reasonSignals)) }
+  );
+
+  const tagSet = new Set(heuristicScores.flatMap((score) => score.tags || []));
+  assert(
+    config.expected_tags.some((tag) => tagSet.has(tag)),
+    `${config.name}: profile should surface at least one expected topical tag`,
+    { expected: config.expected_tags, actual: [...tagSet].sort() }
+  );
+  assert(distribution.score_kind === "heuristic_v1", `${config.name}: run metadata should record heuristic score distribution`, distribution);
+  assert(distribution.score_count === heuristicScores.length, `${config.name}: distribution score_count should match heuristic rows`, { distribution, heuristicScores: heuristicScores.length });
+  assert(distribution.selected_count === selectedScores.length, `${config.name}: distribution selected_count should match selected rows`, { distribution, selectedScores: selectedScores.length });
+  assert(distribution.min <= distribution.p10 && distribution.p10 <= distribution.p50 && distribution.p50 <= distribution.p90 && distribution.p90 <= distribution.max, `${config.name}: score percentiles should be ordered`, distribution);
+  assert(audit.ok === true && audit.findings.length === 0, `${config.name}: radar audit should pass cleanly`, audit);
+  assert(audit.item_count === stage.items.length, `${config.name}: audit item count should match stage`, audit);
+  assert(summaryWrite.audit_status === "audit_ok", `${config.name}: summary write should require audit_ok`, summaryWrite);
+  assert(summaryRead.id === summaryWrite.id, `${config.name}: summary read should return written summary`, { summaryWrite, summaryRead });
+  assert(summaryRead.metadata?.not_delivery === true, `${config.name}: ranking review summary should remain non-delivery`, summaryRead.metadata);
+
+  const opsRun = (ops.radar_runs || []).find((run) => run.id === stage.run.id);
+  assert(opsRun, `${config.name}: ops snapshot should expose the radar run`, ops.radar_runs);
+  assert(opsRun.metadata?.score_distribution?.score_count === heuristicScores.length, `${config.name}: ops score distribution should match stage`, opsRun);
+
+  const topRows = reviewRows(top25, itemById);
+  const bottomRows = reviewRows(bottom25, itemById);
+  const review = {
+    profile: config.name,
+    query: config.query,
+    profile_id: profile.id,
+    run_id: stage.run.id,
+    item_count: stage.items.length,
+    selected_count: selectedScores.length,
+    source_families: [...sourceFamilies].sort(),
+    top25_average: topAverage,
+    bottom25_average: bottomAverage,
+    average_delta: topAverage - bottomAverage,
+    score_distribution: {
+      score_count: distribution.score_count,
+      selected_count: distribution.selected_count,
+      status_counts: distribution.status_counts,
+      min: distribution.min,
+      max: distribution.max,
+      average: distribution.average,
+      p10: distribution.p10,
+      p50: distribution.p50,
+      p90: distribution.p90,
+    },
+    top25: topRows,
+    bottom25: bottomRows,
+    adversarial_judgment: {
+      promote: true,
+      reason: "Top/bottom ranking separation is backed by observable heuristic reasons on source-card/wiki-linked production corpus rows.",
+      remaining_risk: "This is deterministic ranking review, not model-scoring quality review or user-preference relevance evaluation.",
+    },
+  };
+
+  fs.writeFileSync(path.join(artifactDir, `ranking-review-${config.name}.json`), `${JSON.stringify(review, null, 2)}\n`);
+  fs.writeFileSync(
+    path.join(artifactDir, `ranking-review-${config.name}.md`),
+    [
+      `# Ranking Review: ${config.name}`,
+      "",
+      `Query: \`${config.query}\``,
+      `Run: \`${stage.run.id}\``,
+      `Items: ${stage.items.length}`,
+      `Top 25 average: ${topAverage.toFixed(3)}`,
+      `Bottom 25 average: ${bottomAverage.toFixed(3)}`,
+      `Average delta: ${(topAverage - bottomAverage).toFixed(3)}`,
+      "",
+      "## Top 25",
+      markdownTable(topRows),
+      "",
+      "## Bottom 25",
+      markdownTable(bottomRows),
+      "",
+      "## Adversarial Judgment",
+      "Promote deterministic ranking review for this profile only. Do not promote model quality, personalization, external delivery, or scheduled operation from this artifact.",
+      "",
+    ].join("\n")
+  );
+  return review;
+}
+
+const reviews = profiles.map(validateProfile);
+const aggregateFamilies = new Set(reviews.flatMap((review) => review.source_families));
+assert(reviews.length >= 3, "ranking review must cover at least three profiles", reviews);
+assert(aggregateFamilies.size >= 3, "ranking review should span at least three source families in aggregate", [...aggregateFamilies]);
+assert(reviews.every((review) => review.average_delta > 0.35), "each profile should show top/bottom score separation", reviews);
+
+const proofPacket = {
+  proof_name: "radar-ranking-review-production-proof",
+  proof_level: "Production Data Proof for deterministic ranking review over copied real source-card corpus",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  source_home: sourceHome,
+  source_card_corpus_count: sourceCardCount,
+  profile_count: reviews.length,
+  aggregate: {
+    item_count: reviews.reduce((sum, review) => sum + review.item_count, 0),
+    selected_count: reviews.reduce((sum, review) => sum + review.selected_count, 0),
+    source_families: [...aggregateFamilies].sort(),
+    top_bottom_reviewed_rows: reviews.length * 50,
+    min_average_delta: Math.min(...reviews.map((review) => review.average_delta)),
+  },
+  profiles: reviews.map((review) => ({
+    profile: review.profile,
+    query: review.query,
+    profile_id: review.profile_id,
+    run_id: review.run_id,
+    item_count: review.item_count,
+    selected_count: review.selected_count,
+    source_families: review.source_families,
+    top25_average: review.top25_average,
+    bottom25_average: review.bottom25_average,
+    average_delta: review.average_delta,
+    score_distribution: review.score_distribution,
+    review_artifacts: {
+      json: `ranking-review-${review.profile}.json`,
+      markdown: `ranking-review-${review.profile}.md`,
+    },
+  })),
+  gates: {
+    real_production_corpus: true,
+    profiles_reviewed: reviews.length,
+    top_bottom_rows_per_profile: 50,
+    score_reasons_checked_against_item_fields: true,
+    provenance_checked: true,
+    ops_visibility_checked: true,
+    summaries_non_delivery: true,
+  },
+  remaining_risk: [
+    "This proves deterministic heuristic ranking review across three copied-home production source-card profiles, not model-scoring quality.",
+    "This does not prove personal relevance, live external provider delivery, scheduled service behavior, or authenticated/private-source coverage.",
+    "Manual human taste review is represented by inspectable top/bottom artifacts; promotion beyond deterministic ranking still requires separate user/model-quality review.",
+  ],
+};
+
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), `${JSON.stringify(proofPacket, null, 2)}\n`);
+console.log(JSON.stringify(proofPacket, null, 2));
+NODE
+
+log "proof packet: $ARTIFACT_DIR/proof-packet.json"

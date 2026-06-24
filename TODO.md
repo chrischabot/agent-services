@@ -172,8 +172,13 @@ PR, implementation note, or final report:
 - [ ] Add X sync-run tests for started/completed/failed/superseded statuses,
       count accuracy, previous/new cursor recording, cost decision linkage, and
       redacted error storage.
-- [ ] Add X source-health tests for healthy, stale, rate_limited,
-      auth_failed, policy_denied, projection_failed, partial, and unknown states.
+- [x] Add X source-health tests for healthy, stale, rate_limited,
+      auth_failed, policy_denied, projection_failed, partial, and unknown
+      states: `severe_x_source_health_status_matrix_is_visible_to_stats_and_doctor`
+      proves `x_stats` preserves the full local status matrix, non-healthy
+      drift excludes only healthy rows, `health`/strict `doctor` warn, and
+      source-health errors redact token-shaped provider details. This is local
+      severe coverage, not a broader X tier/quota live proof.
 - [ ] Add X cursor-safety tests for malformed provider payloads, all rows
       rejected, duplicate newest ids, older newest ids, source-card projection
       failure, FTS failure, process interruption, and quota/rate limits.
@@ -500,6 +505,15 @@ PR, implementation note, or final report:
       score distribution counts matched ops, cursors/source-health were
       healthy, audit passed, and a non-delivery summary was written at
       `.arcwell-dev/proofs/radar-taxonomy-balance-production-proof-20260624T111820Z-48709`.
+- [x] Add repeatable production-data deterministic ranking review:
+      `scripts/radar-ranking-review-production-proof` copies the real
+      2,500-card source corpus into a secret-scrubbed disposable home, runs
+      `agent-infrastructure`, `security-sandboxing`, and `market-ecosystem`
+      source-card profiles, validates 150 top/bottom scored rows, verifies
+      score reasons against observable item fields/tags, checks provenance,
+      audits, ops score distributions, and non-delivery summaries, and writes a
+      proof packet at
+      `.arcwell-dev/proofs/radar-ranking-review-production-proof-20260624T112621Z-30748`.
 - [ ] Add model-backed synthesis, live production delivery proof, live external
       scheduled delivery/service proof, production cross-channel delivery proof,
       production quiet-hours deferral, arbitrary/model-generated taxonomy
@@ -663,9 +677,11 @@ PR, implementation note, or final report:
       coverage, saturation, active fact-check summary, convergence stop reason,
       and statement/disproof/revision appendices. The current renderer now
       includes bottom-line readiness, iteration deltas, source/search
-      saturation, host-search proof coverage, residual risks, blockers,
-      revisions, evidence ledger, and method notes, with a severe regression
-      asserting those analyst-grade sections remain present.
+      saturation, host-search proof coverage, executive caveats,
+      refuted/dropped-statement separation, residual risks, blockers,
+      revisions, evidence ledger, and method notes, with severe regressions
+      asserting those analyst-grade sections remain present and refuted
+      statements are not presented as the current position.
 - [x] Add initial convergence report rendering with executive judgment, current
       position, pressure-test results, metrics, blockers, revisions, evidence
       ledger, and method notes.
@@ -686,10 +702,14 @@ PR, implementation note, or final report:
       coverage now proves incomplete terminal states such as `max_iterations`
       still invoke and persist the model-backed gate instead of silently
       skipping evaluation.
-- [ ] Severe-test report rendering so refuted statements cannot appear as final
+- [x] Severe-test report rendering so refuted statements cannot appear as final
       conclusions, unresolved severe disproofs appear in executive caveats,
       metadata-only corpora do not fake judgment, appendices preserve
-      traceability, and source Markdown/HTML is escaped.
+      traceability, and source Markdown/HTML is escaped:
+      `severe_research_convergence_report_does_not_present_refuted_statements_as_current`
+      covers refuted/current separation, critical/strong executive caveats,
+      appendix traceability, and hostile HTML escaping; existing report
+      judgment coverage keeps metadata-only corpora from faking conclusions.
 - [ ] Add long-running convergence execution with resumable worker state,
       leases, heartbeats, idempotency keys, progress snapshots, cost
       reservations, stale-lease reclaim, dead-letter behavior, and user stop.

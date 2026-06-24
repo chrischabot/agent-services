@@ -859,6 +859,10 @@ Implement extractors in stages:
    tables, and table cells after same-run artifact validation.
 7. Done locally: extend report rendering and audit so document anchors are
    surfaced and warned/low-confidence extractions become audit findings.
+8. Done locally: convergence reports now keep refuted latest-iteration
+   statements out of the current position, surface unresolved critical/strong
+   blockers in executive caveats, preserve refuted/dropped statements only for
+   traceability, and escape hostile Markdown/HTML in those sections.
 
 ### Adversarial Review Gate
 
@@ -1045,6 +1049,11 @@ A model-backed report may be marked complete only when:
   judgment, and explicit closure blockers. Severe fixtures prove it refuses
   unsupported report prose without retrieval proof and closes only after
   provider-recorded proof plus rerun clears blocking challenges.
+- Done: convergence report rendering now separates defensible current
+  statements from refuted/dropped statements, adds executive caveats for
+  unresolved severe blockers, preserves dropped claims for audit traceability,
+  and escapes hostile source text so a polished report cannot restate refuted
+  claims as conclusions.
 - Done: a live image-compression production proof reached the OpenAI
   citation-verifier/adversarial-evaluator gate over a saturated source-card
   corpus and failed closed rather than accepting weak evidence. Latest proof:

@@ -259,6 +259,18 @@ Evidence:
   passed audit, and wrote a non-delivery summary. This proves deterministic
   local semantic dedupe on freshly fetched public adapters, not model semantic
   dedupe or recurring service behavior.
+- Production-data deterministic ranking review now exists through
+  `scripts/radar-ranking-review-production-proof`, preserved at
+  `.arcwell-dev/proofs/radar-ranking-review-production-proof-20260624T112621Z-30748/artifacts/proof-packet.json`.
+  A sanitized copied home from the real 2,500-card source corpus ran
+  `agent-infrastructure`, `security-sandboxing`, and `market-ecosystem`
+  source-card profiles, reviewed 150 top/bottom scored rows, verified all
+  heuristic score reasons against observable item fields/tags, preserved
+  source-card/wiki provenance, exposed score distributions in ops, passed
+  audits, and wrote non-delivery summaries. The three runs scored 491 items,
+  selected 75, spanned nine source families, and had a minimum top/bottom
+  average-score delta of 1.772. This proves deterministic ranking separation
+  and review artifacts, not model-scoring quality, personalization, or delivery.
 
 Still not proven by this slice:
 
@@ -267,7 +279,7 @@ Still not proven by this slice:
   controls.
 - Full recursive HN/Reddit community-thread capture.
 - Arbitrary/model-generated taxonomy quality review and source-quality decay.
-- Model-backed interestingness, enrichment/synthesis, and delivery attempts.
+- Model-scoring quality, enrichment/synthesis, and delivery attempts.
 - Full production multi-source proof including authenticated/private sources.
 
 ## Product Surfaces
@@ -1038,9 +1050,16 @@ Production-data proof:
       with 45 heuristic rows, 30 selected heuristic rows, 3
       `model_interestingness_v1` rows, audit-ok after model scoring, and
       unchanged source-quality raw/accepted totals.
-- [ ] Compare top 25 and bottom 25 items manually or with an adversarial review
-      artifact.
-- [ ] Prove score reasons cite actual available fields.
+- [x] Compare top 25 and bottom 25 items manually or with an adversarial review
+      artifact:
+      `scripts/radar-ranking-review-production-proof` wrote Markdown/JSON
+      review artifacts for `agent-infrastructure`, `security-sandboxing`, and
+      `market-ecosystem` under
+      `.arcwell-dev/proofs/radar-ranking-review-production-proof-20260624T112621Z-30748/artifacts`.
+- [x] Prove score reasons cite actual available fields: the ranking review
+      proof validates every heuristic reason against source-card/wiki
+      provenance, title/content signal text, freshness tags, duplicate/quota
+      status, and source-health tags before writing its proof packet.
 - [ ] Prove category balancing changes at least one real run where a source
       family would otherwise dominate.
 - [ ] Record cost decisions and actual provider usage where available for
@@ -1671,7 +1690,7 @@ Exit gate:
 
 Exit gate:
 
-- [ ] Real production ranking review across at least three profiles.
+- [x] Real production ranking review across at least three profiles.
 - [ ] Prove category/source balancing changes at least one real production-data
       run where a source family would otherwise dominate.
 - [ ] Model scoring cannot promote if deterministic scoring/audit fails.

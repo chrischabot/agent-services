@@ -173,6 +173,14 @@ Evidence:
   capture, RSS-first unauthenticated fallback that explicitly does not claim
   comment capture, source-card persistence, cursor/source-health safety,
   watch-source enqueue support, and severe policy/fallback/source-card tests.
+- Queued `radar_run` local-proof slice added `arcwell radar enqueue`,
+  `radar_enqueue`, and worker execution for radar profiles. Severe tests prove
+  `worker run-once` can complete a queued source-card-backed radar run into
+  durable `radar_runs`, `radar_items`, FTS rows, scores, and audit-clean stage
+  state; a queued live run with RSS provider policy denial records a completed
+  worker job whose radar result is `blocked`, with failed adapter job summary,
+  non-healthy source-health, no cursor advance, and failed radar audit; invalid
+  profile/window inputs are rejected before inert jobs are inserted.
 - Reddit disposable live proof is not yet production-data proof. Preserved
   attempts under `/tmp/arcwell-radar-reddit-proof-20260624T075239Z` and
   `/tmp/arcwell-radar-reddit-debug-20260624T075408Z` show the Arcwell binary
@@ -184,7 +192,8 @@ Evidence:
 Still not proven by this slice:
 
 - Radar-owned live X/Reddit/public Telegram/OSS/OpenBB fetch.
-- Scheduled radar worker fetch/retry/recovery and ops UI controls.
+- Production-data worker-drained radar run, scheduled recurring radar service
+  execution, retry/recovery, and ops UI controls.
 - Full recursive HN/Reddit community-thread capture.
 - Semantic dedupe, category/source balancing, source-quality decay.
 - Model-backed interestingness, enrichment/synthesis, and delivery attempts.
@@ -204,6 +213,7 @@ arcwell radar profile update <profile-id> ...
 arcwell radar source recommend "agent infrastructure"
 arcwell radar source import-presets <file-or-url>
 arcwell radar run <profile-id> --window-hours 24
+arcwell radar enqueue <profile-id> --window-hours 24
 arcwell radar fetch <run-id>
 arcwell radar score <run-id>
 arcwell radar filter <run-id>
@@ -228,6 +238,7 @@ radar_profile_list
 radar_profile_read
 radar_source_recommend
 radar_run_create
+radar_enqueue
 radar_fetch
 radar_score
 radar_filter
@@ -257,6 +268,7 @@ Target commands:
 
 ```text
 /radar-run
+/radar-enqueue
 /radar-runs
 /radar-stage
 /radar-summary
@@ -1187,8 +1199,9 @@ Worker job kinds:
 
 Checklist:
 
+- [x] Add local worker `radar_run` execution for whole-profile runs.
 - [ ] Add job input schema validation for every radar job kind.
-- [ ] Add worker execution that resumes from durable run stage.
+- [ ] Add worker execution that resumes from durable per-stage runs.
 - [ ] Add idempotency keys for stage jobs.
 - [ ] Add stale-lease recovery.
 - [ ] Add stop/cancel semantics before next expensive action.
@@ -1424,7 +1437,8 @@ Exit gate:
 - [ ] Integrate X canonical rows and source-card projections.
 - [ ] Integrate digest candidate creation from selected radar rows.
 - [ ] Add source-health/cursor propagation.
-- [ ] Add worker `radar_fetch` and `radar_run` job.
+- [x] Add local worker `radar_run` job.
+- [ ] Add resumable worker `radar_fetch` stage job.
 
 Exit gate:
 

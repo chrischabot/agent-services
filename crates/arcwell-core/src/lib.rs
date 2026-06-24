@@ -57984,6 +57984,39 @@ priority = 10
         assert!(replayed.replayed);
         assert_eq!(replayed.digest_delivery.id, delivered.digest_delivery.id);
         assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+
+        let failing_api = mock_status_server(
+            "429 Too Many Requests",
+            "retry-after: 60\r\n",
+            r#"{"ok":false,"description":"rate limited"}"#,
+            "application/json",
+        );
+        let failed = store
+            .send_digest_candidate_telegram(
+                &digest.id,
+                "TOKEN",
+                "123",
+                Some("digest-delivery-failed-provider-key"),
+                Some(&failing_api),
+            )
+            .unwrap();
+        assert!(!failed.telegram.as_ref().unwrap().ok);
+        assert_eq!(failed.digest_delivery.status, "failed");
+        assert!(failed.digest_delivery.retry_at.is_some());
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
+
+        let failed_replay = store
+            .send_digest_candidate_telegram(
+                &digest.id,
+                "TOKEN",
+                "123",
+                Some("digest-delivery-failed-provider-key"),
+                Some("http://127.0.0.1:9"),
+            )
+            .unwrap();
+        assert!(failed_replay.replayed);
+        assert_eq!(failed_replay.digest_delivery.id, failed.digest_delivery.id);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 2);
     }
 
     #[test]
@@ -62848,6 +62881,86 @@ reason = "test denies X link expansion"
         assert_eq!(stats.latest_sync_runs[0].new_cursor.as_deref(), Some("300"));
         assert_eq!(stats.latest_sync_runs[0].seen, 1);
         assert_eq!(stats.latest_sync_runs[0].inserted, 1);
+
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-x-monitor-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "telegram"
+subject = "telegram:chat:300"
+target = "telegram:chat:300"
+reason = "allow reviewed X monitor digest delivery"
+priority = 10
+
+[[rules]]
+id = "allow-x-monitor-digest-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:300"
+target = "300"
+reason = "allow reviewed X monitor digest Telegram send"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .approve_digest_candidate(&digests[0].id, Some("severe-test"), Some("trace delivery"))
+            .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:300", false, false, true)
+            .unwrap();
+        let send_api = mock_status_server(
+            "200 OK",
+            "",
+            r#"{"ok":true,"result":{"message_id":300}}"#,
+            "application/json",
+        );
+        let delivered = store
+            .send_digest_candidate_telegram(
+                &digests[0].id,
+                "TOKEN",
+                "300",
+                Some("x-monitor-digest-delivery"),
+                Some(&send_api),
+            )
+            .unwrap();
+        let trace: (String, Option<String>, Option<String>, Option<String>) = store
+            .conn
+            .query_row(
+                r#"
+                SELECT xp.digest_candidate_id,
+                       dd.id,
+                       dd.channel_message_id,
+                       dd.channel_delivery_attempt_id
+                FROM x_projections xp
+                JOIN digest_deliveries dd ON dd.candidate_id = xp.digest_candidate_id
+                WHERE xp.entity_kind = 'tweet'
+                  AND xp.entity_id = '300'
+                  AND xp.projection_kind = 'digest_candidate'
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(trace.0, digests[0].id);
+        assert_eq!(
+            trace.1.as_deref(),
+            Some(delivered.digest_delivery.id.as_str())
+        );
+        assert_eq!(
+            trace.3.as_deref(),
+            delivered
+                .telegram
+                .as_ref()
+                .map(|telegram| telegram.delivery.id.as_str())
+        );
     }
 
     #[test]

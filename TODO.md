@@ -255,8 +255,11 @@ PR, implementation note, or final report:
       links the generic channel message and channel delivery attempt, records
       blocked review/policy/auth rows without provider calls, exposes MCP/slash
       delivery/list surfaces, and replays the same idempotency key without
-      duplicate sends; score freshness, email parity, retry orchestration, and
-      quiet-hours scheduling remain open.
+      duplicate sends. Severe tests also prove provider failures record failed
+      ledger rows with retry metadata, and monitor-created X digest candidates
+      can be traced from `x_projections` to `digest_deliveries` to the channel
+      delivery attempt; score freshness, email parity, due retry orchestration,
+      and quiet-hours scheduling remain open.
 - [ ] Add X heuristic scoring before model scoring, with score rows as overlays,
       stale-score labels, schema-validated model output, eval fixtures,
       cost-decision rows, private-content exclusion, and proof that scores never

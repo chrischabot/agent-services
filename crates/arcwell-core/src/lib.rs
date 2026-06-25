@@ -14640,8 +14640,8 @@ impl Store {
         max_bookmarks: usize,
         endpoint: &str,
     ) -> Result<XImportReport> {
-        let bookmark_days = bookmark_days.clamp(1, 366);
-        let max_bookmarks = max_bookmarks.clamp(1, 5_000);
+        let bookmark_days = bookmark_days.clamp(1, 36_500);
+        let max_bookmarks = max_bookmarks.clamp(1, 100_000);
         let projected = estimated_x_definitive_watch_cost(max_bookmarks, 0);
         self.policy_guard(PolicyRequest {
             action: "provider.network".to_string(),
@@ -14950,8 +14950,8 @@ impl Store {
         let token = self.x_bearer_token()?;
         let base = validated_x_api_base(endpoint)?;
         let user_id = self.x_user_id(&base, &token)?;
-        let bookmark_days = bookmark_days.clamp(1, 366);
-        let max_bookmarks = max_bookmarks.clamp(10, 5_000);
+        let bookmark_days = bookmark_days.clamp(1, 36_500);
+        let max_bookmarks = max_bookmarks.clamp(10, 100_000);
         let max_recent_follows = max_recent_follows.clamp(0, 100);
         let cutoff = Utc::now() - chrono::Duration::days(bookmark_days);
         let bookmark_since = cutoff.to_rfc3339();
@@ -30646,7 +30646,7 @@ fn estimated_x_following_cost(max_users: usize) -> f64 {
 
 fn estimated_x_definitive_watch_cost(max_bookmarks: usize, max_recent_follows: usize) -> f64 {
     0.002
-        + (max_bookmarks.clamp(10, 5_000).div_ceil(100) as f64 * 0.001)
+        + (max_bookmarks.clamp(10, 100_000).div_ceil(100) as f64 * 0.001)
         + if max_recent_follows > 0 { 0.001 } else { 0.0 }
 }
 

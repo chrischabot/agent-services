@@ -56,6 +56,7 @@ enum Command {
     Memory(MemoryCommand),
     Wiki(WikiCommand),
     SourceCard(SourceCardCommand),
+    Knowledge(KnowledgeCommand),
     Research(ResearchCommand),
     Commerce(CommerceCommand),
     Radar(RadarCommand),
@@ -1316,6 +1317,7 @@ fn run(store: Store, command: Command) -> Result<()> {
         Command::Memory(args) => memory(store, args),
         Command::Wiki(args) => wiki(store, args),
         Command::SourceCard(args) => source_card(store, args),
+        Command::Knowledge(args) => knowledge(store, args),
         Command::Research(args) => research(store, args),
         Command::Commerce(args) => commerce(store, args),
         Command::Radar(args) => radar(store, args),
@@ -1715,6 +1717,42 @@ struct WikiCommand {
 struct SourceCardCommand {
     #[command(subcommand)]
     command: SourceCardSubcommand,
+}
+
+#[derive(Args)]
+struct KnowledgeCommand {
+    #[command(subcommand)]
+    command: KnowledgeSubcommand,
+}
+
+#[derive(Subcommand)]
+enum KnowledgeSubcommand {
+    ProjectRadarRun {
+        run_id: String,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long, default_value_t = 12)]
+        max_source_cards: usize,
+    },
+    ProjectSourceCardQuery {
+        query: String,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long, default_value_t = 12)]
+        max_source_cards: usize,
+    },
+    Events {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Clusters {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Reports {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Args)]
@@ -3609,6 +3647,34 @@ fn source_card(store: Store, args: SourceCardCommand) -> Result<()> {
         }
         SourceCardSubcommand::Search { query } => print_json(&store.search_source_cards(&query)?),
         SourceCardSubcommand::Read { id } => print_json(&store.read_source_card(&id)?),
+    }
+}
+
+fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
+    match args.command {
+        KnowledgeSubcommand::ProjectRadarRun {
+            run_id,
+            topic,
+            max_source_cards,
+        } => print_json(&store.project_knowledge_from_radar_run(
+            &run_id,
+            topic.as_deref(),
+            max_source_cards,
+        )?),
+        KnowledgeSubcommand::ProjectSourceCardQuery {
+            query,
+            topic,
+            max_source_cards,
+        } => print_json(&store.project_knowledge_from_source_card_query(
+            &query,
+            topic.as_deref(),
+            max_source_cards,
+        )?),
+        KnowledgeSubcommand::Events { limit } => print_json(&store.list_knowledge_events(limit)?),
+        KnowledgeSubcommand::Clusters { limit } => {
+            print_json(&store.list_knowledge_clusters(limit)?)
+        }
+        KnowledgeSubcommand::Reports { limit } => print_json(&store.list_knowledge_reports(limit)?),
     }
 }
 
@@ -6933,6 +6999,13 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Radar runs", snapshot.radar_runs.len()),
         ("Radar source quality", snapshot.radar_source_quality.len()),
         ("Radar deliveries", snapshot.radar_deliveries.len()),
+        ("Knowledge events", snapshot.knowledge_events.len()),
+        ("Knowledge clusters", snapshot.knowledge_clusters.len()),
+        (
+            "Knowledge editorial",
+            snapshot.knowledge_editorial_decisions.len(),
+        ),
+        ("Knowledge reports", snapshot.knowledge_reports.len()),
         ("X clusters", snapshot.x_knowledge_clusters.len()),
         (
             "X editorial decisions",
@@ -7087,6 +7160,52 @@ code,pre{white-space:pre-wrap;word-break:break-word}
                     health.last_error.clone().unwrap_or_default(),
                 ]
             }),
+    ));
+    html.push_str(&ops_table(
+        "Knowledge Events",
+        &["event", "type", "status", "title", "confidence", "updated"],
+        snapshot.knowledge_events.iter().take(100).map(|event| {
+            vec![
+                short_id(&event.id),
+                event.event_type.clone(),
+                event.status.clone(),
+                event.title.clone(),
+                format!("{:.2}", event.confidence),
+                event.updated_at.clone(),
+            ]
+        }),
+    ));
+    html.push_str(&ops_table(
+        "Knowledge Clusters",
+        &[
+            "cluster", "topic", "status", "sources", "events", "novelty", "momentum", "updated",
+        ],
+        snapshot.knowledge_clusters.iter().take(100).map(|cluster| {
+            vec![
+                short_id(&cluster.id),
+                cluster.topic.clone(),
+                cluster.status.clone(),
+                cluster.source_card_ids.len().to_string(),
+                cluster.event_ids.len().to_string(),
+                format!("{:.2}", cluster.novelty_score),
+                format!("{:.2}", cluster.momentum_score),
+                cluster.updated_at.clone(),
+            ]
+        }),
+    ));
+    html.push_str(&ops_table(
+        "Knowledge Reports",
+        &["report", "cluster", "status", "title", "sources", "updated"],
+        snapshot.knowledge_reports.iter().take(100).map(|report| {
+            vec![
+                short_id(&report.id),
+                short_id(&report.cluster_id),
+                report.status.clone(),
+                report.title.clone(),
+                report.source_card_ids.len().to_string(),
+                report.updated_at.clone(),
+            ]
+        }),
     ));
     html.push_str(&ops_table_with_raw_columns(
         "X Knowledge Clusters",
@@ -18783,6 +18902,46 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         assert!(html.contains("2 linked candidate(s); projections completed:3"));
         assert!(html.contains("failed X sync run"));
         assert!(html.contains("X FTS drift"));
+    }
+
+    #[test]
+    fn severe_ops_ui_surfaces_general_knowledge_projection_without_raw_html() {
+        // CLAIM: General unified knowledge projections are visible in the ops UI
+        // and hostile source-card text remains escaped.
+        // ORACLE: A real source-card projection renders Knowledge Events,
+        // Knowledge Clusters, and Knowledge Reports tables without raw script.
+        // SEVERITY: Severe because hidden knowledge state is a fake-done mode,
+        // and ops UI aggregates untrusted source-card titles/summaries.
+        let paths = test_paths("ops-ui-general-knowledge");
+        let store = Store::open(paths).unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Knowledge projection <script>alert(1)</script>".to_string(),
+                url: "https://example.com/ops-general-knowledge".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary: "Ops general knowledge projection evidence for an agent package release."
+                    .to_string(),
+                claims: vec![],
+                retrieved_at: Some("2026-06-25T00:00:00Z".to_string()),
+                metadata: json!({ "owner": "openai", "repo": "agents", "tag": "ops" }),
+            })
+            .unwrap();
+        let projection = store
+            .project_knowledge_from_source_card_query(
+                "Ops general knowledge projection",
+                Some("Ops visible general knowledge trend"),
+                5,
+            )
+            .unwrap();
+        let html = render_ops_ui(&store.ops_snapshot().unwrap());
+        assert!(html.contains("Knowledge Events"));
+        assert!(html.contains("Knowledge Clusters"));
+        assert!(html.contains("Knowledge Reports"));
+        assert!(html.contains("Ops visible general knowledge trend"));
+        assert!(html.contains(&short_id(&projection.cluster.id)));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
 
     #[test]

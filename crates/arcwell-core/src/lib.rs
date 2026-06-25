@@ -748,6 +748,21 @@ pub struct KnowledgeReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeProjectionReport {
+    pub topic: String,
+    pub proof_level: String,
+    pub source_family: String,
+    pub source_cards: Vec<SourceCard>,
+    pub events: Vec<KnowledgeEvent>,
+    pub event_sources: Vec<KnowledgeEventSource>,
+    pub cluster: KnowledgeCluster,
+    pub editorial_decision: KnowledgeEditorialDecision,
+    pub report: KnowledgeReport,
+    pub warnings: Vec<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarProfileInput {
     pub name: String,
     pub description: String,
@@ -15896,6 +15911,311 @@ impl Store {
         rows(stmt.query_map(params![limit.clamp(1, 500)], knowledge_report_from_row)?)
     }
 
+    pub fn project_knowledge_from_source_card_query(
+        &self,
+        query: &str,
+        topic: Option<&str>,
+        max_source_cards: usize,
+    ) -> Result<KnowledgeProjectionReport> {
+        validate_query(query)?;
+        let cards = self
+            .search_source_cards(query)?
+            .into_iter()
+            .take(max_source_cards.clamp(1, 50))
+            .collect::<Vec<_>>();
+        let topic = topic
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("Knowledge trend: {query}"));
+        self.project_knowledge_from_source_cards(
+            &topic,
+            cards,
+            "source_card_query",
+            "Local Proof",
+            "existing_source_card_projection",
+            Vec::new(),
+            json!({ "query": query, "max_source_cards": max_source_cards.clamp(1, 50) }),
+        )
+    }
+
+    pub fn project_knowledge_from_radar_run(
+        &self,
+        run_id: &str,
+        topic: Option<&str>,
+        max_source_cards: usize,
+    ) -> Result<KnowledgeProjectionReport> {
+        validate_id(run_id)?;
+        let run = self
+            .read_radar_run(run_id)?
+            .with_context(|| format!("radar run not found: {run_id}"))?;
+        let profile = self
+            .read_radar_profile(&run.profile_id)?
+            .with_context(|| format!("radar profile not found: {}", run.profile_id))?;
+        let item_by_id = self
+            .list_radar_items(run_id)?
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
+        let mut selected = self
+            .list_radar_scores(run_id)?
+            .into_iter()
+            .filter(|score| score.status == "selected")
+            .filter_map(|score| {
+                item_by_id
+                    .get(&score.item_id)
+                    .cloned()
+                    .map(|item| (score, item))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| {
+            right
+                .0
+                .score
+                .partial_cmp(&left.0.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.1.id.cmp(&right.1.id))
+        });
+        let mut source_card_ids = selected
+            .iter()
+            .filter_map(|(_, item)| item.source_card_id.clone())
+            .collect::<Vec<_>>();
+        if source_card_ids.is_empty() {
+            bail!("knowledge projection from radar run requires selected source-card evidence");
+        }
+        source_card_ids.sort();
+        source_card_ids.dedup();
+        let mut cards = Vec::new();
+        for source_card_id in source_card_ids
+            .into_iter()
+            .take(max_source_cards.clamp(1, 50))
+        {
+            cards.push(
+                self.read_source_card(&source_card_id)?
+                    .with_context(|| format!("radar source card not found: {source_card_id}"))?,
+            );
+        }
+        let topic = topic
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("Knowledge radar: {}", profile.name));
+        let proof_level = run
+            .metadata
+            .get("proof_level")
+            .and_then(Value::as_str)
+            .unwrap_or("Local Proof");
+        let source_family = run
+            .metadata
+            .get("source_family")
+            .and_then(Value::as_str)
+            .unwrap_or("radar_source_card_projection");
+        let mut warnings = Vec::new();
+        if run.status != "scored" {
+            warnings.push(format!(
+                "radar run status is {}; projection uses available selected source-card evidence only",
+                run.status
+            ));
+        }
+        if run
+            .metadata
+            .get("live_fetch_failed")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            warnings.push("radar run recorded live adapter failures".to_string());
+        }
+        self.project_knowledge_from_source_cards(
+            &topic,
+            cards,
+            "radar_run",
+            proof_level,
+            source_family,
+            warnings,
+            json!({
+                "radar_run_id": run.id,
+                "radar_profile_id": profile.id,
+                "radar_profile_name": profile.name,
+                "radar_status": run.status,
+                "selected_items": selected.len(),
+                "max_source_cards": max_source_cards.clamp(1, 50),
+            }),
+        )
+    }
+
+    fn project_knowledge_from_source_cards(
+        &self,
+        topic: &str,
+        source_cards: Vec<SourceCard>,
+        origin: &str,
+        proof_level: &str,
+        source_family: &str,
+        warnings: Vec<String>,
+        metadata: Value,
+    ) -> Result<KnowledgeProjectionReport> {
+        validate_knowledge_text("knowledge projection topic", topic, 500)?;
+        let mut source_cards = source_cards
+            .into_iter()
+            .map(|card| (card.id.clone(), card))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect::<Vec<_>>();
+        source_cards.sort_by(|left, right| {
+            right
+                .retrieved_at
+                .cmp(&left.retrieved_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if source_cards.is_empty() {
+            bail!("knowledge projection requires at least one source card");
+        }
+
+        let mut events = Vec::new();
+        let mut event_sources = Vec::new();
+        for card in &source_cards {
+            let event =
+                self.upsert_knowledge_event(knowledge_event_input_from_source_card(card)?)?;
+            let event_source = self.add_knowledge_event_source(KnowledgeEventSourceInput {
+                event_id: event.id.clone(),
+                source_card_id: card.id.clone(),
+                role: knowledge_source_role_for_card(card),
+                confidence: knowledge_source_confidence_for_card(card),
+                claim_summary: knowledge_claim_summary_for_card(card),
+                metadata: json!({
+                    "origin": origin,
+                    "provider": card.provider,
+                    "source_type": card.source_type,
+                    "source_card_url": card.url,
+                }),
+            })?;
+            let confirmed = self.confirm_knowledge_event(&event.id)?;
+            events.push(confirmed);
+            event_sources.push(event_source);
+        }
+
+        events.sort_by(|left, right| left.id.cmp(&right.id));
+        events.dedup_by(|left, right| left.id == right.id);
+        let event_ids = events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let source_card_ids = source_cards
+            .iter()
+            .map(|card| card.id.clone())
+            .collect::<Vec<_>>();
+        let first_seen_at = source_cards
+            .iter()
+            .map(|card| card.retrieved_at.clone())
+            .min();
+        let last_seen_at = source_cards
+            .iter()
+            .map(|card| card.retrieved_at.clone())
+            .max();
+        let provider_count = source_cards
+            .iter()
+            .map(|card| card.provider.clone())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let novelty_score =
+            ((provider_count as f64 + source_cards.len() as f64) / 12.0).clamp(0.1, 1.0);
+        let momentum_score = (source_cards.len() as f64 / 10.0).clamp(0.1, 1.0);
+        let stale_score = source_cards
+            .iter()
+            .filter_map(|card| timestamp_age_hours(&card.retrieved_at))
+            .min()
+            .map(|hours| {
+                if hours > 24 * 90 {
+                    1.0
+                } else if hours > 24 * 30 {
+                    0.65
+                } else if hours > 24 * 7 {
+                    0.35
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let duplicate_groups = knowledge_duplicate_groups_for_cards(&source_cards);
+        let cluster = self.create_knowledge_cluster(KnowledgeClusterInput {
+            topic: topic.to_string(),
+            status: "candidate".to_string(),
+            event_ids,
+            source_card_ids: source_card_ids.clone(),
+            first_seen_at,
+            last_seen_at,
+            novelty_score,
+            momentum_score,
+            stale_score,
+            reason: format!(
+                "Projected {} source cards from {origin} into a unified source-backed knowledge cluster.",
+                source_cards.len()
+            ),
+            duplicate_groups,
+            metadata: json!({
+                "origin": origin,
+                "proof_level": proof_level,
+                "source_family": source_family,
+                "provider_count": provider_count,
+                "projection": "knowledge_source_card_projection_v1",
+                "source_metadata": metadata,
+            }),
+        })?;
+        let editorial_decision =
+            self.record_knowledge_editorial_decision(KnowledgeEditorialDecisionInput {
+                cluster_id: cluster.id.clone(),
+                decision: "create_human_report".to_string(),
+                status: "completed".to_string(),
+                wiki_page_id: None,
+                digest_candidate_id: None,
+                source_card_ids: cluster.source_card_ids.clone(),
+                reason: format!(
+                    "Created a source-card-backed human-readable report for `{}` from {} sources.",
+                    cluster.topic,
+                    cluster.source_card_ids.len()
+                ),
+                quality_findings: Vec::new(),
+                metadata: json!({
+                    "origin": origin,
+                    "proof_level": proof_level,
+                    "source_family": source_family,
+                }),
+            })?;
+        let report_body = render_knowledge_projection_report(
+            &cluster,
+            &source_cards,
+            proof_level,
+            source_family,
+            &warnings,
+        );
+        let report = self.record_knowledge_report(KnowledgeReportInput {
+            cluster_id: cluster.id.clone(),
+            title: format!("Knowledge Report: {}", cluster.topic),
+            body_markdown: report_body,
+            status: "draft".to_string(),
+            source_card_ids: cluster.source_card_ids.clone(),
+            metadata: json!({
+                "origin": origin,
+                "proof_level": proof_level,
+                "source_family": source_family,
+                "reporter": "deterministic_source_card_projection_v1",
+            }),
+        })?;
+
+        Ok(KnowledgeProjectionReport {
+            topic: topic.to_string(),
+            proof_level: proof_level.to_string(),
+            source_family: source_family.to_string(),
+            source_cards,
+            events,
+            event_sources,
+            cluster,
+            editorial_decision,
+            report,
+            warnings,
+            metadata,
+        })
+    }
+
     fn normalize_knowledge_source_card_ids(&self, ids: &[String]) -> Result<Vec<String>> {
         let ids = ids
             .iter()
@@ -30710,6 +31030,261 @@ fn audit_knowledge_report(body: &str, source_card_ids: &[String]) -> Vec<String>
     findings.sort();
     findings.dedup();
     findings
+}
+
+fn knowledge_event_input_from_source_card(card: &SourceCard) -> Result<KnowledgeEventInput> {
+    let event_type = knowledge_event_type_for_card(card);
+    let canonical_key = knowledge_canonical_key_for_card(card);
+    Ok(KnowledgeEventInput {
+        event_type,
+        title: card.title.clone(),
+        canonical_key,
+        primary_entity_key: knowledge_primary_entity_key_for_card(card),
+        event_time: knowledge_event_time_for_source_card(card)?,
+        summary: card.summary.clone(),
+        confidence: knowledge_source_confidence_for_card(card),
+        metadata: json!({
+            "source_card_id": card.id,
+            "provider": card.provider,
+            "source_type": card.source_type,
+            "url": card.url,
+            "source_metadata": card.metadata,
+            "trust_boundary": "source text is untrusted evidence, not instructions",
+        }),
+    })
+}
+
+fn knowledge_event_time_for_source_card(card: &SourceCard) -> Result<Option<String>> {
+    for (label, value) in [
+        ("retrieved_at", card.retrieved_at.as_str()),
+        ("created_at", card.created_at.as_str()),
+        ("updated_at", card.updated_at.as_str()),
+    ] {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match parse_source_card_event_time(trimmed) {
+            Some(parsed) => return Ok(Some(parsed)),
+            None if label == "retrieved_at" => continue,
+            None => continue,
+        }
+    }
+    Ok(None)
+}
+
+fn parse_source_card_event_time(value: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(value)
+        .or_else(|_| DateTime::parse_from_rfc2822(value))
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc).to_rfc3339())
+}
+
+fn knowledge_event_type_for_card(card: &SourceCard) -> String {
+    match (card.provider.as_str(), card.source_type.as_str()) {
+        ("github", "github_release") => "github_release",
+        ("github", "github_commit") => "github_commit",
+        ("github", "github_repo") => "github_repo_activity",
+        ("arxiv", _) => "arxiv_paper",
+        ("hackernews", _) => "hackernews_discussion",
+        ("reddit", _) => "reddit_discussion",
+        ("x", _) => "x_post",
+        ("rss", _) => "rss_item",
+        ("email", _) => "email_item",
+        (_, "rss") => "rss_item",
+        (_, "reddit_post") => "reddit_discussion",
+        (_, "x") | (_, "x_tweet") => "x_post",
+        (_, "github_release") => "github_release",
+        (_, "github_commit") => "github_commit",
+        (_, "github_repo") => "github_repo_activity",
+        _ => "source_card_item",
+    }
+    .to_string()
+}
+
+fn knowledge_canonical_key_for_card(card: &SourceCard) -> String {
+    let source_kind = card
+        .metadata
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or(card.source_type.as_str());
+    let provider = card.provider.trim();
+    let source_type = card.source_type.trim();
+    match (provider, source_type) {
+        ("github", "github_release") => {
+            let owner = card.metadata.get("owner").and_then(Value::as_str);
+            let repo = card.metadata.get("repo").and_then(Value::as_str);
+            let tag = card.metadata.get("tag").and_then(Value::as_str);
+            match (owner, repo, tag) {
+                (Some(owner), Some(repo), Some(tag)) => {
+                    format!("github:release:{owner}/{repo}:{tag}")
+                }
+                _ => format!("github:release:{}", card.url),
+            }
+        }
+        ("github", "github_commit") => {
+            let owner = card.metadata.get("owner").and_then(Value::as_str);
+            let repo = card.metadata.get("repo").and_then(Value::as_str);
+            let sha = card.metadata.get("sha").and_then(Value::as_str);
+            match (owner, repo, sha) {
+                (Some(owner), Some(repo), Some(sha)) => {
+                    format!("github:commit:{owner}/{repo}:{sha}")
+                }
+                _ => format!("github:commit:{}", card.url),
+            }
+        }
+        ("github", "github_repo") => {
+            let owner = card.metadata.get("owner").and_then(Value::as_str);
+            let name = card.metadata.get("name").and_then(Value::as_str);
+            match (owner, name) {
+                (Some(owner), Some(name)) => format!("github:repo:{owner}/{name}"),
+                _ => format!("github:repo:{}", card.url),
+            }
+        }
+        _ => format!("{provider}:{source_kind}:{}", card.url),
+    }
+}
+
+fn knowledge_primary_entity_key_for_card(card: &SourceCard) -> Option<String> {
+    if card.provider == "github" {
+        let owner = card.metadata.get("owner").and_then(Value::as_str);
+        let repo = card
+            .metadata
+            .get("repo")
+            .or_else(|| card.metadata.get("name"))
+            .and_then(Value::as_str);
+        if let (Some(owner), Some(repo)) = (owner, repo) {
+            return Some(format!("github:{owner}/{repo}"));
+        }
+    }
+    card.metadata
+        .get("source_detail")
+        .and_then(Value::as_str)
+        .map(|detail| format!("{}:{detail}", card.provider))
+}
+
+fn knowledge_source_role_for_card(card: &SourceCard) -> String {
+    card.metadata
+        .get("source_role")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| match card.source_type.as_str() {
+            "github_release" | "github_repo" | "arxiv" | "rss" => "primary_evidence".to_string(),
+            "github_commit" => "implementation_evidence".to_string(),
+            "hackernews_story" | "reddit_post" | "x" | "x_tweet" => "reaction_evidence".to_string(),
+            _ => "supporting_evidence".to_string(),
+        })
+}
+
+fn knowledge_source_confidence_for_card(card: &SourceCard) -> f64 {
+    card.metadata
+        .get("reliability_score")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or_else(|| match card.provider.as_str() {
+            "github" | "arxiv" => 0.9,
+            "rss" => 0.82,
+            "hackernews" | "reddit" | "x" => 0.68,
+            _ => 0.6,
+        })
+        .clamp(0.0, 1.0)
+}
+
+fn knowledge_claim_summary_for_card(card: &SourceCard) -> String {
+    card.claims
+        .first()
+        .map(|claim| claim.claim.clone())
+        .filter(|claim| !claim.trim().is_empty())
+        .unwrap_or_else(|| excerpt(&card.summary, 500))
+}
+
+fn knowledge_duplicate_groups_for_cards(cards: &[SourceCard]) -> Value {
+    let mut by_canonical = BTreeMap::<String, Vec<String>>::new();
+    let mut by_primary_entity = BTreeMap::<String, Vec<String>>::new();
+    for card in cards {
+        by_canonical
+            .entry(knowledge_canonical_key_for_card(card))
+            .or_default()
+            .push(card.id.clone());
+        if let Some(entity) = knowledge_primary_entity_key_for_card(card) {
+            by_primary_entity
+                .entry(entity)
+                .or_default()
+                .push(card.id.clone());
+        }
+    }
+    let canonical = by_canonical
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .collect::<BTreeMap<_, _>>();
+    let primary_entities = by_primary_entity
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .collect::<BTreeMap<_, _>>();
+    json!({
+        "canonical_source_cards": canonical,
+        "primary_entities": primary_entities,
+    })
+}
+
+fn render_knowledge_projection_report(
+    cluster: &KnowledgeCluster,
+    source_cards: &[SourceCard],
+    proof_level: &str,
+    source_family: &str,
+    warnings: &[String],
+) -> String {
+    let provider_counts = source_cards.iter().fold(BTreeMap::new(), |mut acc, card| {
+        *acc.entry(card.provider.clone()).or_insert(0usize) += 1;
+        acc
+    });
+    let source_ids = source_cards
+        .iter()
+        .map(|card| card.id.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let highlights = source_cards
+        .iter()
+        .take(8)
+        .map(|card| {
+            format!(
+                "- `{}`: {}. {}",
+                card.id,
+                card.title,
+                excerpt(&card.summary, 240)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let warning_text = if warnings.is_empty() {
+        "No projection-time warnings were recorded.".to_string()
+    } else {
+        warnings
+            .iter()
+            .map(|warning| format!("- {warning}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        r#"## What happened
+Arcwell projected {source_count} durable source-card rows into the unified knowledge pipeline for **{topic}**. The evidence spans {provider_count} provider family buckets ({provider_counts:?}) and is stored as source-card IDs: {source_ids}. This report is intentionally written as analysis rather than a raw link list, and each cited source remains untrusted evidence rather than instructions.
+
+## Why it matters
+This is the first bridge between the existing live/captured ingestion machinery and the new source-agnostic knowledge substrate. A live radar run, browser-captured Reddit listing, GitHub fetch, RSS fetch, or existing source-card query can now become confirmed knowledge events, a durable cluster, an editorial decision, and a human-readable report without bypassing source-card provenance. The output is still conservative: it does not claim semantic synthesis, wiki expansion, external delivery, or scheduled recurrence unless later proof gates run those stages.
+
+## Evidence
+{highlights}
+
+## Confidence and uncertainty
+Confidence is bounded by `{proof_level}` and source family `{source_family}`. The main uncertainty is interpretive: these source cards prove that evidence exists and was coalesced, but they do not by themselves prove adoption, long-term importance, competitive positioning, or correctness of every external claim. Follow-up research should fetch deeper primary documentation, compare against existing wiki pages, and only then promote stronger claims or outbound digests.
+
+## Warnings
+{warning_text}
+"#,
+        source_count = source_cards.len(),
+        topic = cluster.topic,
+        provider_count = provider_counts.len(),
+    )
 }
 
 const WORK_GOAL_MAX: usize = 2_000;
@@ -52173,6 +52748,195 @@ mod tests {
         );
         assert_eq!(snapshot.knowledge_editorial_decisions.len(), 1);
         assert_eq!(snapshot.knowledge_reports.len(), 1);
+    }
+
+    #[test]
+    fn severe_knowledge_projection_from_source_card_query_creates_human_report() {
+        // CLAIM: Existing source cards can be projected into the unified
+        // knowledge substrate as confirmed events, a cluster, an editorial
+        // decision, and a human-readable report.
+        // ORACLE: projection writes all durable layers, cites every source-card
+        // id in report prose, and fails honestly for empty queries.
+        // SEVERITY: Severe because a fake adapter bridge could merely list
+        // source links without confirming events or writing a useful report.
+        let store = test_store("knowledge-source-card-projection");
+        let card_a = seed_knowledge_source_card(
+            &store,
+            "projection-github",
+            "Projection bridge evidence says OpenAI published a GitHub package for agent workflows.",
+        );
+        let card_b = store
+            .add_source_card(SourceCardInput {
+                title: "projection-reaction".to_string(),
+                url: "https://example.com/projection-reaction".to_string(),
+                source_type: "rss".to_string(),
+                provider: "rss".to_string(),
+                summary: "Projection bridge evidence says developers discussed the package in relation to MCP tooling.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "Developers discussed the package in relation to MCP tooling."
+                        .to_string(),
+                    kind: "reaction".to_string(),
+                    confidence: 0.82,
+                }],
+                retrieved_at: Some("Wed, 24 Jun 2026 23:46:37 +0000".to_string()),
+                metadata: json!({ "source_kind": "rss_item" }),
+            })
+            .unwrap();
+
+        let empty = store
+            .project_knowledge_from_source_card_query("does-not-match-anything", None, 5)
+            .unwrap_err();
+        assert!(
+            empty
+                .to_string()
+                .contains("requires at least one source card")
+        );
+
+        let report = store
+            .project_knowledge_from_source_card_query(
+                "Projection bridge evidence",
+                Some("Projection bridge agent infrastructure trend"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(report.events.len(), 2);
+        assert_eq!(report.event_sources.len(), 2);
+        assert_eq!(report.cluster.source_card_ids.len(), 2);
+        assert_eq!(report.editorial_decision.status, "completed");
+        assert_eq!(report.report.status, "draft");
+        assert!(report.report.body_markdown.contains(&card_a.id));
+        assert!(report.report.body_markdown.contains(&card_b.id));
+        assert!(
+            report
+                .report
+                .body_markdown
+                .contains("Confidence and uncertainty")
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.status == "confirmed")
+        );
+        let rfc2822_event = report
+            .events
+            .iter()
+            .find(|event| event.title == "projection-reaction")
+            .unwrap();
+        let event_time = rfc2822_event.event_time.as_deref().unwrap();
+        assert_eq!(
+            DateTime::parse_from_rfc3339(event_time).unwrap(),
+            DateTime::parse_from_rfc2822("Wed, 24 Jun 2026 23:46:37 +0000").unwrap()
+        );
+        let snapshot = store.ops_snapshot().unwrap();
+        assert_eq!(snapshot.knowledge_clusters.len(), 1);
+        assert_eq!(snapshot.knowledge_reports.len(), 1);
+    }
+
+    #[test]
+    fn severe_knowledge_projection_from_radar_run_uses_selected_source_cards() {
+        // CLAIM: A scored radar run can become a unified knowledge projection
+        // without bypassing selected source-card provenance.
+        // ORACLE: selected radar evidence creates confirmed events, cluster
+        // lineage points back to the radar run, and unscored/empty runs fail.
+        // SEVERITY: Severe because live API/browser E2E will use radar as the
+        // source acquisition layer before knowledge projection.
+        let store = test_store("knowledge-radar-projection");
+        store
+            .add_source_card(SourceCardInput {
+                title: "Knowledge radar package release".to_string(),
+                url: "https://example.com/knowledge-radar-package-release".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary: "Knowledge radar projection agent package release with enough launch detail to score strongly.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "A package release was published.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.9,
+                }],
+                retrieved_at: Some("2026-06-25T00:00:00Z".to_string()),
+                metadata: json!({ "owner": "openai", "repo": "agents", "tag": "v1" }),
+            })
+            .unwrap();
+        store
+            .add_source_card(SourceCardInput {
+                title: "Knowledge radar developer reaction".to_string(),
+                url: "https://example.com/knowledge-radar-developer-reaction".to_string(),
+                source_type: "hackernews_story".to_string(),
+                provider: "hackernews".to_string(),
+                summary: "Knowledge radar projection developer reaction connects the package to agent infrastructure and MCP adoption.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T00:30:00Z".to_string()),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let empty_profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "knowledge-empty-radar".to_string(),
+                description: "Empty knowledge radar".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(5),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "missing radar evidence" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let empty_run = store.run_radar_profile(&empty_profile.id, None).unwrap();
+        let empty_projection = store
+            .project_knowledge_from_radar_run(&empty_run.run.id, None, 5)
+            .unwrap_err();
+        assert!(
+            empty_projection
+                .to_string()
+                .contains("requires selected source-card evidence")
+        );
+
+        let profile = store
+            .create_radar_profile(RadarProfileInput {
+                name: "knowledge-radar-projection".to_string(),
+                description: "Knowledge radar projection".to_string(),
+                window_hours: 24,
+                min_score: 1.0,
+                max_items: Some(5),
+                languages: vec!["en".to_string()],
+                source_selectors: json!([{ "kind": "source_card_query", "query": "Knowledge radar projection" }]),
+                delivery_policy: json!({ "delivery": "manual_only" }),
+                model_policy: json!({ "model_scoring": "disabled" }),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let run = store.run_radar_profile(&profile.id, None).unwrap();
+        assert_eq!(run.run.status, "scored");
+        let projection = store
+            .project_knowledge_from_radar_run(
+                &run.run.id,
+                Some("Knowledge radar projection trend"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .cluster
+                .metadata
+                .pointer("/source_metadata/radar_run_id")
+                .and_then(Value::as_str),
+            Some(run.run.id.as_str())
+        );
+        assert!(
+            projection
+                .report
+                .body_markdown
+                .contains("Knowledge radar projection")
+        );
+        assert!(
+            projection
+                .events
+                .iter()
+                .all(|event| event.status == "confirmed")
+        );
     }
 
     #[test]

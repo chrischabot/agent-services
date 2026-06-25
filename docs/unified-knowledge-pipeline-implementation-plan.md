@@ -2,9 +2,11 @@
 
 Date: 2026-06-25
 
-Status: design and implementation plan only. This document does not claim that
-the unified cross-source pipeline is implemented. It updates the Horizon-inspired
-radar/digest plan with the broader Arcwell knowledge-system goal.
+Status: design plus implemented foreground bridge slices. This document does
+not claim that the unified cross-source pipeline is operational. The shared
+knowledge substrate and a live source-card/radar projection bridge are now
+implemented and tested; scheduled recurrence, wiki expansion, digest routing,
+semantic clustering, and broad provider coverage remain open.
 
 Skill gate: `arc:anti-mirage`.
 
@@ -108,6 +110,44 @@ Missing or partial:
 - Wall-clock recurrence proof for real external alerts.
 - Live X freshness is currently blocked by expired credentials.
 - Ops controls are still narrow.
+
+Current implemented bridge slice:
+
+- Durable shared tables for `knowledge_events`, `knowledge_event_sources`,
+  `knowledge_clusters`, `knowledge_editorial_decisions`, and
+  `knowledge_reports`.
+- CLI projection from existing source cards or scored radar runs:
+  `arcwell knowledge project-source-card-query` and
+  `arcwell knowledge project-radar-run`.
+- CLI listing for knowledge events, clusters, and reports.
+- Deterministic source-card-to-event mapping with source-card evidence rows,
+  canonical keys for common providers, source roles, duplicate grouping,
+  provider-native timestamp normalization, and report quality gates.
+- `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
+  decisions, and reports.
+- Preserved production-data foreground proof:
+  `.arcwell-dev/proofs/knowledge-live-e2e-proof-20260625T152151Z-18362/artifacts/proof-packet.json`.
+
+What the bridge proof showed:
+
+- Live public RSS, GitHub owner, arXiv, and Hacker News adapters completed.
+- A scored radar run projected 12 source cards into 12 confirmed knowledge
+  events.
+- One source-backed cluster, one completed editorial decision, and one
+  human-readable report were written durably.
+- Cursors and ops state were visible after durable writes.
+- Authenticated `/ops/ui` rendered desktop and mobile knowledge tables through
+  browser automation without horizontal overflow.
+
+What it still does not prove:
+
+- Resident scheduled recurrence over wall-clock time.
+- Live X freshness, because local X credentials still need refresh/reauthorize.
+- Entity/relation storage.
+- Model-backed semantic synthesis or semantic multi-cluster splitting.
+- Wiki page expansion/update jobs.
+- Digest candidate routing and external delivery from shared knowledge reports.
+- Broad ops repair controls.
 
 ## Unified Pipeline
 
@@ -951,6 +991,8 @@ Proof level after this milestone: `Local Proof`.
 ### Milestone 2: Shared Adapter Contract
 
 - [ ] Define `KnowledgeSourceAdapter` trait or equivalent internal interface.
+- [x] Add first bridge from existing adapter-written source cards/radar runs
+      into the shared knowledge substrate.
 - [ ] Wrap RSS/blog adapter.
 - [ ] Wrap GitHub repo adapter.
 - [ ] Wrap GitHub owner/org/person adapter.
@@ -971,19 +1013,25 @@ Refuting tests:
 - [ ] Partial malformed provider page does not corrupt cursor.
 - [ ] Duplicate provider records do not flood source cards.
 - [ ] Source-health row distinguishes healthy, stale, blocked, failed, partial.
+- [x] Live public RSS, GitHub owner, arXiv, and Hacker News adapter evidence can
+      be projected from a scored radar run into confirmed shared knowledge
+      events without manual row surgery.
 
-Proof level after this milestone: `Local Proof`; source families move to
-`Production Data Proof` only after their own live/copy proof packets pass.
+Proof level after this milestone: the foreground projection bridge is
+`Production Data Proof` for public RSS, GitHub owner, arXiv, and Hacker News
+through `scripts/knowledge-live-e2e-proof`. The true shared adapter contract is
+still open, and each wrapped source family must keep or earn its own live/copy
+proof packet.
 
 ### Milestone 3: Event Extraction
 
-- [ ] Implement deterministic event extraction from source cards.
+- [x] Implement first deterministic event extraction from source cards.
 - [ ] Add canonical keys for GitHub repos/releases, packages, models, papers,
       URLs, X posts, and topic events.
 - [ ] Add entity extraction and linking.
-- [ ] Add source-role assignment.
+- [x] Add first source-role assignment.
 - [ ] Add optional schema-validated model extraction behind policy/cost.
-- [ ] Write event-source rows.
+- [x] Write event-source rows.
 
 Refuting tests:
 
@@ -997,8 +1045,9 @@ Refuting tests:
 
 ### Milestone 4: Cross-Source Clustering
 
-- [ ] Implement deterministic cluster update by canonical event/entity.
-- [ ] Implement source-diversity and momentum scoring.
+- [x] Implement first deterministic cluster creation from projected source
+      cards/radar runs.
+- [x] Implement first source-diversity and momentum scoring.
 - [ ] Implement wiki novelty lookup.
 - [ ] Implement relation extraction.
 - [ ] Add semantic/model cluster proposal behind schema validation.
@@ -1016,7 +1065,8 @@ Refuting tests:
 ### Milestone 5: Editorial Decision Worker
 
 - [ ] Add `editorial_decide` worker job.
-- [ ] Add deterministic decision rules.
+- [x] Add first foreground deterministic decision rule for source-card/radar
+      projection reports.
 - [ ] Add model-assisted decision explanation behind policy/cost.
 - [ ] Add duplicate page detection.
 - [ ] Add update-vs-new-page selection.
@@ -1053,13 +1103,15 @@ Refuting tests:
 
 ### Milestone 7: Wiki Writer And Quality Gate
 
-- [ ] Add report/page template renderer.
-- [ ] Add source-card citation checker.
-- [ ] Add unsupported-claim checker.
+- [x] Add first report template renderer for foreground projection reports.
+- [x] Add source-card citation checker for `knowledge_reports`.
+- [x] Add first unsupported-output checker through report length/prose/source-id
+      gates.
 - [ ] Add stale-evidence checker.
 - [ ] Add duplicate-page checker.
-- [ ] Add prompt-injection checker.
-- [ ] Add uncertainty section validator.
+- [x] Add prompt-injection-as-data regression coverage for source-card-backed
+      knowledge projection and ops rendering.
+- [x] Add uncertainty/confidence section validator for `knowledge_reports`.
 - [ ] Add wiki page versioning and rollback.
 
 Refuting tests:
@@ -1093,8 +1145,8 @@ Refuting tests:
 
 ### Milestone 9: Unified Ops
 
-- [ ] Add knowledge dashboard rows to ops snapshot.
-- [ ] Add `/ops/ui` knowledge tables.
+- [x] Add knowledge dashboard rows to ops snapshot.
+- [x] Add `/ops/ui` knowledge tables.
 - [ ] Add safe controls.
 - [ ] Add doctor checks for stale sources, failed clusters, stuck decisions,
       empty reports, and failed delivery retries.
@@ -1102,7 +1154,7 @@ Refuting tests:
 
 Refuting tests:
 
-- [ ] Malicious source text is escaped in ops.
+- [x] Malicious source text is escaped in ops.
 - [ ] Stale cursor is visible.
 - [ ] Failed fanout is visible.
 - [ ] Empty report quality failure is visible.
@@ -1113,6 +1165,7 @@ Refuting tests:
 Add preserved proof scripts:
 
 - [ ] `scripts/knowledge-local-fixture-proof`
+- [x] `scripts/knowledge-live-e2e-proof`
 - [ ] `scripts/knowledge-cross-source-production-proof`
 - [ ] `scripts/knowledge-github-launch-proof`
 - [ ] `scripts/knowledge-x-github-correlation-proof`

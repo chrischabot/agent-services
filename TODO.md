@@ -1,6 +1,6 @@
 # Arcwell Remaining Work
 
-Last updated: 2026-06-24
+Last updated: 2026-06-25
 
 This file is intentionally only unfinished work. Completed historical checklist
 items were removed. Existing unchecked items from the prior `TODO.md` have been
@@ -146,13 +146,24 @@ PR, implementation note, or final report:
       least three source families, durable events/clusters/decisions,
       source-backed wiki writing, digest routing, external delivery ledger,
       ops visibility, and wall-clock recurrence without manual intervention.
-      First local-proof slice now exists in `arcwell-core`: durable
+      First substrate slice now exists in `arcwell-core`: durable
       `knowledge_events`, `knowledge_event_sources`, `knowledge_clusters`,
       `knowledge_editorial_decisions`, and `knowledge_reports`, with source-card
       evidence gates, link-dump report rejection, ops snapshot visibility, and
-      severe tests. Remaining work is the adapter contract, entities/relations,
-      investigation jobs, wiki/digest worker integration, live provider proofs,
-      scheduled recurrence, and ops UI controls.
+      severe tests. The foreground projection bridge also now exists:
+      `arcwell knowledge project-radar-run`,
+      `arcwell knowledge project-source-card-query`, listing commands, `/ops/ui`
+      knowledge tables, provider-native timestamp normalization, and preserved
+      live proof `scripts/knowledge-live-e2e-proof`. Latest proof packet
+      `.arcwell-dev/proofs/knowledge-live-e2e-proof-20260625T152151Z-18362/artifacts/proof-packet.json`
+      used live public RSS, GitHub owner, arXiv, and Hacker News adapters,
+      projected 12 source cards into 12 confirmed events, wrote one cluster,
+      one editorial decision, one human-readable report, and browser-checked
+      authenticated desktop/mobile ops UI. Remaining work is the true shared
+      adapter contract, entities/relations, investigation jobs, semantic/model
+      clustering, wiki/digest worker integration, X credential-refresh live
+      proof, scheduled recurrence, external delivery recurrence, and broader
+      ops UI controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

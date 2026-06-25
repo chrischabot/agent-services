@@ -130,6 +130,11 @@ Current implemented bridge slice:
   links, and cluster co-occurrence links.
 - Alias collision checks that fail closed instead of silently merging unrelated
   canonical entities.
+- Deterministic semantic entity-resolution proposals plus model-invoked
+  entity-resolution suggestions through
+  `arcwell knowledge resolve-entity-model`, with policy/cost gates,
+  schema-validated output, source-card citation requirements, prompt-injection
+  reason rejection, and pending-review-only writes.
 - `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
   decisions, reports, entities, relations, adapter runs, and entity-resolution
   proposals.
@@ -147,6 +152,12 @@ What the bridge proof showed:
   human-readable report were written durably.
 - First-pass source-backed entities and relations are now part of the
   projection output and live proof harness assertions.
+- `scripts/knowledge-entity-resolution-production-proof` invoked the
+  entity-resolution model path with both deterministic mock provider and live
+  OpenAI `gpt-4.1-mini`; the live proof wrote a cost decision, durable
+  `pending_review` resolution, source-card-backed evidence boundary, zero graph
+  relations, and authenticated desktop/mobile `/ops/ui` screenshots at
+  `.arcwell-dev/proofs/knowledge-entity-resolution-production-proof-20260625T181411Z-84883/artifacts/proof-packet.json`.
 - Cursors and ops state were visible after durable writes.
 - Authenticated `/ops/ui` rendered desktop and mobile knowledge tables through
   browser automation without horizontal overflow.
@@ -155,8 +166,9 @@ What it still does not prove:
 
 - Resident scheduled recurrence over wall-clock time.
 - Live X freshness, because local X credentials still need refresh/reauthorize.
-- Entity/relation storage.
-- Semantic/model-backed entity resolution beyond deterministic source metadata.
+- Model-invoked entity resolution over broad production clusters or scheduled
+  recurrence; the live proof is a foreground provider attempt over proof
+  fixture data.
 - Model-backed semantic synthesis or semantic multi-cluster splitting.
 - Wiki page expansion/update jobs.
 - Digest candidate routing and external delivery from shared knowledge reports.
@@ -1051,6 +1063,8 @@ live recurrence and per-source-family live/copy proof packets still remain.
       source items, GitHub owners, and GitHub repos.
 - [x] Add first source-role assignment.
 - [x] Add schema-gated model-origin entity-resolution proposal recording.
+- [x] Add live optional model invocation for entity-resolution suggestions
+      behind policy/cost, with pending-review-only durable output.
 - [ ] Add live optional model invocation for entity/event extraction behind
       policy/cost.
 - [x] Write event-source rows.

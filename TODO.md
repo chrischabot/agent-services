@@ -171,11 +171,16 @@ PR, implementation note, or final report:
       proof, provider-error classification, CLI listing/resolution commands,
       conservative semantic entity-resolution proposals, schema-gated
       model-origin proposals that cannot merge graph state by themselves, and a
-      GitHub repo short-name collision fix. Remaining work is live model
-      invocation proof for entity-resolution suggestions, investigation jobs,
-      semantic/model clustering, wiki/digest worker integration, X
-      credential-refresh live proof, scheduled recurrence, external delivery
-      recurrence, and broader ops UI controls.
+      GitHub repo short-name collision fix. The current slice adds
+      `arcwell knowledge upsert-entity`, live optional
+      `arcwell knowledge resolve-entity-model` invocation behind policy/cost,
+      prompt-injection/malformed-output/cost-denial/policy-denial severe
+      tests, and repeatable mock plus live OpenAI browser proof at
+      `.arcwell-dev/proofs/knowledge-entity-resolution-production-proof-20260625T181411Z-84883/artifacts/proof-packet.json`.
+      Remaining work is investigation jobs, semantic/model clustering,
+      wiki/digest worker integration, X credential-refresh live proof,
+      scheduled recurrence, external delivery recurrence, and broader ops UI
+      controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

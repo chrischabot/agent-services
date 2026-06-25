@@ -3,8 +3,9 @@ use arcwell_core::{
     AppPaths, CommerceAvailabilityProofInput, CommerceCandidateInput, CommerceContextFactInput,
     CommerceRenderedPageCheckInput, CommerceReportJudgmentInput, CommerceRunConfigInput,
     CommerceVerificationAttemptInput, DigestAlertScheduleInput, DoctorOptions, ImportRunFinish,
-    OpsSnapshot, PolicyRequest, ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput,
-    RadarRun, RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
+    KnowledgeEntityInput, KnowledgeEntityResolutionModelInput, OpsSnapshot, PolicyRequest,
+    ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput, RadarRun,
+    RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
     ResearchConvergenceCloseLoopInput, ResearchConvergenceProviderSearchInput,
     ResearchConvergenceStartInput, ResearchConvergenceStepInput, ResearchDocumentInput,
     ResearchEditorialInvokeInput, ResearchEditorialRunInput, ResearchHostSearchInput,
@@ -1760,6 +1761,38 @@ enum KnowledgeSubcommand {
     ResolveEntities {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    UpsertEntity {
+        #[arg(long)]
+        entity_type: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        canonical_key: String,
+        #[arg(long, default_value = "[]")]
+        aliases_json: String,
+        #[arg(long)]
+        homepage_url: Option<String>,
+        #[arg(long, default_value = "[]")]
+        source_card_ids_json: String,
+        #[arg(long)]
+        wiki_page_id: Option<String>,
+        #[arg(long, default_value_t = 0.8)]
+        confidence: f64,
+        #[arg(long, default_value = "{}")]
+        metadata_json: String,
+    },
+    ResolveEntityModel {
+        left_entity_id: String,
+        right_entity_id: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
     EntityResolutions {
         #[arg(long, default_value_t = 50)]
@@ -3701,6 +3734,50 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
         KnowledgeSubcommand::ResolveEntities { limit } => {
             print_json(&store.propose_knowledge_entity_resolutions(limit)?)
         }
+        KnowledgeSubcommand::UpsertEntity {
+            entity_type,
+            name,
+            canonical_key,
+            aliases_json,
+            homepage_url,
+            source_card_ids_json,
+            wiki_page_id,
+            confidence,
+            metadata_json,
+        } => {
+            let aliases = serde_json::from_str(&aliases_json).context("parsing --aliases-json")?;
+            let source_card_ids = serde_json::from_str(&source_card_ids_json)
+                .context("parsing --source-card-ids-json")?;
+            let metadata = parse_json_arg(&metadata_json, "--metadata-json")?;
+            print_json(&store.upsert_knowledge_entity(KnowledgeEntityInput {
+                entity_type,
+                name,
+                canonical_key,
+                aliases,
+                homepage_url,
+                source_card_ids,
+                wiki_page_id,
+                confidence,
+                metadata,
+            })?)
+        }
+        KnowledgeSubcommand::ResolveEntityModel {
+            left_entity_id,
+            right_entity_id,
+            provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+        } => print_json(&store.invoke_knowledge_entity_resolution_model(
+            KnowledgeEntityResolutionModelInput {
+                left_entity_id,
+                right_entity_id,
+                model_provider: provider,
+                model_name,
+                endpoint,
+                timeout_seconds,
+            },
+        )?),
         KnowledgeSubcommand::EntityResolutions { limit } => {
             print_json(&store.list_knowledge_entity_resolutions(limit)?)
         }

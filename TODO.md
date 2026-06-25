@@ -137,6 +137,15 @@ PR, implementation note, or final report:
 
 ## 5. Proactive Delivery: Email, Telegram, Librarian, And X
 
+- [ ] Implement the unified knowledge pipeline plan in
+      `docs/unified-knowledge-pipeline-implementation-plan.md`. This is the
+      source-agnostic architecture for watch sources -> source cards -> events
+      -> clusters -> editorial decisions -> research fanout -> rich wiki pages
+      -> digest/report delivery. Do not mark it operational until the proof
+      packet shows scheduled real or copied-production source ingestion from at
+      least three source families, durable events/clusters/decisions,
+      source-backed wiki writing, digest routing, external delivery ledger,
+      ops visibility, and wall-clock recurrence without manual intervention.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

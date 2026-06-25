@@ -8,6 +8,12 @@ Reference study: temporary clone of `Thysrael/Horizon` at
 Status: design and execution plan only. No implementation is claimed by this
 document.
 
+Broader follow-on plan: see
+[`docs/unified-knowledge-pipeline-implementation-plan.md`](unified-knowledge-pipeline-implementation-plan.md)
+for the source-agnostic knowledge event, cluster, editorial, research, wiki,
+and alert architecture that generalizes this Horizon-inspired radar/digest
+substrate beyond radar runs.
+
 ## Objective
 
 Build the full value of Horizon inside Arcwell as a native, inspectable,

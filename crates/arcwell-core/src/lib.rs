@@ -28002,6 +28002,7 @@ impl Store {
             None,
             "host_browser_json",
             false,
+            None,
         )
     }
 
@@ -28026,10 +28027,18 @@ impl Store {
                 estimated_network_fetch_cost(1 + (limit * 2)),
                 json!({ "locator": source_detail, "limit": limit, "source_key": source_key }),
             )?;
+            let reddit_bearer_token = std::env::var("REDDIT_BEARER_TOKEN")
+                .ok()
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty());
             let use_json = input.get("transport").and_then(Value::as_str) == Some("json")
-                || std::env::var("REDDIT_BEARER_TOKEN").is_ok();
+                || reddit_bearer_token.is_some();
             if use_json {
-                match fetch_json(listing_url.as_str(), None, "reddit") {
+                match fetch_json(
+                    listing_url.as_str(),
+                    reddit_bearer_token.as_deref(),
+                    "reddit",
+                ) {
                     Ok(listing) => self.write_reddit_json_listing(
                         base,
                         &source_key,
@@ -28039,6 +28048,7 @@ impl Store {
                         None,
                         "json",
                         true,
+                        reddit_bearer_token.as_deref(),
                     ),
                     Err(json_error) => self.fetch_and_write_reddit_rss_fallback(
                         base,
@@ -28102,6 +28112,7 @@ impl Store {
         fallback_error: Option<&str>,
         transport: &str,
         fetch_comments: bool,
+        bearer_token: Option<&str>,
     ) -> Result<Value> {
         let children = listing
             .get("data")
@@ -28123,7 +28134,7 @@ impl Store {
                 .map(|value| value.to_string());
             let comments = match (fetch_comments, post_id.as_deref()) {
                 (true, Some(post_id)) => self
-                    .fetch_reddit_top_comments(base, &locator.subreddit, post_id)
+                    .fetch_reddit_top_comments(base, &locator.subreddit, post_id, bearer_token)
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
@@ -28152,9 +28163,10 @@ impl Store {
                 })),
             }
         }
-        if card_ids.is_empty() && !children.is_empty() {
+        if card_ids.is_empty() {
             bail!(
-                "reddit fetch produced no usable posts; skipped={}",
+                "reddit fetch produced no usable posts; children={} skipped={}",
+                children.len(),
                 skipped_items.len()
             );
         }
@@ -28270,9 +28282,10 @@ impl Store {
         base: &str,
         subreddit: &str,
         post_id: &str,
+        bearer_token: Option<&str>,
     ) -> Result<Vec<RedditCommentExcerpt>> {
         let url = reddit_comments_url(base, subreddit, post_id)?;
-        let value = fetch_json(url.as_str(), None, "reddit")?;
+        let value = fetch_json(url.as_str(), bearer_token, "reddit")?;
         let comments = value
             .as_array()
             .and_then(|items| items.get(1))
@@ -38063,6 +38076,8 @@ fn classify_commerce_rendered_availability(
     ];
     let negative_cues = [
         "sold out",
+        "sold",
+        "listing ended",
         "out of stock",
         "not available",
         "unavailable",
@@ -38078,6 +38093,7 @@ fn classify_commerce_rendered_availability(
         "add to bag",
         "add to basket",
         "add to cart",
+        "buy it now",
         "buy now",
     ];
     if let Some(cue) = blocked_cues.iter().find(|cue| lower.contains(**cue)) {
@@ -38106,21 +38122,23 @@ fn classify_commerce_rendered_availability(
                     .to_string(),
         });
     };
-    let window = commerce_text_window(&text, variant_index, 360);
-    let window_lower = window.to_ascii_lowercase();
+    let negative_window = commerce_text_window(&text, variant_index, 360);
+    let negative_window_lower = negative_window.to_ascii_lowercase();
+    let positive_window = commerce_text_window(&text, variant_index, 420);
+    let positive_window_lower = positive_window.to_ascii_lowercase();
     let negative = negative_cues
         .iter()
-        .find(|cue| commerce_cue_near_variant(&window_lower, &variant, cue, 120))
+        .find(|cue| commerce_cue_near_first_variant(&negative_window_lower, &variant, cue, 120))
         .copied();
     let positive = positive_cues
         .iter()
-        .find(|cue| commerce_cue_near_variant(&window_lower, &variant, cue, 320))
+        .find(|cue| commerce_cue_near_any_variant(&positive_window_lower, &variant, cue, 320))
         .copied();
     match (positive, negative) {
         (_, Some(cue)) => Ok(CommerceRenderedAvailability {
             availability_state: "unavailable".to_string(),
             visible_evidence: Some(commerce_variant_cue_evidence(
-                &window,
+                &negative_window,
                 &variant,
                 cue,
                 500,
@@ -38135,7 +38153,7 @@ fn classify_commerce_rendered_availability(
         (Some(cue), None) => Ok(CommerceRenderedAvailability {
             availability_state: "available".to_string(),
             visible_evidence: Some(commerce_variant_cue_evidence(
-                &window,
+                &positive_window,
                 &variant,
                 cue,
                 500,
@@ -38148,7 +38166,7 @@ fn classify_commerce_rendered_availability(
         }),
         (None, None) => Ok(CommerceRenderedAvailability {
             availability_state: "unknown".to_string(),
-            visible_evidence: Some(commerce_variant_evidence(&window, &variant, 500)),
+            visible_evidence: Some(commerce_variant_evidence(&negative_window, &variant, 500)),
             confidence: 0.35,
             caveats: json!([
                 "Exact variant label was visible, but no supported availability cue was nearby."
@@ -38178,7 +38196,7 @@ fn commerce_variant_cue_evidence(
     excerpt(&commerce_text_span(text, start, end, 80, 160), max_chars)
 }
 
-fn commerce_cue_near_variant(
+fn commerce_cue_near_first_variant(
     text_lower: &str,
     variant_label_lower: &str,
     cue_lower: &str,
@@ -38190,6 +38208,21 @@ fn commerce_cue_near_variant(
     text_lower
         .match_indices(cue_lower)
         .any(|(cue_index, _)| variant_index.abs_diff(cue_index) <= max_distance)
+}
+
+fn commerce_cue_near_any_variant(
+    text_lower: &str,
+    variant_label_lower: &str,
+    cue_lower: &str,
+    max_distance: usize,
+) -> bool {
+    text_lower
+        .match_indices(variant_label_lower)
+        .any(|(variant_index, _)| {
+            text_lower
+                .match_indices(cue_lower)
+                .any(|(cue_index, _)| variant_index.abs_diff(cue_index) <= max_distance)
+        })
 }
 
 fn commerce_variant_evidence(text: &str, variant_label_lower: &str, max_chars: usize) -> String {
@@ -47081,6 +47114,15 @@ fn reddit_post_to_source_card(
     };
     validate_public_http_url(&reddit_url)
         .with_context(|| format!("Reddit post {id} has unsafe permalink"))?;
+    let parsed_reddit_url = Url::parse(&reddit_url)
+        .with_context(|| format!("Reddit post {id} has invalid permalink"))?;
+    let reddit_host = parsed_reddit_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(reddit_host.as_str(), "reddit.com" | "www.reddit.com") {
+        bail!("Reddit post {id} has non-Reddit permalink host");
+    }
     let author = post
         .get("author")
         .and_then(Value::as_str)
@@ -49520,9 +49562,10 @@ fn is_generated_wiki_page(title: &str) -> bool {
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     static LOOPBACK_URL_INGEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static REDDIT_BEARER_TOKEN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn with_loopback_url_ingest_allowed<T>(f: impl FnOnce() -> T) -> T {
         let _guard = LOOPBACK_URL_INGEST_ENV_LOCK
@@ -49535,6 +49578,40 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(f));
         unsafe {
             std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+    fn with_reddit_bearer_token<T>(token: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = REDDIT_BEARER_TOKEN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Reddit bearer token env lock poisoned");
+        unsafe {
+            std::env::set_var("REDDIT_BEARER_TOKEN", token);
+        }
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe {
+            std::env::remove_var("REDDIT_BEARER_TOKEN");
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+    fn without_reddit_bearer_token<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = REDDIT_BEARER_TOKEN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Reddit bearer token env lock poisoned");
+        unsafe {
+            std::env::remove_var("REDDIT_BEARER_TOKEN");
+        }
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe {
+            std::env::remove_var("REDDIT_BEARER_TOKEN");
         }
         match result {
             Ok(value) => value,
@@ -50621,6 +50698,33 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    fn mock_recording_sequence_server(
+        responses: Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        thread::spawn(move || {
+            for (status, headers, body, content_type) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 8192];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buffer[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{headers}content-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{addr}"), requests)
     }
 
     fn mock_x_following_server() -> String {
@@ -56029,6 +56133,100 @@ reason = "HN disabled for radar policy test"
     }
 
     #[test]
+    fn severe_reddit_json_fetch_uses_configured_bearer_for_listing_and_comments() {
+        // CLAIM: configuring Reddit bearer access changes real request
+        // authorization, not just the adapter branch label.
+        // ORACLE: both listing and comment JSON requests carry the bearer token
+        // and bounded comments are written into source-card metadata.
+        // SEVERITY: Severe because OAuth/sanctioned access is a release blocker;
+        // an env var that is never sent would be a convincing fake integration.
+        let store = test_store("reddit-bearer-json");
+        let (base, requests) = mock_recording_sequence_server(vec![
+            (
+                "200 OK",
+                "",
+                r#"{
+                    "kind": "Listing",
+                    "data": {
+                        "children": [
+                            {
+                                "kind": "t3",
+                                "data": {
+                                    "id": "bearer1",
+                                    "subreddit": "rust",
+                                    "title": "Bearer-backed Reddit item",
+                                    "permalink": "/r/rust/comments/bearer1/bearer_backed/",
+                                    "url": "https://example.com/bearer-backed",
+                                    "selftext": "Bearer source text.",
+                                    "score": 77,
+                                    "num_comments": 1,
+                                    "created_utc": 1782144000.0
+                                }
+                            }
+                        ]
+                    }
+                }"#,
+                "application/json",
+            ),
+            (
+                "200 OK",
+                "",
+                r#"[
+                    { "kind": "Listing", "data": { "children": [] } },
+                    {
+                        "kind": "Listing",
+                        "data": {
+                            "children": [
+                                {
+                                    "kind": "t1",
+                                    "data": {
+                                        "id": "comment1",
+                                        "author": "commenter",
+                                        "score": 4,
+                                        "body": "Bearer comment text."
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]"#,
+                "application/json",
+            ),
+        ]);
+
+        let result = with_reddit_bearer_token("reddit-test-token", || {
+            store.execute_reddit_fetch_with_base(&json!({ "locator": "r/rust", "limit": 1 }), &base)
+        })
+        .unwrap();
+        assert_eq!(
+            result.get("transport").and_then(Value::as_str),
+            Some("json")
+        );
+        let captured = requests.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        for request in captured {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer reddit-test-token"),
+                "Reddit JSON request omitted bearer token:\n{request}"
+            );
+        }
+        let card = store.list_source_cards().unwrap().pop().unwrap();
+        assert_eq!(
+            card.metadata
+                .get("top_comment_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            card.summary.contains("Bearer comment text"),
+            "{}",
+            card.summary
+        );
+    }
+
+    #[test]
     fn severe_reddit_browser_listing_ingest_writes_cards_cursor_and_honest_metadata() {
         // CLAIM: host-browser captured Reddit JSON is a real Arcwell ingestion
         // path, not a proof-only file dump.
@@ -56161,6 +56359,196 @@ reason = "HN disabled for radar policy test"
     }
 
     #[test]
+    fn severe_reddit_browser_listing_replay_and_failures_do_not_corrupt_cursor() {
+        // CLAIM: browser-captured Reddit ingest is replay-safe and does not
+        // advance source state after malformed, empty, or unsafe inputs.
+        // ORACLE: duplicate replay suppresses duplicate source cards; later
+        // failure cases return errors and preserve the last successful cursor.
+        // SEVERITY: Severe because a release proof that advances a cursor on
+        // empty or rejected browser data would look healthy while losing data.
+        let store = test_store("reddit-browser-listing-replay-failures");
+        let listing = json!({
+            "kind": "Listing",
+            "data": {
+                "children": [
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "id": "dupe1",
+                            "subreddit": "rust",
+                            "title": "Replay-safe Reddit item",
+                            "permalink": "/r/rust/comments/dupe1/replay_safe/",
+                            "url": "https://example.com/replay-safe",
+                            "selftext": "Replay source text.",
+                            "score": 12,
+                            "num_comments": 2,
+                            "created_utc": 1782144000.0
+                        }
+                    }
+                ]
+            }
+        });
+
+        let first = store
+            .ingest_reddit_browser_listing("r/rust/hot", &listing, 10)
+            .unwrap();
+        assert_eq!(first.get("count").and_then(Value::as_u64), Some(1));
+        let first_cursor = store
+            .get_cursor("reddit:r/rust/hot")
+            .unwrap()
+            .expect("successful browser ingest should record cursor");
+        assert_eq!(store.list_source_cards().unwrap().len(), 1);
+
+        let replay = store
+            .ingest_reddit_browser_listing("r/rust/hot", &listing, 10)
+            .unwrap();
+        assert_eq!(replay.get("count").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            store.list_source_cards().unwrap().len(),
+            1,
+            "duplicate browser listing replay must not duplicate source cards"
+        );
+        assert_eq!(
+            store
+                .get_cursor("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .value,
+            first_cursor.value
+        );
+
+        let malformed = json!({ "kind": "Listing", "data": {} });
+        let error = store
+            .ingest_reddit_browser_listing("r/rust/hot", &malformed, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("data.children"),
+            "malformed browser listing should fail clearly: {error}"
+        );
+        assert_eq!(
+            store
+                .get_cursor("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .value,
+            first_cursor.value
+        );
+
+        let empty = json!({ "kind": "Listing", "data": { "children": [] } });
+        let error = store
+            .ingest_reddit_browser_listing("r/rust/hot", &empty, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("produced no usable posts"),
+            "empty browser listing should not advance cursor: {error}"
+        );
+        assert_eq!(
+            store
+                .get_cursor("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .value,
+            first_cursor.value
+        );
+
+        let unsafe_listing = json!({
+            "kind": "Listing",
+            "data": {
+                "children": [
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "id": "unsafe1",
+                            "subreddit": "rust",
+                            "title": "Unsafe Reddit item",
+                            "permalink": "http://127.0.0.1/private",
+                            "created_utc": 1782145000.0
+                        }
+                    }
+                ]
+            }
+        });
+        let error = store
+            .ingest_reddit_browser_listing("r/rust/hot", &unsafe_listing, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsafe permalink") || error.contains("non-Reddit permalink"),
+            "unsafe Reddit permalink should fail closed: {error}"
+        );
+        assert_eq!(
+            store
+                .get_cursor("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .value,
+            first_cursor.value
+        );
+        assert_eq!(store.list_source_cards().unwrap().len(), 1);
+
+        let partial_failure_listing = json!({
+            "kind": "Listing",
+            "data": {
+                "children": [
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "id": "partial-valid",
+                            "subreddit": "rust",
+                            "title": "Partial failure valid item",
+                            "permalink": "/r/rust/comments/partialvalid/partial_valid/",
+                            "url": "https://example.com/partial-valid",
+                            "selftext": "This item may be written before a later rejection.",
+                            "score": 8,
+                            "num_comments": 1,
+                            "created_utc": 1782154000.0
+                        }
+                    },
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "id": "partial-unsafe",
+                            "subreddit": "rust",
+                            "title": "Partial failure unsafe item",
+                            "permalink": "https://evil.example/r/rust/comments/partialunsafe/nope/",
+                            "created_utc": 1782155000.0
+                        }
+                    }
+                ]
+            }
+        });
+        let error = store
+            .ingest_reddit_browser_listing("r/rust/hot", &partial_failure_listing, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("non-Reddit permalink"),
+            "partial write failure should fail closed on unsafe later item: {error}"
+        );
+        assert_eq!(
+            store
+                .get_cursor("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .value,
+            first_cursor.value,
+            "partial write failure must not advance the cursor"
+        );
+        assert_eq!(
+            store
+                .get_source_health("reddit:r/rust/hot")
+                .unwrap()
+                .unwrap()
+                .cursor_value
+                .as_deref(),
+            Some(first_cursor.value.as_str()),
+            "partial write failure must not overwrite healthy source state"
+        );
+    }
+
+    #[test]
     fn severe_reddit_fetch_falls_back_to_rss_without_claiming_comments() {
         // CLAIM: Reddit public JSON failure is visible but can fall back to RSS
         // without pretending comment capture happened.
@@ -56254,9 +56642,10 @@ reason = "HN disabled for radar policy test"
             "application/atom+xml",
         )]);
 
-        let result = store
-            .execute_reddit_fetch_with_base(&json!({ "locator": "r/rust", "limit": 1 }), &base)
-            .unwrap();
+        let result = without_reddit_bearer_token(|| {
+            store.execute_reddit_fetch_with_base(&json!({ "locator": "r/rust", "limit": 1 }), &base)
+        })
+        .unwrap();
         assert_eq!(result.get("count").and_then(Value::as_u64), Some(1));
         assert_eq!(
             result.get("transport").and_then(Value::as_str),
@@ -75242,6 +75631,94 @@ The platform has achieved zero escapes in production since 2024.
         let shipping = structured.shipping_caveat.as_deref().unwrap();
         assert!(shipping.contains("Free standard delivery"), "{shipping}");
         assert!(!shipping.starts_with("Skip to content"), "{shipping}");
+    }
+
+    #[test]
+    fn severe_commerce_rendered_page_check_handles_marketplace_buy_now_layouts() {
+        // CLAIM: marketplace item pages can prove exact-size availability when
+        // the listing shows the exact variant and a purchase action, but sold
+        // listing chrome cannot become a recommendation through generic buyer
+        // protection text.
+        // ORACLE: active Buy now evidence records an available proof; sold
+        // evidence near the exact variant remains unavailable.
+        // SEVERITY: Severe because marketplace pages are noisy, reused, and
+        // especially prone to false availability.
+        let store = test_store("commerce-rendered-marketplace-buy-now");
+        let workflow = store
+            .create_deep_research_run("marketplace loafers in UK 8.5")
+            .unwrap();
+        let run_id = workflow.run.id.clone();
+        let candidate = store
+            .record_commerce_candidate(CommerceCandidateInput {
+                run_id: run_id.clone(),
+                domain: "fashion".to_string(),
+                source_url: "https://market.example/items/123-loafers".to_string(),
+                retailer_or_provider: "Vinted".to_string(),
+                title: "Dark Brown Italian Loafers".to_string(),
+                normalized_item_key: "vinted:123-loafers".to_string(),
+                variant_key: "category=shoe;size_system=UK;size=8.5;listing=123".to_string(),
+                price: Some("17.68".to_string()),
+                currency: Some("GBP".to_string()),
+                geography: Some("UK".to_string()),
+                candidate_status: "maybe".to_string(),
+                score: Some(0.55),
+                score_reasons: json!(["marketplace listing"]),
+                disqualification_reasons: json!([]),
+                metadata: json!({ "source_family": "marketplace" }),
+            })
+            .unwrap();
+
+        let checked = store
+            .record_commerce_rendered_page_check(CommerceRenderedPageCheckInput {
+                run_id: run_id.clone(),
+                candidate_id: candidate.id.clone(),
+                variant_key: candidate.variant_key.clone(),
+                variant_label: "8.5".to_string(),
+                snapshot: RenderedPageSnapshotInput {
+                    requested_url: "https://market.example/items/123-loafers".to_string(),
+                    final_url: Some("https://market.example/items/123-loafers".to_string()),
+                    title: Some("Dark Brown Italian Loafers".to_string()),
+                    rendered_html: None,
+                    rendered_text: Some(
+                        "Men Shoes Boat shoes, loafers & moccasins Member's items \
+                         Dark Brown Italian Loafers 8.5 · Good · John Varvatos £17.68 \
+                         Includes Buyer Protection Brand John Varvatos Size 8.5 Condition Good \
+                         Material Leather Colour Brown Free postage Buy now Make an offer Ask seller"
+                            .to_string(),
+                    ),
+                    captured_at: Some("2026-06-25T06:15:00Z".to_string()),
+                    browser: Some("live-html-fetch".to_string()),
+                    screenshot_path: None,
+                },
+                selector_or_dom_hint: Some(
+                    "marketplace listing text contains Size 8.5 and Buy now".to_string(),
+                ),
+                chrome_profile_required: false,
+            })
+            .unwrap();
+
+        assert_eq!(checked.availability_state, "available");
+        assert_eq!(
+            checked.source_card.metadata["commerce_availability_state"],
+            "available"
+        );
+        let evidence = checked
+            .availability_proof
+            .visible_evidence
+            .as_deref()
+            .unwrap();
+        assert!(evidence.contains("8.5"), "{evidence}");
+        assert!(evidence.contains("Buy now"), "{evidence}");
+
+        let sold = classify_commerce_rendered_availability(
+            "Sold Dark Brown Italian Loafers 8.5 · Good · John Varvatos \
+             Size 8.5 Condition Good Every purchase made using the Buy now button is protected.",
+            "8.5",
+            false,
+        )
+        .unwrap();
+        assert_eq!(sold.availability_state, "unavailable");
+        assert_ne!(sold.availability_state, "available");
     }
 
     #[test]

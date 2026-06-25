@@ -605,7 +605,11 @@ PR, implementation note, or final report:
       fashion retail: broad search, 20+ target qualified candidates when the
       market supports it, exact size availability proof, comfort/style/quality
       scoring, review evidence where available, and disqualified near-miss
-      reporting.
+      reporting. A bounded 2026-06-25 M&S UK loafer proof passed with 24 exact
+      UK 8.5/8½ recommendations at
+      `.arcwell-dev/proofs/commerce-uk-fashion-20-live-20260625T052635Z-94892/harness/artifacts/proof-packet.json`;
+      this does not yet prove autonomous cross-retailer discovery or denim-shirt
+      breadth.
 - [ ] Severe-test commerce research with disabled/crossed-out sizes, wrong-size
       availability, variant-specific price changes, region/shipping caveats,
       JS-only pages, sold marketplace listings, size-system ambiguity, stale
@@ -627,7 +631,9 @@ PR, implementation note, or final report:
 - [ ] Run preserved broad live proofs for UK loafers in UK 8.5 and a denim
       shirt search, with browser-verified availability, context-derived
       preferences, review evidence where available, disqualified near misses,
-      and final report audit before claiming the workflow works end to end.
+      and final report audit before claiming the workflow works end to end. The
+      loafer side has a bounded M&S-only pass packet; the denim-shirt broad
+      proof and multi-retailer breadth remain open.
 - [ ] Add an autonomous 20+ shopping manifest generator for UK fashion that
       drives configured Brave/Perplexity/OpenAI search, dedupes retailer pages,
       records search/provider proof, queues browser checks, and feeds
@@ -637,16 +643,26 @@ PR, implementation note, or final report:
 - [ ] Prove marketplace coverage with at least one eBay and one Vinted-style
       listing path when marketplaces are allowed, including sold/ended listing
       rejection, condition/seller fields, short-lived freshness labeling, and
-      source-card/report separation from standard retailer stock.
+      source-card/report separation from standard retailer stock. A narrow
+      Vinted-style exact-size marketplace coverage proof passed at
+      `.arcwell-dev/proofs/commerce-marketplace-live-20260625T053405Z-39997/harness-vinted-coverage/artifacts/proof-packet.json`;
+      the stricter eBay+Vinted gate is still blocked because the live eBay
+      fetch returned 403/no exact evidence at
+      `.arcwell-dev/proofs/commerce-marketplace-live-20260625T053405Z-39997/harness/artifacts/proof-packet.json`.
 - [ ] Prove logged-in Chrome-profile coverage in a supervised run that requires
       user/browser consent, records `chrome_profile` verification methods
       without copying private page data into public artifacts, and passes
       `scripts/commerce-research-production-proof --manifest ... --require-chrome-profile`.
+      Current release gate is blocked at
+      `.arcwell-dev/proofs/commerce-uk-fashion-20-live-20260625T052635Z-94892/harness-chrome-profile-gate/artifacts/proof-packet.json`
+      because no authenticated Chrome-profile availability check was proven.
 - [ ] Add rental and flight domain profiles only after generic field extraction
       supports their exact availability semantics: rental move-in/location/
       price/deposit/contact checks, and flight route/date/fare/baggage/refund
       checks. Each domain needs its own manifest proof and no cross-domain
-      recommendation claim before proof.
+      recommendation claim before proof. Current rental/travel release gates
+      are blocked local replay packets under
+      `.arcwell-dev/proofs/commerce-release-blocked-gates-20260625T053438Z-41247/`.
 - [ ] Add ops/recovery requirements before any operational claim: worker leases
       or resumable state for long runs, retry/dead-letter behavior, source or
       provider health, cost caps, idempotent reruns, user-stop handling, and ops
@@ -657,6 +673,10 @@ PR, implementation note, or final report:
       resumable report compilation, retry/dead-letter behavior, cost/policy
       decisions, and ops visibility, then passes
       `scripts/commerce-research-production-proof --manifest ... --require-worker-proof`.
+      Current worker release gate is blocked at
+      `.arcwell-dev/proofs/commerce-release-blocked-gates-20260625T053438Z-41247/worker/artifacts/proof-packet.json`
+      because no real worker-drained commerce run has produced passed worker
+      proof metadata.
 
 ## 7. Memory, Work Graph, And Procedural Retrieval Loop
 

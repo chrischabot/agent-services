@@ -416,6 +416,12 @@ The deep-research loop can run through live provider search, auditable host-sear
 - Model-backed accepted: ${summary.model_backed_accepted ? "yes" : "no"}
 - Closure status: ${summary.closure_status || "not reported"}
 
+## Depth Decision
+
+- Classification: \`${summary.depth_decision?.classification || "unknown"}\`
+- Meaning: ${summary.depth_decision?.meaning || "No depth decision recorded."}
+- Next action: ${summary.depth_decision?.next_action || "Inspect report judgment and blockers."}
+
 ## Blockers
 
 ${blockers}
@@ -457,16 +463,24 @@ function writeMarkdownFile(file, markdown) {
   fs.writeFileSync(file, body ? `${body}\n` : "");
 }
 
-function finalReportMarkdown({ topic, closeLoop, sourceReport, convergenceReport, judgments }) {
+function finalReportMarkdown({
+  topic,
+  closeLoop,
+  sourceReport,
+  convergenceReport,
+  judgments,
+  blockers,
+  depthDecision,
+}) {
   const convergenceMarkdown = normalizeExportedMarkdown(
     markdownFromReport(convergenceReport || closeLoop?.final_report)
   );
   const sourceMarkdown = normalizeExportedMarkdown(markdownFromReport(sourceReport));
   const body = convergenceMarkdown || sourceMarkdown;
-  const latestJudgment = Array.isArray(judgments) && judgments.length
-    ? judgments[judgments.length - 1]
-    : null;
-  const blockers = Array.isArray(closeLoop?.blockers) && closeLoop.blockers.length
+  const latestJudgment = latestReportJudgment(judgments);
+  const blockerText = Array.isArray(blockers) && blockers.length
+    ? blockers.map((blocker) => `- ${blocker}`).join("\n")
+    : Array.isArray(closeLoop?.blockers) && closeLoop.blockers.length
     ? closeLoop.blockers.map((blocker) => `- ${blocker}`).join("\n")
     : "- None recorded by close-loop.";
   const decision = latestJudgment?.overall_decision || "not recorded";
@@ -486,12 +500,151 @@ Latest judgment: \`${judgmentId}\`
 
 This is the user-facing report export for the proof run. If the status is rejected or incomplete, the findings below are still useful as the considered research position, but they are not publication-grade until the blockers are resolved.
 
+## Depth Decision
+
+- Classification: \`${depthDecision?.classification || "unknown"}\`
+- Meaning: ${depthDecision?.meaning || "No depth decision was recorded."}
+- Next action: ${depthDecision?.next_action || "Inspect blockers and report judgments."}
+
+${Array.isArray(depthDecision?.next_steps) && depthDecision.next_steps.length
+  ? depthDecision.next_steps.map((step) => `- ${step}`).join("\n")
+  : "- No next steps recorded."}
+
 ## Blocking Findings
 
-${blockers}
+${blockerText}
 
 ${body || "No report body was returned by the research report compiler."}
 `;
+}
+
+function latestReportJudgment(judgments) {
+  return Array.isArray(judgments) && judgments.length ? judgments[judgments.length - 1] : null;
+}
+
+function numberFrom(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function assessResearchDepthDecision({
+  closeLoop,
+  status,
+  judgments,
+  modelBackedAccepted,
+  fullSourceCards,
+  minFullSourceCards,
+  challengeSearchTasksExecuted,
+  challengeSearchTasksWithSelectedResults,
+}) {
+  const latestJudgment = latestReportJudgment(judgments);
+  const scores = latestJudgment?.scores || {};
+  const snapshot = closeLoop?.final_status?.latest_snapshot || status?.latest_snapshot || {};
+  const pendingHostSearchTasks = numberFrom(
+    scores.pending_host_search_tasks,
+    Array.isArray(closeLoop?.remaining_host_search_tasks)
+      ? closeLoop.remaining_host_search_tasks.length
+      : 0
+  );
+  const unknownHighImpact = numberFrom(
+    scores.wrong_or_unknown_high_fact_checks,
+    snapshot.unknown_high_impact_claims
+  );
+  const highOpenChallenges = numberFrom(scores.high_open_challenges, snapshot.high_open_challenges);
+  const strongRefutations = numberFrom(scores.strong_refutations, snapshot.strong_refutations);
+  const sourceNovelty = numberFrom(snapshot.source_novelty_score, 0);
+  const claimNovelty = numberFrom(snapshot.claim_novelty_score, 0);
+  const stopReason = snapshot.stop_rule?.stop_reason || closeLoop?.closure_status || "unknown";
+  const rejected = latestJudgment?.overall_decision === "reject";
+  const closed = closeLoop?.closure_status === "closed";
+  const enoughFullSourceCards = fullSourceCards.length >= minFullSourceCards;
+  const signals = {
+    pending_host_search_tasks: pendingHostSearchTasks,
+    wrong_or_unknown_high_fact_checks: unknownHighImpact,
+    high_open_challenges: highOpenChallenges,
+    strong_refutations: strongRefutations,
+    source_novelty: sourceNovelty,
+    claim_novelty: claimNovelty,
+    stop_reason: stopReason,
+  };
+
+  if (closed && !rejected && modelBackedAccepted) {
+    return {
+      classification: "ready",
+      meaning: "The close-loop closed and the model-backed editorial gate accepted the synthesis.",
+      next_action: "Deliver the report with its caveats and source coverage.",
+      next_steps: [
+        "Share the report in the message stream.",
+        "Preserve the proof packet and report judgment paths.",
+      ],
+      signals,
+    };
+  }
+
+  if (pendingHostSearchTasks > 0) {
+    return {
+      classification: "deepen_research",
+      meaning:
+        "The report is incomplete because planned citation-gap or challenge searches still need evidence.",
+      next_action:
+        "Run the pending exact host-search tasks, ingest selected sources, and rerun convergence close-loop.",
+      next_steps: [
+        "List `research_convergence_host_search_tasks` and execute each pending exact query.",
+        "Record host-search proof and link selected source cards before another convergence iteration.",
+        "Do not present the report as final while search tasks remain.",
+      ],
+      signals,
+    };
+  }
+
+  if (!enoughFullSourceCards || challengeSearchTasksExecuted === 0 || challengeSearchTasksWithSelectedResults === 0) {
+    return {
+      classification: "deepen_research",
+      meaning:
+        "The corpus/proof layer did not meet the minimum depth needed to trust the report.",
+      next_action:
+        "Promote more full-source reads and run exact challenge-search proof before judging the report.",
+      next_steps: [
+        `Promote full-source cards until at least ${minFullSourceCards} are linked.`,
+        "Run exact convergence challenge searches and select/link evidence-bearing results.",
+        "Rerun active fact-checking and convergence close-loop after the corpus improves.",
+      ],
+      signals,
+    };
+  }
+
+  if (unknownHighImpact > 0 || highOpenChallenges > 0 || strongRefutations > 0 || rejected || !modelBackedAccepted) {
+    const noveltyExhausted = sourceNovelty <= 0.01 && claimNovelty <= 0.01;
+    return {
+      classification: "deepen_research",
+      meaning: noveltyExhausted
+        ? "No exact search tasks remain and novelty is low, but unresolved high-impact claims or editorial rejection mean the next step is deeper source reading and primary-source replacement, not declaring victory."
+        : "The report still has unresolved high-impact claims, refutations, open challenges, or model-backed rejection, and the corpus is still changing.",
+      next_action: noveltyExhausted
+        ? "Target the unresolved statements with primary sources/full-text reading, remove unsupported claims, then rerun close-loop."
+        : "Continue evidence acquisition and convergence until high-impact blockers clear or a scoped best-effort limit is explicit.",
+      next_steps: [
+        "Identify the unresolved high-impact statement ids from `research_fact_checks` and the report judgment.",
+        "Replace snippet-derived or secondary-only statements with full-text primary evidence where possible.",
+        "Delete or downgrade claims that cannot be supported after targeted source reading.",
+        "Rerun `research_convergence_close_loop` and require a fresh report judgment.",
+      ],
+      signals,
+    };
+  }
+
+  return {
+    classification: "bounded_best_effort",
+    meaning:
+      "The run did not reach accepted/closed status, but no concrete evidence-acquisition or high-impact correctness blockers remain under the stated scope.",
+    next_action: "Deliver as a bounded best-effort report with explicit scope and irreducible uncertainty.",
+    next_steps: [
+      "State the exact budget/time/source limits.",
+      "Mark the remaining uncertainty as a caveat rather than a hidden failure.",
+      "Do not claim analyst-grade acceptance unless the editorial/report judgment accepts it.",
+    ],
+    signals,
+  };
 }
 
 function normalizeExportedMarkdown(markdown) {
@@ -535,6 +688,8 @@ Status:
 
 - Closure status: \`${summary.closure_status || "not reported"}\`
 - Model-backed accepted: ${summary.model_backed_accepted ? "yes" : "no"}
+- Depth decision: \`${summary.depth_decision?.classification || "unknown"}\`
+- Next action: ${summary.depth_decision?.next_action || "Inspect report judgment and blockers."}
 - Source cards: ${summary.source_cards}
 - Linked sources: see \`${summary.files.sources}\`
 
@@ -1279,20 +1434,10 @@ function main() {
     const convergenceReport = closeLoop.final_report
       || runJson(bin, env, logFile, ["research", "convergence-report", runId]);
     writeJsonFile(sourceReportJsonFile, sourceReport);
-    writeMarkdownFile(sourceReportFile, markdownFromReport(sourceReport));
+    writeMarkdownFile(sourceReportFile, normalizeExportedMarkdown(markdownFromReport(sourceReport)));
     writeJsonFile(finalReportJsonFile, convergenceReport);
-    writeMarkdownFile(convergenceReportFile, markdownFromReport(convergenceReport));
+    writeMarkdownFile(convergenceReportFile, normalizeExportedMarkdown(markdownFromReport(convergenceReport)));
     writeJsonFile(reportJudgmentsFile, judgments);
-    writeMarkdownFile(
-      finalReportFile,
-      finalReportMarkdown({
-        topic,
-        closeLoop,
-        sourceReport,
-        convergenceReport,
-        judgments,
-      })
-    );
     const modelBackedEditorial = Array.isArray(judgments)
       ? judgments.some((judgment) => judgment.scores?.model_backed_convergence_editorial)
       : false;
@@ -1332,11 +1477,55 @@ function main() {
     if (Array.isArray(claims) && claims.length < Math.floor(minSourceCards * 0.8)) {
       blockers.push(`structured claim floor not met: ${claims.length} < ${Math.floor(minSourceCards * 0.8)}`);
     }
+    let depthDecision = assessResearchDepthDecision({
+      closeLoop,
+      status,
+      judgments,
+      modelBackedAccepted,
+      fullSourceCards,
+      minFullSourceCards,
+      challengeSearchTasksExecuted,
+      challengeSearchTasksWithSelectedResults,
+    });
+    writeMarkdownFile(
+      finalReportFile,
+      finalReportMarkdown({
+        topic,
+        closeLoop,
+        sourceReport,
+        convergenceReport,
+        judgments,
+        blockers,
+        depthDecision,
+      })
+    );
     const exportedFinalReportLength = fs.existsSync(finalReportFile)
       ? fs.readFileSync(finalReportFile, "utf8").trim().length
       : 0;
     if (exportedFinalReportLength < 1000) {
       blockers.push(`user-visible final report export is missing or too short: ${exportedFinalReportLength} chars`);
+      depthDecision = assessResearchDepthDecision({
+        closeLoop,
+        status,
+        judgments,
+        modelBackedAccepted,
+        fullSourceCards,
+        minFullSourceCards,
+        challengeSearchTasksExecuted,
+        challengeSearchTasksWithSelectedResults,
+      });
+      writeMarkdownFile(
+        finalReportFile,
+        finalReportMarkdown({
+          topic,
+          closeLoop,
+          sourceReport,
+          convergenceReport,
+          judgments,
+          blockers,
+          depthDecision,
+        })
+      );
     }
     const summary = {
       generated_at: new Date().toISOString(),
@@ -1367,6 +1556,7 @@ function main() {
       model_backed_editorial: modelBackedEditorial,
       model_backed_accepted: modelBackedAccepted,
       closure_status: closeLoop.closure_status || null,
+      depth_decision: depthDecision,
       blockers,
       files: {
         searches: searchesFile,

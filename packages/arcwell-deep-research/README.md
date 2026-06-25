@@ -150,6 +150,11 @@ Target host-agent loop:
 12. Read the returned report body and share the executive judgment, key
     findings, blockers/caveats, source coverage, and direct report path or
     artifact id in the visible Codex message stream before calling the run done.
+13. If the report is rejected or incomplete, classify the stop as
+    `deepen_research`, `bounded_best_effort`, or `blocked`. Treat unresolved
+    high-impact fact checks, pending search tasks, strong refutations, missing
+    primary/full-text evidence, or verifier rejection as a signal to deepen
+    unless an explicit budget/scope/tooling limit makes further work non-useful.
 
 Future work:
 

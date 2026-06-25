@@ -1210,6 +1210,30 @@ scripts/commerce-research-production-proof \
 The proof script exits non-zero when blockers remain. A preserved proof with a
 blocking result is still valuable evidence, but it does not promote the feature.
 
+Current 2026-06-25 release-gate ledger:
+
+- Broad UK fashion/M&S loafer proof: passed with 24 exact UK 8.5/8½
+  recommendations at
+  `.arcwell-dev/proofs/commerce-uk-fashion-20-live-20260625T052635Z-94892/harness/artifacts/proof-packet.json`.
+  This proves a bounded M&S-only live-HTML flow from Chrome-discovered product
+  URLs; it does not prove autonomous cross-retailer discovery or the broad
+  denim-shirt side of the profile.
+- Marketplace coverage: passed narrowly for one Vinted-style exact-size listing
+  at
+  `.arcwell-dev/proofs/commerce-marketplace-live-20260625T053405Z-39997/harness-vinted-coverage/artifacts/proof-packet.json`.
+  The stricter eBay+Vinted gate remains blocked at
+  `.arcwell-dev/proofs/commerce-marketplace-live-20260625T053405Z-39997/harness/artifacts/proof-packet.json`
+  because the live eBay fetch returned 403 and no exact-size purchase evidence.
+- Logged-in Chrome-profile proof: blocked at
+  `.arcwell-dev/proofs/commerce-uk-fashion-20-live-20260625T052635Z-94892/harness-chrome-profile-gate/artifacts/proof-packet.json`.
+  Public browser-discovered/live-HTML captures do not satisfy the authenticated
+  profile gate.
+- Rental, travel/flight, and operational worker gates: blocked under
+  `.arcwell-dev/proofs/commerce-release-blocked-gates-20260625T053438Z-41247/`.
+  The current commerce proof harness can fail closed for these gates, but it
+  does not yet implement domain-specific rental/flight availability semantics
+  or a worker-drained autonomous commerce run.
+
 ## Report Acceptance Gate
 
 A final report is acceptable only when all of these are true:

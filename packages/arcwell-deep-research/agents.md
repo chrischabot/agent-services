@@ -86,6 +86,11 @@ Own the run.
 - Before closing the run, read the final report body yourself and present the
   executive judgment, key findings, caveats/blockers, source coverage, and a
   direct report path or artifact id in the visible Codex message stream.
+- For rejected or incomplete reports, classify the stop as `deepen_research`,
+  `bounded_best_effort`, or `blocked`. Default to `deepen_research` when there
+  are unresolved high-impact fact checks, pending search tasks, strong
+  refutations, missing primary/full-text evidence, or model-backed verifier
+  rejection.
 
 ## research-scout
 
@@ -270,6 +275,9 @@ Create the final report.
 - Make the report user-visible. The synthesizer output must include enough
   report text for the main Codex thread to share the considered findings in the
   message stream, plus a direct path or artifact id for the full report.
+- Include a `Depth Decision` section when the report is incomplete or rejected:
+  deepen the research, bounded best effort, or blocked, with the evidence
+  signal and next action.
 - Preserve links and wiki page ids so future agents can inspect the evidence chain.
 - Preserve document/span/table/cell anchors for numeric or table-backed claims;
   do not smooth away extractor warnings or low-confidence PDF table caveats.
@@ -312,6 +320,10 @@ Check the final report against the evidence base.
 - Fail the run if the report is only available as hidden storage. The user must
   receive a visible report excerpt or report body in the Codex message stream,
   with a direct path or artifact id for the full report.
+- Fail attempts to label a rejected report "as good as it gets" while high
+  impact facts remain unknown, source-search work is pending, refutations are
+  unresolved, primary evidence is missing, or the verifier/evaluator rejected
+  the synthesis.
 - Use `research_audit_run` as the authoritative run audit and supplement it
   with adversarial spot checks against source cards, claims, clusters, skeptic
   notes, and report text.

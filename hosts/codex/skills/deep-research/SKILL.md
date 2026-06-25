@@ -41,6 +41,14 @@ Rules:
   blockers/caveats, source coverage, and a direct path or artifact id. Do not
   answer only with "stored in Arcwell", a run id, a proof directory, or a
   database path.
+- If the report is rejected or incomplete, decide and say which case applies:
+  `deepen_research` when concrete evidence work remains; `bounded_best_effort`
+  when no useful next evidence path remains under the stated budget/scope; or
+  `blocked` when tooling/policy/provider access prevents progress. Rejection is
+  usually a signal to deepen, not a permission to stop. Do not call a report
+  "as good as it gets" while there are unresolved high-impact fact checks,
+  pending host-search tasks, strong refutations, missing primary-source/full
+  text evidence, or model-backed verifier rejection.
 - Use `research_brief_from_wiki` only as a legacy report-draft artifact after source cards are in place; do not present it as a shallow mode.
 - Call `research_audit_run` before using a report externally or as project evidence.
 - Treat generated `Research Brief:`, report, digest, model-answer, and
@@ -146,6 +154,10 @@ Minimum output discipline:
   the message stream. For long reports, include the executive judgment, top
   findings, blockers, methodology/source coverage, and direct report path or
   artifact id, then say the full report continues in that file/artifact.
+- If the report is incomplete/rejected, include a `Depth Decision` section with
+  one of: `deepen_research`, `bounded_best_effort`, or `blocked`; explain why,
+  and list the next research action or the explicit limit that makes further
+  work non-useful.
 - Never leave the only readable report in a deeply nested hidden folder,
   database row, JSON blob, or artifact id. Hidden storage is backup/provenance;
   the user-visible message is the delivery surface.

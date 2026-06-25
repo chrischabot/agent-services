@@ -3577,6 +3577,12 @@ fn source_card(store: Store, args: SourceCardCommand) -> Result<()> {
             listing_json,
             limit,
         } => {
+            let size = fs::metadata(&listing_json)
+                .with_context(|| format!("reading metadata for {}", listing_json.display()))?
+                .len();
+            if size > 2_000_000 {
+                bail!("Reddit browser listing JSON is too large");
+            }
             let body = fs::read_to_string(&listing_json)
                 .with_context(|| format!("reading {}", listing_json.display()))?;
             let listing: Value = serde_json::from_str(&body)

@@ -1,0 +1,415 @@
+#!/usr/bin/env node
+"use strict";
+
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { spawnSync } = require("child_process");
+
+const repoRoot = path.resolve(__dirname, "..");
+let arcwellBin = process.env.ARCWELL_BIN || path.join(repoRoot, "target", "debug", "arcwell");
+if (!fs.existsSync(arcwellBin)) {
+  const which = spawnSync("bash", ["-lc", "command -v arcwell || true"], { encoding: "utf8" });
+  arcwellBin = which.stdout.trim();
+}
+if (!arcwellBin || !fs.existsSync(arcwellBin)) {
+  console.error("BLOCKED: arcwell binary not found. Run: cargo build --bin arcwell");
+  process.exit(2);
+}
+
+const listingInput = process.argv[2] || process.env.ARCWELL_REDDIT_BROWSER_LISTING_JSON;
+if (!listingInput) {
+  console.error("BLOCKED: provide a Reddit listing JSON file as argv[2] or ARCWELL_REDDIT_BROWSER_LISTING_JSON");
+  process.exit(2);
+}
+if (!fs.existsSync(listingInput)) {
+  console.error(`BLOCKED: Reddit listing JSON file not found: ${listingInput}`);
+  process.exit(2);
+}
+
+const stamp = process.env.ARCWELL_REDDIT_BROWSER_PROOF_RUN_ID
+  || `${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}-${process.pid}`;
+const proofRoot = process.env.ARCWELL_REDDIT_BROWSER_PROOF_DIR
+  || path.join(repoRoot, ".arcwell-dev", "proofs", `reddit-browser-production-proof-${stamp}`);
+const artifactDir = path.join(proofRoot, "artifacts");
+const proofHome = path.join(proofRoot, "home");
+const locator = process.env.ARCWELL_REDDIT_BROWSER_LOCATOR || "r/rust/hot";
+const limit = Number(process.env.ARCWELL_REDDIT_BROWSER_LIMIT || "10");
+const minCards = Number(process.env.ARCWELL_REDDIT_BROWSER_MIN_CARDS || "5");
+const maxCaptureAgeHours = Number(process.env.ARCWELL_REDDIT_BROWSER_MAX_CAPTURE_AGE_HOURS || "72");
+
+fs.mkdirSync(artifactDir, { recursive: true });
+fs.mkdirSync(proofHome, { recursive: true });
+
+function log(message) {
+  console.log(`[reddit-browser-proof] ${message}`);
+}
+
+function fail(message, detail) {
+  console.error(`[reddit-browser-proof] BLOCKED: ${message}`);
+  if (detail !== undefined) {
+    console.error(typeof detail === "string" ? detail : JSON.stringify(detail, null, 2));
+  }
+  process.exit(2);
+}
+
+function run(args, options = {}) {
+  const result = spawnSync(arcwellBin, args, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    env: {
+      ...process.env,
+      ARCWELL_HOME: proofHome,
+      ...(options.env || {}),
+    },
+  });
+  if (options.allowFailure) {
+    return result;
+  }
+  if (result.status !== 0) {
+    fail(`command failed: arcwell ${args.join(" ")}`, {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  }
+  return result.stdout;
+}
+
+function jsonRun(args, options = {}) {
+  const stdout = run(args, options);
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    fail(`command did not return JSON: arcwell ${args.join(" ")}`, stdout.slice(0, 4000));
+  }
+}
+
+function writeJson(name, value) {
+  fs.writeFileSync(path.join(artifactDir, name), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function assert(condition, message, detail) {
+  if (!condition) {
+    fail(message, detail);
+  }
+}
+
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+const persistedPostKeys = [
+  "id",
+  "subreddit",
+  "title",
+  "permalink",
+  "url",
+  "selftext",
+  "selftext_html",
+  "author",
+  "score",
+  "upvote_ratio",
+  "num_comments",
+  "over_18",
+  "created_utc",
+  "removed_by_category",
+  "hidden",
+];
+
+function pickPost(data) {
+  const out = {};
+  for (const key of persistedPostKeys) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      out[key] = data[key];
+    }
+  }
+  return out;
+}
+
+function sanitizeListing(value) {
+  const children = value?.data?.children;
+  assert(Array.isArray(children), "Reddit listing must contain data.children array");
+  return {
+    kind: "Listing",
+    data: {
+      dist: children.length,
+      children: children.map((child) => ({
+        kind: child?.kind,
+        data: pickPost(child?.data || {}),
+      })),
+    },
+  };
+}
+
+function scanKeys(value, pathParts = [], findings = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => scanKeys(item, pathParts.concat(String(index)), findings));
+    return findings;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      const lowered = key.toLowerCase();
+      if (blockedKeyFragments.some((fragment) => lowered.includes(fragment))) {
+        findings.push(pathParts.concat(key).join("."));
+      }
+      scanKeys(child, pathParts.concat(key), findings);
+    }
+  }
+  return findings;
+}
+
+const blockedKeyFragments = [
+  "modhash",
+  "cookie",
+  "localstorage",
+  "sessionstorage",
+  "devtoolsactiveport",
+  "access_token",
+  "refresh_token",
+  "authorization",
+  "password",
+  "likes",
+  "saved",
+  "clicked",
+  "visited",
+  "user_reports",
+  "secure_media_embed",
+  "media_embed",
+];
+
+const blockedTextPatterns = [
+  /\bmodhash\b/i,
+  /DevToolsActivePort/i,
+  /chrome-extension:\/\//i,
+  /Authorization:\s*Bearer/i,
+  /Bearer\s+[A-Za-z0-9._~+/-]{20,}/i,
+  /(^|[^A-Za-z])sk-[A-Za-z0-9_-]{20,}/,
+  /reddit_session/i,
+  /localStorage/i,
+  /sessionStorage/i,
+];
+
+function assertRedactedJson(name, value) {
+  const keyFindings = scanKeys(value);
+  assert(keyFindings.length === 0, `${name} contains blocked browser/account keys`, keyFindings);
+  const serialized = JSON.stringify(value);
+  const patternFindings = blockedTextPatterns
+    .filter((pattern) => pattern.test(serialized))
+    .map((pattern) => pattern.toString());
+  assert(patternFindings.length === 0, `${name} contains blocked secret/browser text`, patternFindings);
+}
+
+function scanArtifactFiles() {
+  const findings = [];
+  for (const entry of fs.readdirSync(artifactDir)) {
+    const file = path.join(artifactDir, entry);
+    if (!fs.statSync(file).isFile()) {
+      continue;
+    }
+    const text = fs.readFileSync(file, "utf8");
+    for (const pattern of blockedTextPatterns) {
+      if (pattern.test(text)) {
+        findings.push({ file: entry, pattern: pattern.toString() });
+      }
+    }
+    if (entry.endsWith(".json")) {
+      try {
+        const value = JSON.parse(text);
+        for (const keyPath of scanKeys(value)) {
+          findings.push({ file: entry, key: keyPath });
+        }
+      } catch {
+        findings.push({ file: entry, error: "invalid_json" });
+      }
+    }
+  }
+  assert(findings.length === 0, "proof artifacts contain blocked browser/account material", findings);
+}
+
+log(`proof root: ${proofRoot}`);
+log(`reading browser-supplied Reddit listing: ${listingInput}`);
+const inputSize = fs.statSync(listingInput).size;
+assert(inputSize <= 2_000_000, "browser-supplied Reddit listing is too large", {
+  bytes: inputSize,
+  max_bytes: 2_000_000,
+});
+const inputStat = fs.statSync(listingInput);
+const inputAgeHours = (Date.now() - inputStat.mtimeMs) / 3_600_000;
+assert(inputAgeHours <= maxCaptureAgeHours, "browser-supplied Reddit listing is stale", {
+  age_hours: Number(inputAgeHours.toFixed(2)),
+  max_capture_age_hours: maxCaptureAgeHours,
+  mtime: inputStat.mtime.toISOString(),
+});
+const rawText = fs.readFileSync(listingInput, "utf8");
+const rawListing = JSON.parse(rawText);
+const sanitizedListing = sanitizeListing(rawListing);
+assertRedactedJson("sanitized Reddit listing", sanitizedListing);
+assert(sanitizedListing.data.children.length >= minCards, "sanitized listing has too few children for production proof", {
+  children: sanitizedListing.data.children.length,
+  minCards,
+});
+
+const sanitizedPath = path.join(artifactDir, "reddit-listing-sanitized.json");
+fs.writeFileSync(sanitizedPath, `${JSON.stringify(sanitizedListing, null, 2)}\n`);
+writeJson("browser-capture-manifest.json", {
+  captured_or_supplied_at: new Date().toISOString(),
+  capture_surface: "host_browser_supplied_file",
+  input_path_recorded_as_basename_only: path.basename(listingInput),
+  raw_input_sha256: sha256File(listingInput),
+  raw_input_mtime: inputStat.mtime.toISOString(),
+  raw_input_age_hours: Number(inputAgeHours.toFixed(2)),
+  max_capture_age_hours: maxCaptureAgeHours,
+  raw_body_bytes_not_persisted: Buffer.byteLength(rawText),
+  sanitized_listing_path: sanitizedPath,
+  sanitized_children: sanitizedListing.data.children.length,
+  persisted_post_keys: persistedPostKeys,
+  excluded_account_or_response_field_categories: [
+    "response hashes",
+    "account interaction booleans",
+    "account reports",
+    "embedded media payloads",
+    "browser storage",
+    "authorization material",
+  ],
+});
+
+log("ingesting sanitized listing into disposable Arcwell home");
+const ingest = jsonRun([
+  "source-card",
+  "ingest-reddit-browser-listing",
+  "--locator",
+  locator,
+  "--listing-json",
+  sanitizedPath,
+  "--limit",
+  String(limit),
+]);
+writeJson("ingest.json", ingest);
+assert(ingest.transport === "host_browser_json", "ingest must record browser transport", ingest);
+assert(Number(ingest.count || 0) >= minCards, "ingest wrote too few source cards", ingest);
+
+const cards = jsonRun(["source-card", "search", "reddit"]);
+writeJson("source-card-search.json", cards);
+assert(cards.length === ingest.count, "source-card search should find all ingested Reddit cards", {
+  cards: cards.length,
+  ingest: ingest.count,
+});
+assert(cards.every((card) => card.provider === "reddit" && card.source_type === "reddit_post"), "all cards must be Reddit source cards", cards);
+assert(cards.every((card) => card.wiki_page_id), "all source cards must have wiki projections", cards);
+assert(cards.every((card) => card.metadata?.transport === "host_browser_json"), "all cards must retain host_browser_json transport");
+assert(cards.every((card) => card.metadata?.comment_capture === "not_captured_browser_listing"), "browser listing proof must not claim comments");
+
+log("running radar projection over browser-captured Reddit source cards");
+const profile = jsonRun([
+  "radar",
+  "profile",
+  "create",
+  "reddit-browser-proof",
+  "--description",
+  "Browser-captured Reddit production proof",
+  "--min-score",
+  "0",
+  "--max-items",
+  String(limit),
+  "--selector-json",
+  JSON.stringify({ kind: "reddit", locator, limit }),
+  "--delivery-policy-json",
+  JSON.stringify({ delivery: "manual_only" }),
+  "--model-policy-json",
+  JSON.stringify({ model_scoring: "disabled" }),
+  "--metadata-json",
+  JSON.stringify({ proof: "reddit-browser-production-proof", capture_surface: "host_browser_supplied_file" }),
+]);
+writeJson("profile.json", profile);
+const runReport = jsonRun(["radar", "run", profile.id]);
+writeJson("radar-run.json", runReport);
+const runId = runReport.run?.id;
+assert(runId, "radar run did not return run id", runReport);
+const stage = jsonRun(["radar", "stage", runId]);
+writeJson("radar-stage.json", stage);
+const summaryWrite = jsonRun(["radar", "summarize", runId]);
+writeJson("radar-summary-write.json", summaryWrite);
+const summaryRead = jsonRun(["radar", "summary", runId]);
+writeJson("radar-summary-read.json", summaryRead);
+const audit = jsonRun(["radar", "audit", runId]);
+writeJson("radar-audit.json", audit);
+const ops = jsonRun(["ops"]);
+writeJson("ops.json", ops);
+
+assert(runReport.run.status === "scored", "radar run should score browser-captured Reddit cards", runReport.run);
+assert(runReport.run.metadata?.proof_level === "Production Data Proof", "radar run must carry production-data proof label", runReport.run.metadata);
+assert(runReport.run.metadata?.source_family === "host_browser_then_source_card_projection", "radar run must carry browser source family", runReport.run.metadata);
+assert(runReport.items_inserted === ingest.count, "radar should project every ingested source card", {
+  items_inserted: runReport.items_inserted,
+  ingest: ingest.count,
+});
+assert((stage.items || []).length === ingest.count, "radar stage should expose every item", {
+  items: (stage.items || []).length,
+  ingest: ingest.count,
+});
+assert(audit.ok === true, "radar audit should pass", audit);
+const health = (ops.source_health || []).find((row) => row.key === `reddit:${locator}`);
+assert(health?.status === "healthy", "ops should show healthy Reddit source health", health);
+const cursor = (ops.cursors || []).find((row) => row.key === `reddit:${locator}`);
+assert(cursor?.value, "ops should show Reddit cursor", cursor);
+
+scanArtifactFiles();
+
+const binaryInfo = {
+  path: arcwellBin,
+  sha256: sha256File(arcwellBin),
+  dev_checkout_binary: arcwellBin.includes(`${path.sep}target${path.sep}debug${path.sep}`),
+};
+const proofPacket = {
+  proof_name: "reddit-browser-production-proof",
+  status: "passed",
+  proof_level: "Production Data Proof",
+  proof_root: proofRoot,
+  arcwell_home: proofHome,
+  binary: binaryInfo,
+  locator,
+  limit,
+  min_cards: minCards,
+  durable_outputs: {
+    source_cards: ingest.count,
+    radar_items: (stage.items || []).length,
+    wiki_pages: cards.filter((card) => card.wiki_page_id).length,
+    cursor_key: cursor.key,
+    cursor_value: cursor.value,
+    source_health_status: health.status,
+    run_id: runId,
+    run_status: runReport.run.status,
+    run_proof_level: runReport.run.metadata.proof_level,
+    run_source_family: runReport.run.metadata.source_family,
+    summary_id: summaryRead.id || null,
+  },
+  trust_boundaries: {
+    cookies_or_browser_storage_read: false,
+    raw_reddit_response_persisted: false,
+    sanitized_capture_only: true,
+    comments_claimed: false,
+    comment_capture: "not_captured_browser_listing",
+  },
+  gates: {
+    redaction_scan_passed: true,
+    ingest_browser_listing_cli: true,
+    source_cards_indexed: true,
+    wiki_projection: true,
+    radar_projection: true,
+    production_data_proof_label: true,
+    radar_audit_ok: true,
+    ops_source_health_visible: true,
+    cursor_visible: true,
+    stale_capture_gate_passed: true,
+  },
+  remaining_boundaries: [
+    "This proves supervised host-browser listing ingestion, not unattended daemon Reddit OAuth or scheduled fetch.",
+    "This proof does not claim Reddit comment capture.",
+    "A release-ready proof should set ARCWELL_BIN to an installed candidate binary rather than target/debug.",
+  ],
+  artifacts: fs.readdirSync(artifactDir).sort(),
+};
+writeJson("proof-packet.json", proofPacket);
+console.log(JSON.stringify(proofPacket, null, 2));
+log(`proof packet: ${path.join(artifactDir, "proof-packet.json")}`);

@@ -26512,6 +26512,9 @@ impl Store {
             if digest_source_card_is_x_origin(&source_card) {
                 return Ok(("arcwell-x", "x_digest_delivery"));
             }
+            if digest_source_card_is_credential_reminder(&source_card) {
+                return Ok(("arcwell-ops", "credential_reminder_delivery"));
+            }
         }
         Ok(("arcwell-librarian", "digest_candidate_delivery"))
     }
@@ -26750,6 +26753,9 @@ impl Store {
                 .with_context(|| format!("digest source card not found: {source_card_id}"))?;
             cards.push(card);
         }
+        if cards.iter().any(digest_source_card_is_credential_reminder) {
+            return Ok(Self::credential_reminder_delivery_text(candidate, &cards));
+        }
         let topic = Self::digest_human_topic(&candidate.topic);
         let mut lines = vec![
             format!("X bookmark report: {topic}"),
@@ -26824,6 +26830,112 @@ impl Store {
             format!("- Digest candidate: {}", candidate.id),
         ]);
         Ok(lines.join("\n"))
+    }
+
+    fn credential_reminder_delivery_text(
+        candidate: &DigestCandidate,
+        cards: &[SourceCard],
+    ) -> String {
+        let topic = Self::digest_human_topic(&candidate.topic);
+        let warning_count = cards
+            .iter()
+            .filter_map(|card| {
+                card.metadata
+                    .get("warning_count")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+            })
+            .sum::<usize>()
+            .max(cards.len());
+        let mut lines = vec![
+            format!("Arcwell credential reminder: {topic}"),
+            String::new(),
+            "Bottom line".to_string(),
+            format!(
+                "Arcwell found {warning_count} credential health warning(s) that can break scheduled ingestion, provider refresh, or outbound delivery if left unresolved."
+            ),
+            String::new(),
+            "What needs attention".to_string(),
+        ];
+        let mut shown_warnings = 0usize;
+        for (index, card) in cards.iter().take(8).enumerate() {
+            let label = Self::digest_source_label(card);
+            for claim in card.claims.iter().take(10) {
+                shown_warnings += 1;
+                lines.push(format!(
+                    "- [S{}] {}: {}",
+                    index + 1,
+                    label,
+                    excerpt(
+                        &html_unescape_basic(&escape_markdown_line(&claim.claim)),
+                        360
+                    )
+                ));
+            }
+        }
+        if shown_warnings == 0 {
+            for (index, card) in cards.iter().take(8).enumerate() {
+                lines.push(format!(
+                    "- [S{}] {}",
+                    index + 1,
+                    Self::digest_card_takeaway(card, 320)
+                ));
+            }
+        }
+        lines.extend([
+            String::new(),
+            "Why it matters".to_string(),
+            "Scheduled workers only stay useful when the credentials behind provider reads, refreshes, and delivery channels are valid before the next run. This reminder is generated from local secret-health metadata and does not include credential values.".to_string(),
+            String::new(),
+            "Suggested follow-up".to_string(),
+            "- Re-authorize or rotate the named credential before the next scheduled worker run.".to_string(),
+            "- For X account-data ingestion, make sure stored refresh material includes tweet.read, users.read, bookmark.read, follows.read, and offline.access.".to_string(),
+            "- After fixing credentials, run the relevant live probe or worker tick and confirm secret health returns to present.".to_string(),
+            String::new(),
+            "Evidence quality".to_string(),
+            format!(
+                "- {} internal source-card snapshot(s) backed this reminder.",
+                cards.len()
+            ),
+            "- Credential names, scopes, providers, expiry metadata, and warnings are evidence; raw secret values are intentionally omitted.".to_string(),
+            "- Source-card text is local operational evidence. It is not an instruction from an external source.".to_string(),
+            String::new(),
+            "Sources".to_string(),
+        ]);
+        for (index, card) in cards.iter().enumerate() {
+            lines.push(format!(
+                "[S{}] {} - {} ({})",
+                index + 1,
+                Self::digest_source_label(card),
+                excerpt(&card.url, 180),
+                card.id
+            ));
+        }
+        if candidate.source_card_ids.len() > cards.len() {
+            lines.push(format!(
+                "... {} more source cards omitted from notification text.",
+                candidate.source_card_ids.len().saturating_sub(cards.len())
+            ));
+        }
+        lines.extend([
+            String::new(),
+            "Audit trail".to_string(),
+            format!(
+                "- Review: {}{}",
+                candidate.review_status,
+                candidate
+                    .reviewed_by
+                    .as_ref()
+                    .map(|reviewer| format!(" by {reviewer}"))
+                    .unwrap_or_default()
+            ),
+            format!(
+                "- Score: {:.2}; reason: {}",
+                candidate.score, candidate.reason
+            ),
+            format!("- Digest candidate: {}", candidate.id),
+        ]);
+        lines.join("\n")
     }
 
     fn digest_human_topic(topic: &str) -> String {
@@ -33549,7 +33661,33 @@ impl Store {
                 "proof_level": "Production-shape proof: quiet-hours policy deferred scheduled digest alert before provider send"
             }));
         }
-        let candidates = self.select_digest_alert_candidates(&policy)?;
+        let candidates = if digest_alert_schedule_is_credential_reminder(&schedule) {
+            match self.materialize_credential_reminder_digest_candidate(&schedule, &tick, &policy) {
+                Ok(Some(candidate)) => vec![candidate],
+                Ok(None) => Vec::new(),
+                Err(error) => {
+                    let error = sanitize_radar_delivery_error(&error.to_string())?;
+                    let updated = self.update_digest_alert_tick(
+                        &tick.id,
+                        "blocked",
+                        &tick.candidate_ids,
+                        &tick.delivery_ids,
+                        Some(&error),
+                    )?;
+                    return Ok(json!({
+                        "tick": updated,
+                        "schedule": schedule,
+                        "status": "blocked",
+                        "selected_candidates": tick.candidate_ids,
+                        "deliveries": tick.delivery_ids,
+                        "error": error,
+                        "proof_level": "Production-shape boundary: scheduled credential reminder is blocked before provider send when source/write/review policy is missing"
+                    }));
+                }
+            }
+        } else {
+            self.select_digest_alert_candidates(&policy)?
+        };
         let candidate_ids = candidates
             .iter()
             .map(|candidate| candidate.id.clone())
@@ -33702,6 +33840,150 @@ impl Store {
             "errors": errors,
             "proof_level": proof_level
         }))
+    }
+
+    fn materialize_credential_reminder_digest_candidate(
+        &self,
+        schedule: &DigestAlertSchedule,
+        tick: &DigestAlertTick,
+        policy: &DigestAlertSchedulePolicy,
+    ) -> Result<Option<DigestCandidate>> {
+        let warnings = self.credential_reminder_secret_warnings()?;
+        if warnings.is_empty() {
+            return Ok(None);
+        }
+        let warning_count = warnings
+            .iter()
+            .map(|(_, warnings)| warnings.len().max(1))
+            .sum::<usize>();
+        let names = warnings
+            .iter()
+            .map(|(health, _)| health.name.clone())
+            .collect::<Vec<_>>();
+        let summary = format!(
+            "Arcwell detected {warning_count} credential health warning(s) across {} secret(s): {}. Scheduled provider ingestion, refresh, or delivery may fail until these are corrected.",
+            names.len(),
+            names.join(", ")
+        );
+        let mut claims = Vec::new();
+        for (health, health_warnings) in &warnings {
+            for warning in health_warnings.iter().take(4) {
+                claims.push(SourceClaim {
+                    claim: format!(
+                        "{} is {} for scope {}{}: {}",
+                        health.name,
+                        health.status,
+                        health.scope,
+                        health
+                            .provider
+                            .as_ref()
+                            .map(|provider| format!(" via provider {provider}"))
+                            .unwrap_or_default(),
+                        redact_secret_like_text(warning)
+                    ),
+                    kind: "warning".to_string(),
+                    confidence: 1.0,
+                });
+                if claims.len() >= 40 {
+                    break;
+                }
+            }
+            if claims.len() >= 40 {
+                break;
+            }
+        }
+        if claims.is_empty() {
+            claims.push(SourceClaim {
+                claim: summary.clone(),
+                kind: "warning".to_string(),
+                confidence: 1.0,
+            });
+        }
+        let card = self.add_source_card(SourceCardInput {
+            title: format!("Arcwell credential health snapshot {}", tick.tick_key),
+            url: format!(
+                "https://example.com/arcwell/credential-reminders/{}",
+                tick.tick_key
+            ),
+            source_type: "credential_health".to_string(),
+            provider: "arcwell".to_string(),
+            summary: summary.clone(),
+            claims,
+            retrieved_at: Some(now()),
+            metadata: json!({
+                "source_kind": "credential_reminder",
+                "source_detail": "secret_health",
+                "schedule_id": schedule.id,
+                "tick_id": tick.id,
+                "tick_key": tick.tick_key,
+                "warning_count": warning_count,
+                "secret_names": names,
+                "trust_boundary": "local_secret_health_metadata_only",
+                "raw_secret_values_included": false,
+                "generated_by": "arcwell-secret-health"
+            }),
+        })?;
+        let candidate = self.create_digest_candidate(
+            "Arcwell credential health reminder",
+            std::slice::from_ref(&card.id),
+        )?;
+        let subject = digest_alert_delivery_subject(policy)?;
+        self.policy_guard(PolicyRequest {
+            action: "credential_reminder.auto_approve".to_string(),
+            package: Some("arcwell-ops".to_string()),
+            provider: Some("arcwell".to_string()),
+            source: Some("secret_health".to_string()),
+            channel: Some(policy.channel.clone()),
+            subject: Some(subject.clone()),
+            target: Some(subject),
+            projected_usd: None,
+            metadata: json!({
+                "candidate_id": candidate.id.clone(),
+                "source_card_id": card.id.clone(),
+                "schedule_id": schedule.id,
+                "tick_id": tick.id,
+                "warning_count": warning_count,
+            }),
+            untrusted_excerpt: Some(summary),
+        })?;
+        let candidate = self.approve_digest_candidate(
+            &candidate.id,
+            Some("arcwell-credential-reminder"),
+            Some("scheduled credential health reminder"),
+        )?;
+        Ok(Some(candidate))
+    }
+
+    fn credential_reminder_secret_warnings(&self) -> Result<Vec<(SecretHealth, Vec<String>)>> {
+        let mut warnings = Vec::new();
+        for health in self.secret_health()? {
+            let mut health_warnings = health
+                .warnings
+                .iter()
+                .map(|warning| redact_secret_like_text(warning))
+                .filter(|warning| !warning.trim().is_empty())
+                .collect::<Vec<_>>();
+            if health_warnings.is_empty()
+                && matches!(
+                    health.status.as_str(),
+                    "missing" | "expired" | "expiring_soon" | "unresolved"
+                )
+            {
+                health_warnings.push(format!(
+                    "secret {} status is {} for scope {}",
+                    health.name, health.status, health.scope
+                ));
+            }
+            if !health_warnings.is_empty() {
+                warnings.push((health, health_warnings));
+            }
+        }
+        warnings.sort_by(|(left, _), (right, _)| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.scope.cmp(&right.scope))
+        });
+        Ok(warnings)
     }
 
     fn select_digest_alert_candidates(
@@ -39683,7 +39965,17 @@ fn digest_delivery_idempotency_key(
 
 fn digest_candidate_email_subject(candidate: &DigestCandidate) -> String {
     let topic = Store::digest_human_topic(&candidate.topic);
+    if digest_topic_is_credential_reminder(&candidate.topic) {
+        return format!("Arcwell credential reminder: {}", excerpt(&topic, 120));
+    }
     format!("X bookmark report: {}", excerpt(&topic, 120))
+}
+
+fn digest_topic_is_credential_reminder(topic: &str) -> bool {
+    topic
+        .to_ascii_lowercase()
+        .contains("credential health reminder")
+        || topic.to_ascii_lowercase().contains("credential reminder")
 }
 
 fn x_knowledge_cluster_key(item: &RadarItem) -> String {
@@ -46504,6 +46796,13 @@ fn digest_alert_delivery_subject(policy: &DigestAlertSchedulePolicy) -> Result<S
     normalize_radar_delivery_recipient(&policy.channel, &policy.recipient_ref)
 }
 
+fn digest_alert_schedule_is_credential_reminder(schedule: &DigestAlertSchedule) -> bool {
+    matches!(
+        schedule.name.trim().to_ascii_lowercase().as_str(),
+        "credential reminder" | "credential reminders" | "credential health reminders"
+    )
+}
+
 fn digest_alert_telegram_chat_id(recipient_ref: &str) -> Result<&str> {
     let chat_id = recipient_ref
         .strip_prefix("telegram:chat:")
@@ -46538,6 +46837,15 @@ fn digest_source_card_is_x_origin(source_card: &SourceCard) -> bool {
             .get("x_author_id")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn digest_source_card_is_credential_reminder(source_card: &SourceCard) -> bool {
+    source_card.provider.eq_ignore_ascii_case("arcwell")
+        && source_card
+            .source_type
+            .eq_ignore_ascii_case("credential_health")
+        && source_card_metadata_string(&source_card.metadata, "source_kind").as_deref()
+            == Some("credential_reminder")
 }
 
 fn scheduled_radar_delivery_policy(
@@ -80699,6 +81007,492 @@ priority = 10
                 .len(),
             1,
             "immediate duplicate worker pass must not create a second alert tick"
+        );
+    }
+
+    #[test]
+    fn severe_credential_reminder_schedule_delivers_human_report_once_and_redacts_values() {
+        // CLAIM: a `credential reminders` digest schedule materializes current
+        // secret-health warnings into a reviewed, human-readable reminder and
+        // delivers it through the existing digest delivery ledger.
+        // PRECONDITIONS: scheduled X bookmark ingestion is active, the bearer
+        // expires soon, refresh/client material is missing, and explicit
+        // policy allows source-card creation, credential auto-approval, digest
+        // delivery, and channel send.
+        // POSTCONDITIONS: one worker tick sends one Telegram message, records
+        // candidate/source/delivery lineage, suppresses immediate duplicates,
+        // and never serializes raw credential values.
+        // ORACLE: tick/delivery rows, Telegram mock attempt count, rendered
+        // message sections, source-card metadata, and secret sentinel absence.
+        // SEVERITY: Severe because a scheduled reminder that sends metadata,
+        // leaks tokens, or bypasses policy would be worse than no reminder.
+        let store = test_store("credential-reminder-schedule-send");
+        let token = format!("x-access-{}", "s".repeat(48));
+        let expires_soon = (Utc::now() + ChronoDuration::hours(8)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                &token,
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .schedule_x_bookmark_import(92, 100, "warm", "active")
+            .unwrap();
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-credential-reminder-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow scheduled credential reminder worker job enqueue"
+priority = 30
+
+[[rules]]
+id = "allow-credential-reminder-source-card"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "arcwell"
+source = "source_card_add"
+reason = "allow internal credential health source-card snapshot"
+priority = 20
+
+[[rules]]
+id = "allow-credential-reminder-auto-approve"
+effect = "allow"
+action = "credential_reminder.auto_approve"
+package = "arcwell-ops"
+provider = "arcwell"
+source = "secret_health"
+channel = "telegram"
+subject = "telegram:chat:789"
+target = "telegram:chat:789"
+reason = "allow scheduled credential health reminders"
+priority = 20
+
+[[rules]]
+id = "allow-credential-reminder-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-ops"
+source = "credential_reminder_delivery"
+channel = "telegram"
+subject = "telegram:chat:789"
+target = "telegram:chat:789"
+reason = "allow reviewed credential reminder delivery"
+priority = 10
+
+[[rules]]
+id = "allow-credential-reminder-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:789"
+target = "789"
+reason = "allow credential reminder Telegram send"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:789", false, false, true)
+            .unwrap();
+        let api = mock_status_server(
+            "200 OK",
+            "",
+            r#"{"ok":true,"result":{"message_id":789}}"#,
+            "application/json",
+        );
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &api, "telegram")
+            .unwrap();
+        let schedule = store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "credential reminders".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:789".to_string(),
+                min_score: 0.95,
+                max_candidates: 1,
+                interval_hours: 1,
+                quiet_hours: None,
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert!(worker.processed >= 1, "{worker:#?}");
+        assert_eq!(worker.digest_alert_schedule.as_ref().unwrap().enqueued, 1);
+        let digest_job = worker
+            .jobs
+            .iter()
+            .find(|job| job.kind == "digest_scheduled_alert")
+            .expect("digest scheduled alert job");
+        assert_eq!(
+            digest_job
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("sent")
+        );
+        let ticks = store.list_digest_alert_ticks(Some(&schedule.id)).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].status, "sent");
+        assert_eq!(ticks[0].candidate_ids.len(), 1);
+        assert_eq!(ticks[0].delivery_ids.len(), 1);
+        let candidate = store
+            .get_digest_candidate(&ticks[0].candidate_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.review_status, "approved");
+        assert_eq!(
+            candidate.reviewed_by.as_deref(),
+            Some("arcwell-credential-reminder")
+        );
+        let body = store.digest_candidate_delivery_text(&candidate).unwrap();
+        assert!(
+            body.starts_with("Arcwell credential reminder: Arcwell credential health reminder"),
+            "{body}"
+        );
+        for required in [
+            "Bottom line",
+            "What needs attention",
+            "Why it matters",
+            "Suggested follow-up",
+            "Evidence quality",
+            "X_BEARER_TOKEN",
+            "X_REFRESH_TOKEN",
+            "X_CLIENT_ID",
+            "offline.access",
+            "raw secret values are intentionally omitted",
+        ] {
+            assert!(body.contains(required), "missing {required:?} in:\n{body}");
+        }
+        assert!(
+            !body.contains(&token),
+            "credential reminder leaked bearer token:\n{body}"
+        );
+        assert!(
+            !body.starts_with("X bookmark report:"),
+            "credential reminders must not reuse the X bookmark digest body:\n{body}"
+        );
+        assert_eq!(
+            digest_candidate_email_subject(&candidate),
+            "Arcwell credential reminder: Arcwell credential health reminder"
+        );
+        let card = store
+            .read_source_card(&candidate.source_card_ids[0])
+            .unwrap()
+            .unwrap();
+        assert!(digest_source_card_is_credential_reminder(&card));
+        assert_eq!(card.provider, "arcwell");
+        assert_eq!(card.source_type, "credential_health");
+        assert!(
+            card.metadata
+                .get("warning_count")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                >= 3
+        );
+        let attempts = store.list_channel_delivery_attempts(None).unwrap();
+        assert_eq!(attempts.len(), 1);
+        let message = store
+            .get_channel_message(&attempts[0].message_id)
+            .unwrap()
+            .unwrap();
+        assert!(message.body.contains("Arcwell credential reminder"));
+        assert!(!message.body.contains(&token));
+
+        let _duplicate = store.run_worker_once(3).unwrap();
+        assert_eq!(
+            store
+                .list_digest_alert_ticks(Some(&schedule.id))
+                .unwrap()
+                .len(),
+            1,
+            "immediate duplicate worker pass must not create a second credential reminder tick"
+        );
+        let serialized = serde_json::to_string(&json!({
+            "candidate": candidate,
+            "card": card,
+            "messages": store.list_channel_messages().unwrap(),
+            "attempts": store.list_channel_delivery_attempts(None).unwrap(),
+            "deliveries": store.list_digest_deliveries(None).unwrap(),
+        }))
+        .unwrap();
+        assert!(!serialized.contains(&token), "{serialized}");
+    }
+
+    #[test]
+    fn severe_credential_reminder_schedule_blocks_without_auto_approval_policy() {
+        // CLAIM: credential reminders are not automatically promoted to
+        // outbound delivery unless an explicit credential_reminder.auto_approve
+        // policy allows the schedule/recipient.
+        // ORACLE: the worker tick becomes blocked after creating durable
+        // source/candidate evidence, no delivery attempt is created, and the
+        // error names the missing policy action.
+        // SEVERITY: Severe because credential health is operationally useful
+        // but must not become an unreviewed notification bypass.
+        let store = test_store("credential-reminder-policy-block");
+        let token = format!("x-access-{}", "t".repeat(48));
+        let expires_soon = (Utc::now() + ChronoDuration::hours(8)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                &token,
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .schedule_x_bookmark_import(92, 100, "warm", "active")
+            .unwrap();
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-credential-reminder-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow scheduled credential reminder worker job enqueue"
+priority = 30
+
+[[rules]]
+id = "allow-credential-reminder-source-card"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "arcwell"
+source = "source_card_add"
+reason = "allow internal credential health source-card snapshot"
+priority = 20
+
+[[rules]]
+id = "allow-credential-reminder-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:789"
+target = "789"
+reason = "channel send alone is not enough"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:789", false, false, true)
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", "http://127.0.0.1:9", "telegram")
+            .unwrap();
+        let schedule = store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "credential reminders".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:789".to_string(),
+                min_score: 0.0,
+                max_candidates: 1,
+                interval_hours: 1,
+                quiet_hours: None,
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert!(worker.processed >= 1, "{worker:#?}");
+        let digest_job = worker
+            .jobs
+            .iter()
+            .find(|job| job.kind == "digest_scheduled_alert")
+            .expect("digest scheduled alert job");
+        assert_eq!(digest_job.status, "completed");
+        let result = digest_job.result_json.as_ref().unwrap();
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("blocked")
+        );
+        assert!(
+            result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("credential_reminder.auto_approve"),
+            "{result:#?}"
+        );
+        let ticks = store.list_digest_alert_ticks(Some(&schedule.id)).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].status, "blocked");
+        assert!(
+            ticks[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("credential_reminder.auto_approve"),
+            "{ticks:#?}"
+        );
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty(),
+            "auto-approval denial must block before outbound provider attempts"
+        );
+        assert!(store.list_digest_deliveries(None).unwrap().is_empty());
+        assert_eq!(
+            store
+                .search_source_cards("credential health snapshot")
+                .unwrap()
+                .len(),
+            1,
+            "blocked reminder still leaves durable evidence for review"
+        );
+        let serialized = serde_json::to_string(&json!({
+            "ticks": ticks,
+            "cards": store.search_source_cards("credential health snapshot").unwrap(),
+            "messages": store.list_channel_messages().unwrap(),
+        }))
+        .unwrap();
+        assert!(!serialized.contains(&token), "{serialized}");
+    }
+
+    #[test]
+    fn severe_credential_reminder_schedule_defers_quiet_hours_before_materializing() {
+        // CLAIM: quiet hours are evaluated before a credential reminder creates
+        // source cards, candidates, or outbound attempts.
+        // ORACLE: active quiet hours produce a deferred tick with no source
+        // cards, digest candidates, deliveries, or provider attempts.
+        // SEVERITY: Severe because quiet-hours policy is the user-visible
+        // contract that prevents operational reminders from firing at bad times.
+        let store = test_store("credential-reminder-quiet-hours");
+        let quiet_time = |minutes: u32| format!("{:02}:{:02}", minutes / 60, minutes % 60);
+        let now_minutes = Utc::now().hour() * 60 + Utc::now().minute();
+        let start_minutes = (now_minutes + 24 * 60 - 5) % (24 * 60);
+        let end_minutes = (now_minutes + 5) % (24 * 60);
+        let token = format!("x-access-{}", "u".repeat(48));
+        let expires_soon = (Utc::now() + ChronoDuration::hours(8)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                &token,
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .schedule_x_bookmark_import(92, 100, "warm", "active")
+            .unwrap();
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-credential-reminder-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow scheduled credential reminder worker job enqueue"
+priority = 30
+"#,
+        )
+        .unwrap();
+        store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "credential reminders".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:789".to_string(),
+                min_score: 0.0,
+                max_candidates: 1,
+                interval_hours: 1,
+                quiet_hours: Some(json!({
+                    "timezone": "UTC",
+                    "start": quiet_time(start_minutes),
+                    "end": quiet_time(end_minutes)
+                })),
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert!(worker.processed >= 1, "{worker:#?}");
+        let digest_job = worker
+            .jobs
+            .iter()
+            .find(|job| job.kind == "digest_scheduled_alert")
+            .expect("digest scheduled alert job");
+        let result = digest_job.result_json.as_ref().unwrap();
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("deferred")
+        );
+        assert_eq!(
+            store
+                .search_source_cards("credential health snapshot")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(store.list_digest_candidates().unwrap().is_empty());
+        assert!(store.list_digest_deliveries(None).unwrap().is_empty());
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn severe_credential_reminder_schedule_is_empty_when_secrets_are_healthy() {
+        // CLAIM: the scheduled credential-reminder mode is quiet when
+        // credential health has no warnings.
+        // ORACLE: a due worker tick records `empty` and creates no source-card,
+        // digest candidate, delivery, or provider attempt.
+        // SEVERITY: Strong because reminder noise would train users to ignore
+        // the real credential alerts.
+        let store = test_store("credential-reminder-healthy-empty");
+        store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "credential reminders".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:789".to_string(),
+                min_score: 0.0,
+                max_candidates: 1,
+                interval_hours: 1,
+                quiet_hours: None,
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert_eq!(worker.processed, 1, "{worker:#?}");
+        let result = worker.jobs[0].result_json.as_ref().unwrap();
+        assert_eq!(result.get("status").and_then(Value::as_str), Some("empty"));
+        assert_eq!(
+            store
+                .search_source_cards("credential health snapshot")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(store.list_digest_candidates().unwrap().is_empty());
+        assert!(store.list_digest_deliveries(None).unwrap().is_empty());
+        assert!(
+            store
+                .list_channel_delivery_attempts(None)
+                .unwrap()
+                .is_empty()
         );
     }
 

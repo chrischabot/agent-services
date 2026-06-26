@@ -1136,14 +1136,21 @@ PR, implementation note, or final report:
       `.arcwell-dev/proofs/x-credential-probe-20260626T124924Z-78664/artifacts/proof-packet.json`
       reused the refreshed stored credential without forcing refresh and passed
       both recent search and a tiny bookmark/follow watch-source rebuild.
-- [ ] Add scheduled credential rotation reminders and stale-scope warnings.
-      Partial: `secret_health`, `health`, `doctor`, and `ops_snapshot` now warn
-      when local/ref credentials expire within 72 hours, and active scheduled
-      X bookmark ingestion surfaces missing/expired `X_REFRESH_TOKEN` or
-      `X_CLIENT_ID` with the required user-context scope names
-      (`tweet.read`, `users.read`, `bookmark.read`, `follows.read`,
-      `offline.access`). Still missing: scheduled outbound reminder jobs and
-      recipient routing for credential rotation warnings.
+- [x] Add scheduled credential rotation reminders and stale-scope warnings.
+      `secret_health`, `health`, `doctor`, and `ops_snapshot` warn when
+      local/ref credentials expire within 72 hours, and active scheduled X
+      bookmark ingestion surfaces missing/expired `X_REFRESH_TOKEN` or
+      `X_CLIENT_ID` with the required user-context scope names (`tweet.read`,
+      `users.read`, `bookmark.read`, `follows.read`, `offline.access`).
+      A `credential reminders` digest-alert schedule now materializes current
+      secret-health warnings into an internal source card and human-readable
+      digest candidate, then delivers through the existing digest ledger only
+      after `source.write`, `credential_reminder.auto_approve`,
+      `digest_candidate.deliver`, recipient authorization, quiet-hours, and
+      `channel.send` pass. Severe tests cover send/dedupe/redaction,
+      auto-approval denial, quiet-hours deferral before materialization, and
+      healthy no-op ticks. Still not claimed: provider-side scope introspection,
+      revocation APIs, or multi-day external recurrence proof.
 - [ ] Add ops UI burn-down and override controls for budgets only after
       idempotency, policy, and audit behavior are tested.
 

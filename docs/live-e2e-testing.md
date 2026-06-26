@@ -77,6 +77,45 @@ scripts/x-credential-probe
 scripts/x-live-smoke
 ```
 
+Scheduled credential reminders are locally proven through the existing digest
+alert worker path, not through the live X probe. To enable them, create a digest
+alert schedule named `credential reminders` and allow the normal source/write,
+auto-approval, digest-delivery, recipient, quiet-hours, and channel-send gates:
+
+```toml
+[[rules]]
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "arcwell"
+source = "source_card_add"
+effect = "allow"
+
+[[rules]]
+action = "credential_reminder.auto_approve"
+package = "arcwell-ops"
+provider = "arcwell"
+source = "secret_health"
+channel = "telegram"
+subject = "telegram:chat:<id>"
+target = "telegram:chat:<id>"
+effect = "allow"
+
+[[rules]]
+action = "digest_candidate.deliver"
+package = "arcwell-ops"
+source = "credential_reminder_delivery"
+channel = "telegram"
+subject = "telegram:chat:<id>"
+target = "telegram:chat:<id>"
+effect = "allow"
+```
+
+Local severe coverage is `cargo test -p arcwell-core credential_reminder -- --nocapture`.
+It proves human-readable reminder rendering, redaction, idempotent duplicate
+suppression, quiet-hours deferral before source-card creation, policy denial
+before provider attempts, and healthy no-op ticks. It does not prove provider
+scope introspection, revoked-token APIs, or multi-day live external recurrence.
+
 `scripts/x-credential-probe` copies the configured source home into a proof home
 and writes a redacted proof packet. Forced refresh is guarded because refreshing
 from a copied home can rotate the provider-side refresh token and strand the

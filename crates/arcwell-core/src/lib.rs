@@ -59302,6 +59302,7 @@ mod tests {
 
     static LOOPBACK_URL_INGEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static REDDIT_BEARER_TOKEN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static X_API_BASE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn with_loopback_url_ingest_allowed<T>(f: impl FnOnce() -> T) -> T {
         let _guard = LOOPBACK_URL_INGEST_ENV_LOCK
@@ -59348,6 +59349,29 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(f));
         unsafe {
             std::env::remove_var("REDDIT_BEARER_TOKEN");
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+
+    fn with_x_api_base<T>(base: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = X_API_BASE_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("X API base env lock poisoned");
+        let previous = std::env::var_os("ARCWELL_X_API_BASE");
+        unsafe {
+            std::env::set_var("ARCWELL_X_API_BASE", base);
+        }
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("ARCWELL_X_API_BASE", previous);
+            } else {
+                std::env::remove_var("ARCWELL_X_API_BASE");
+            }
         }
         match result {
             Ok(value) => value,
@@ -80151,13 +80175,7 @@ reason = "network blocked for resident poll test"
             ),
             ("200 OK", "", bookmarks_body, "application/json"),
         ]);
-        unsafe {
-            std::env::set_var("ARCWELL_X_API_BASE", &base);
-        }
-        let report = store.run_worker_once(1).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_X_API_BASE");
-        }
+        let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
 
         let watch_poll = report.watch_poll.expect("worker should poll watch sources");
         assert_eq!(watch_poll.inspected, 1);
@@ -80272,13 +80290,7 @@ reason = "network blocked for resident poll test"
             ),
             ("200 OK", "", next_bookmarks_body, "application/json"),
         ]);
-        unsafe {
-            std::env::set_var("ARCWELL_X_API_BASE", &second_base);
-        }
-        let second = store.run_worker_once(1).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_X_API_BASE");
-        }
+        let second = with_x_api_base(&second_base, || store.run_worker_once(1)).unwrap();
         let second_poll = second
             .watch_poll
             .expect("due bookmark source should be inspected again");
@@ -80347,13 +80359,7 @@ reason = "network blocked for resident poll test"
             }"#,
             "application/json",
         );
-        unsafe {
-            std::env::set_var("ARCWELL_X_API_BASE", &base);
-        }
-        let report = store.run_worker_once(1).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_X_API_BASE");
-        }
+        let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
 
         let watch_poll = report.watch_poll.expect("worker should poll watch sources");
         assert_eq!(watch_poll.inspected, 1);
@@ -83790,14 +83796,8 @@ reason = "test denies X link expansion"
             ),
             ("200 OK", "", bookmarks_body, "application/json"),
         ]);
-        unsafe {
-            std::env::set_var("ARCWELL_X_API_BASE", &base);
-        }
         let job = store.enqueue_x_import_bookmarks_job(92, 1).unwrap();
-        let report = store.run_worker_once(1).unwrap();
-        unsafe {
-            std::env::remove_var("ARCWELL_X_API_BASE");
-        }
+        let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
         assert_eq!(report.processed, 1);
         assert_eq!(report.completed, 1);
         assert_eq!(report.jobs[0].id, job.id);

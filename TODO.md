@@ -255,8 +255,8 @@ PR, implementation note, or final report:
       The current ops-control slice adds authenticated `/ops/ui` Knowledge
       Controls for scheduling the backlog watch source and enqueueing a
       one-shot backlog clustering job, plus queueing due shared cluster
-      expansion jobs and due source-linked investigation execution jobs, with
-      CSRF, idempotency, policy gates, and severe HTTP tests.
+      editorial-decision jobs and due source-linked investigation execution
+      jobs, with CSRF, idempotency, policy gates, and severe HTTP tests.
       Completed source-adapter jobs now also record a visible
       `auto_knowledge_backlog` result when fresh source-card output is chained
       into backlog clustering, blocked by policy, or skipped because another

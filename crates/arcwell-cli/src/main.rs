@@ -6184,6 +6184,10 @@ async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
             post(http_ops_knowledge_cluster_expansions_enqueue),
         )
         .route(
+            "/ops/actions/knowledge/clusters/enqueue-editorial-decisions",
+            post(http_ops_knowledge_cluster_editorial_decisions_enqueue),
+        )
+        .route(
             "/ops/actions/knowledge/clusters/promote",
             post(http_ops_knowledge_cluster_promote),
         )
@@ -6902,6 +6906,83 @@ async fn http_ops_knowledge_cluster_expansions_enqueue(
     match result {
         Ok(enqueued) => redirect_to_ops_ui(&format!(
             "/ops/ui?q=knowledge_cluster&notice=knowledge_cluster_expansions_enqueued&count={}",
+            enqueued
+        )),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
+async fn http_ops_knowledge_cluster_editorial_decisions_enqueue(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_knowledge_due_clusters_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "knowledge-cluster-editorial-decisions:{}",
+        form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=knowledge_cluster&notice=duplicate");
+    }
+
+    let result = (|| -> Result<usize> {
+        let store = Store::open(state.paths.clone())?;
+        let max_clusters = form.max_clusters.clamp(1, 100);
+        let decision = store.policy_check(PolicyRequest {
+            action: "ops.knowledge_clusters.enqueue_editorial_decisions".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: None,
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some("knowledge_cluster_editorial_decide".to_string()),
+            projected_usd: None,
+            metadata: json!({
+                "max_clusters": max_clusters,
+                "idempotency_key": form.idempotency_key,
+            }),
+            untrusted_excerpt: None,
+        })?;
+        if !decision.allowed {
+            bail!(
+                "policy denied ops.knowledge_clusters.enqueue_editorial_decisions: {}",
+                decision.reason
+            );
+        }
+        let report = store.enqueue_due_knowledge_cluster_editorial_decision_jobs(max_clusters)?;
+        Ok(report.enqueued)
+    })();
+
+    match result {
+        Ok(enqueued) => redirect_to_ops_ui(&format!(
+            "/ops/ui?q=knowledge_cluster&notice=knowledge_cluster_editorial_decisions_enqueued&count={}",
             enqueued
         )),
         Err(error) => http_error_response(HttpError::bad_request(
@@ -9187,17 +9268,19 @@ fn render_knowledge_ops_control_panel(csrf_token: Option<&str>, controls_enabled
         html_escape(&ops_control_idempotency_key("knowledge-backlog-enqueue")),
     ));
     html.push_str(&format!(
-        r#"<form method="post" action="/ops/actions/knowledge/clusters/enqueue-expansions">
+        r#"<form method="post" action="/ops/actions/knowledge/clusters/enqueue-editorial-decisions">
 <input type="hidden" name="csrf_token" value="{}">
 <input type="hidden" name="idempotency_key" value="{}">
-<div><b>Queue due cluster expansions</b><p class="muted">Find eligible shared clusters and enqueue wiki/report/digest expansion jobs.</p></div>
+<div><b>Queue cluster editorial review</b><p class="muted">Find eligible shared clusters and enqueue editorial decisions before wiki/report/digest expansion.</p></div>
 <div class="fields">
 <label>Max clusters<input name="max_clusters" type="number" min="1" max="100" value="25"></label>
 </div>
-<button type="submit">Queue expansions</button>
+<button type="submit">Queue review</button>
 </form>"#,
         html_escape(csrf_token),
-        html_escape(&ops_control_idempotency_key("knowledge-cluster-expansions")),
+        html_escape(&ops_control_idempotency_key(
+            "knowledge-cluster-editorial-decisions"
+        )),
     ));
     html.push_str(&format!(
         r#"<form method="post" action="/ops/actions/knowledge/clusters/promote">
@@ -10043,6 +10126,9 @@ fn ops_notice_text(notice: &str) -> String {
         "knowledge_backlog_enqueued" => "Knowledge backlog clustering job queued.".to_string(),
         "knowledge_cluster_expansions_enqueued" => {
             "Due knowledge cluster expansion jobs queued.".to_string()
+        }
+        "knowledge_cluster_editorial_decisions_enqueued" => {
+            "Due knowledge cluster editorial decision jobs queued.".to_string()
         }
         "knowledge_investigations_enqueued" => {
             "Due knowledge investigation execution jobs queued.".to_string()
@@ -21210,23 +21296,23 @@ reason = "ops controls may enqueue local worker jobs"
         assert!(store.list_watch_sources().unwrap().is_empty());
         assert_eq!(store.list_policy_decisions(10).unwrap().len(), 1);
 
-        let (denied_expansion_status, denied_expansion_json) = response_json(
-            http_ops_knowledge_cluster_expansions_enqueue(
+        let (denied_editorial_status, denied_editorial_json) = response_json(
+            http_ops_knowledge_cluster_editorial_decisions_enqueue(
                 State(state.clone()),
                 authed_local_headers(),
-                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-expansions"),
+                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-editorial-decisions"),
                 Bytes::from(knowledge_due_clusters_body(
                     &state.csrf_token,
-                    "ops-ui-knowledge-cluster-expansion-denied",
+                    "ops-ui-knowledge-cluster-editorial-denied",
                     5,
                 )),
             )
             .await,
         )
         .await;
-        assert_eq!(denied_expansion_status, StatusCode::BAD_REQUEST);
+        assert_eq!(denied_editorial_status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            denied_expansion_json
+            denied_editorial_json
                 .pointer("/error/type")
                 .and_then(Value::as_str),
             Some("ops_action_failed")
@@ -21356,10 +21442,10 @@ action = "ops.knowledge_backlog.enqueue"
 reason = "local operator may enqueue knowledge backlog clustering"
 
 [[rules]]
-id = "allow-ops-knowledge-cluster-expansions"
+id = "allow-ops-knowledge-cluster-editorial"
 effect = "allow"
-action = "ops.knowledge_clusters.enqueue_expansions"
-reason = "local operator may enqueue due shared knowledge cluster expansions"
+action = "ops.knowledge_clusters.enqueue_editorial_decisions"
+reason = "local operator may enqueue due shared knowledge cluster editorial decisions"
 
 [[rules]]
 id = "allow-ops-knowledge-cluster-promote"
@@ -21459,13 +21545,13 @@ reason = "ops controls may enqueue local worker jobs"
             && job.input_json["max_clusters"] == 10));
 
         let (cluster_enqueue_status, _) = response_text(
-            http_ops_knowledge_cluster_expansions_enqueue(
+            http_ops_knowledge_cluster_editorial_decisions_enqueue(
                 State(state.clone()),
                 authed_local_headers(),
-                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-expansions"),
+                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-editorial-decisions"),
                 Bytes::from(knowledge_due_clusters_body(
                     &state.csrf_token,
-                    "ops-ui-knowledge-cluster-expansion-allowed",
+                    "ops-ui-knowledge-cluster-editorial-allowed",
                     7,
                 )),
             )
@@ -21478,24 +21564,24 @@ reason = "ops controls may enqueue local worker jobs"
                 .list_wiki_jobs()
                 .unwrap()
                 .iter()
-                .any(|job| job.kind == "knowledge_cluster_expand"
+                .any(|job| job.kind == "knowledge_cluster_editorial_decide"
                     && job.input_json.get("cluster_id").and_then(Value::as_str)
                         == Some(projected.cluster.id.as_str()))
         );
-        let expansion_job_count = store
+        let editorial_job_count = store
             .list_wiki_jobs()
             .unwrap()
             .iter()
-            .filter(|job| job.kind == "knowledge_cluster_expand")
+            .filter(|job| job.kind == "knowledge_cluster_editorial_decide")
             .count();
         let (cluster_duplicate_status, _) = response_text(
-            http_ops_knowledge_cluster_expansions_enqueue(
+            http_ops_knowledge_cluster_editorial_decisions_enqueue(
                 State(state.clone()),
                 authed_local_headers(),
-                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-expansions"),
+                Uri::from_static("/ops/actions/knowledge/clusters/enqueue-editorial-decisions"),
                 Bytes::from(knowledge_due_clusters_body(
                     &state.csrf_token,
-                    "ops-ui-knowledge-cluster-expansion-allowed",
+                    "ops-ui-knowledge-cluster-editorial-allowed",
                     7,
                 )),
             )
@@ -21508,9 +21594,9 @@ reason = "ops controls may enqueue local worker jobs"
                 .list_wiki_jobs()
                 .unwrap()
                 .iter()
-                .filter(|job| job.kind == "knowledge_cluster_expand")
+                .filter(|job| job.kind == "knowledge_cluster_editorial_decide")
                 .count(),
-            expansion_job_count
+            editorial_job_count
         );
 
         let (promote_status, _) = response_text(
@@ -21672,9 +21758,11 @@ reason = "ops controls may enqueue local worker jobs"
         assert!(html.contains("Knowledge Controls"));
         assert!(html.contains("/ops/actions/knowledge/backlog/schedule"));
         assert!(html.contains("/ops/actions/knowledge/backlog/enqueue"));
-        assert!(html.contains("/ops/actions/knowledge/clusters/enqueue-expansions"));
+        assert!(html.contains("/ops/actions/knowledge/clusters/enqueue-editorial-decisions"));
+        assert!(!html.contains("/ops/actions/knowledge/clusters/enqueue-expansions"));
         assert!(html.contains("/ops/actions/knowledge/clusters/promote"));
         assert!(html.contains("/ops/actions/knowledge/investigations/enqueue-execution"));
+        assert!(html.contains("Queue cluster editorial review"));
         assert!(html.contains("Promote model cluster"));
         assert!(html.contains("knowledge_backlog"));
     }

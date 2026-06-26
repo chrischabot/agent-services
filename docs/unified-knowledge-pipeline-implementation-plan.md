@@ -168,6 +168,12 @@ Current implemented bridge slice:
   double-gated: `ops.knowledge_clusters.promote` authorizes the operator
   action, while core `knowledge_cluster.promote` still authorizes activating the
   cluster.
+- Authenticated `/ops/ui` Knowledge Controls can queue due shared cluster
+  editorial-decision jobs through
+  `ops.knowledge_clusters.enqueue_editorial_decisions`. The visible operator
+  path runs the writer/editor decision loop before any wiki/report/digest
+  expansion; direct expansion enqueue remains a lower-level repair path, not
+  the primary UI control.
 - Source-card-gated model cluster writing through
   `arcwell knowledge write-cluster-model`,
   `arcwell knowledge enqueue-cluster-model-write`, and the resident

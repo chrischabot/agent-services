@@ -6323,6 +6323,14 @@ async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
             post(http_ops_knowledge_model_writes_enqueue_due),
         )
         .route(
+            "/ops/actions/knowledge/entity-resolution/schedule",
+            post(http_ops_knowledge_entity_resolution_schedule),
+        )
+        .route(
+            "/ops/actions/knowledge/entity-resolution/enqueue-due",
+            post(http_ops_knowledge_entity_resolution_enqueue_due),
+        )
+        .route(
             "/ops/actions/knowledge/clusters/promote",
             post(http_ops_knowledge_cluster_promote),
         )
@@ -6567,6 +6575,30 @@ struct OpsKnowledgeDueModelWritesForm {
     endpoint: Option<String>,
     timeout_seconds: Option<u64>,
     create_digest: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpsKnowledgeEntityResolutionScheduleForm {
+    csrf_token: String,
+    idempotency_key: String,
+    model_provider: String,
+    model_name: Option<String>,
+    endpoint: Option<String>,
+    timeout_seconds: Option<u64>,
+    max_pairs: usize,
+    cadence: String,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpsKnowledgeEntityResolutionEnqueueForm {
+    csrf_token: String,
+    idempotency_key: String,
+    model_provider: String,
+    model_name: Option<String>,
+    endpoint: Option<String>,
+    timeout_seconds: Option<u64>,
+    max_pairs: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7642,6 +7674,194 @@ async fn http_ops_knowledge_model_writes_enqueue_due(
     }
 }
 
+async fn http_ops_knowledge_entity_resolution_schedule(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_knowledge_entity_resolution_schedule_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "knowledge-entity-resolution-schedule:{}",
+        form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=knowledge_entity_resolution&notice=duplicate");
+    }
+
+    let result = (|| -> Result<String> {
+        let store = Store::open(state.paths.clone())?;
+        let cadence = validate_ops_x_schedule_word(&form.cadence, "cadence")?;
+        let status = validate_ops_x_schedule_word(&form.status, "status")?;
+        let max_pairs = form.max_pairs.clamp(1, 100);
+        let provider = form.model_provider.trim().to_ascii_lowercase();
+        let decision = store.policy_check(PolicyRequest {
+            action: "ops.knowledge_entity_resolution.schedule".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: Some(provider.clone()),
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some("knowledge_entity_resolution".to_string()),
+            projected_usd: None,
+            metadata: json!({
+                "model_provider": provider.clone(),
+                "model_name": form.model_name.clone(),
+                "endpoint_configured": form.endpoint.is_some(),
+                "timeout_seconds": form.timeout_seconds,
+                "max_pairs": max_pairs,
+                "cadence": cadence,
+                "status": status,
+                "idempotency_key": form.idempotency_key.clone(),
+                "boundary": "Ops control schedules review-only entity-resolution proposals; it cannot merge entities or create relations.",
+            }),
+            untrusted_excerpt: None,
+        })?;
+        if !decision.allowed {
+            bail!(
+                "policy denied ops.knowledge_entity_resolution.schedule: {}",
+                decision.reason
+            );
+        }
+        let source = store.schedule_knowledge_entity_resolution(
+            &provider,
+            form.model_name.as_deref(),
+            form.endpoint.as_deref(),
+            form.timeout_seconds,
+            max_pairs,
+            &cadence,
+            &status,
+        )?;
+        Ok(source.id)
+    })();
+
+    match result {
+        Ok(_) => redirect_to_ops_ui(
+            "/ops/ui?q=knowledge_entity_resolution&notice=knowledge_entity_resolution_scheduled",
+        ),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
+async fn http_ops_knowledge_entity_resolution_enqueue_due(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_knowledge_entity_resolution_enqueue_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "knowledge-entity-resolution-enqueue-due:{}",
+        form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=knowledge_entity_resolution&notice=duplicate");
+    }
+
+    let result = (|| -> Result<usize> {
+        let store = Store::open(state.paths.clone())?;
+        let max_pairs = form.max_pairs.clamp(1, 100);
+        let provider = form.model_provider.trim().to_ascii_lowercase();
+        let decision = store.policy_check(PolicyRequest {
+            action: "ops.knowledge_entity_resolution.enqueue_due".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: Some(provider.clone()),
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some("knowledge_entity_resolution_model".to_string()),
+            projected_usd: None,
+            metadata: json!({
+                "model_provider": provider.clone(),
+                "model_name": form.model_name.clone(),
+                "endpoint_configured": form.endpoint.is_some(),
+                "timeout_seconds": form.timeout_seconds,
+                "max_pairs": max_pairs,
+                "idempotency_key": form.idempotency_key,
+                "boundary": "Ops control queues review-only entity-resolution proposals; merge decisions remain separate review.",
+            }),
+            untrusted_excerpt: None,
+        })?;
+        if !decision.allowed {
+            bail!(
+                "policy denied ops.knowledge_entity_resolution.enqueue_due: {}",
+                decision.reason
+            );
+        }
+        let report = store.enqueue_due_knowledge_entity_resolution_jobs(
+            max_pairs,
+            &provider,
+            form.model_name.as_deref(),
+            form.endpoint.as_deref(),
+            form.timeout_seconds,
+            Some(json!({
+                "trigger": "ops_ui_enqueue_due",
+                "operator": "local-operator",
+                "boundary": "Ops UI enqueue writes review-only entity-resolution model jobs and does not authorize entity merges.",
+            })),
+        )?;
+        Ok(report.enqueued)
+    })();
+
+    match result {
+        Ok(enqueued) => redirect_to_ops_ui(&format!(
+            "/ops/ui?q=knowledge_entity_resolution&notice=knowledge_entity_resolutions_due_enqueued&count={}",
+            enqueued
+        )),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
 async fn http_ops_knowledge_cluster_promote(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -8394,6 +8614,62 @@ fn parse_ops_knowledge_due_model_writes_form(
     })
 }
 
+fn parse_ops_knowledge_entity_resolution_schedule_form(
+    body: &[u8],
+) -> std::result::Result<OpsKnowledgeEntityResolutionScheduleForm, HttpError> {
+    let mut values = parse_ops_form_fields(
+        body,
+        &[
+            "csrf_token",
+            "idempotency_key",
+            "model_provider",
+            "model_name",
+            "endpoint",
+            "timeout_seconds",
+            "max_pairs",
+            "cadence",
+            "status",
+        ],
+    )?;
+    Ok(OpsKnowledgeEntityResolutionScheduleForm {
+        csrf_token: take_required_form_string(&mut values, "csrf_token")?,
+        idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
+        model_provider: take_required_form_string(&mut values, "model_provider")?,
+        model_name: take_optional_form_string(&mut values, "model_name"),
+        endpoint: take_optional_form_string(&mut values, "endpoint"),
+        timeout_seconds: take_optional_form_u64(&mut values, "timeout_seconds", 1, 600)?,
+        max_pairs: take_required_form_usize(&mut values, "max_pairs", 1, 100)?,
+        cadence: take_required_form_string(&mut values, "cadence")?,
+        status: take_required_form_string(&mut values, "status")?,
+    })
+}
+
+fn parse_ops_knowledge_entity_resolution_enqueue_form(
+    body: &[u8],
+) -> std::result::Result<OpsKnowledgeEntityResolutionEnqueueForm, HttpError> {
+    let mut values = parse_ops_form_fields(
+        body,
+        &[
+            "csrf_token",
+            "idempotency_key",
+            "model_provider",
+            "model_name",
+            "endpoint",
+            "timeout_seconds",
+            "max_pairs",
+        ],
+    )?;
+    Ok(OpsKnowledgeEntityResolutionEnqueueForm {
+        csrf_token: take_required_form_string(&mut values, "csrf_token")?,
+        idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
+        model_provider: take_required_form_string(&mut values, "model_provider")?,
+        model_name: take_optional_form_string(&mut values, "model_name"),
+        endpoint: take_optional_form_string(&mut values, "endpoint"),
+        timeout_seconds: take_optional_form_u64(&mut values, "timeout_seconds", 1, 600)?,
+        max_pairs: take_required_form_usize(&mut values, "max_pairs", 1, 100)?,
+    })
+}
+
 fn parse_ops_knowledge_due_clusters_form(
     body: &[u8],
 ) -> std::result::Result<OpsKnowledgeDueClustersForm, HttpError> {
@@ -8904,6 +9180,7 @@ fn render_ops_ui_with_options(
 <title>Arcwell Ops</title>
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
 body{margin:0;background:#f6f7f9;color:#1f2328}
 main{max-width:1440px;margin:0 auto;padding:24px}
 h1{font-size:28px;margin:0 0 6px}
@@ -8917,10 +9194,10 @@ p{margin:4px 0 14px}.muted{color:#57606a}.notice{border-left:4px solid #1f6feb;p
 .ops-form{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end;margin-top:18px}
 .ops-form label{display:grid;gap:4px;font-size:12px;color:#57606a}
 .control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:14px}
-.control-grid form{border:1px solid #d8dee4;background:white;border-radius:6px;padding:10px;display:grid;gap:8px}
+.control-grid form{border:1px solid #d8dee4;background:white;border-radius:6px;padding:10px;display:grid;gap:8px;min-width:0}
 .control-grid .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
 .control-grid label{display:grid;gap:4px;font-size:12px;color:#57606a}
-input,select,button{font:inherit;border:1px solid #d8dee4;border-radius:6px;background:white;color:inherit;padding:7px}
+input,select,button{font:inherit;border:1px solid #d8dee4;border-radius:6px;background:white;color:inherit;padding:7px;max-width:100%;min-width:0}
 button{font-weight:600;cursor:pointer}.danger{color:#b42318}.actions form{display:flex;gap:6px;flex-wrap:wrap}.actions input[name=reason]{min-width:220px}
 .detail{border:1px solid #d8dee4;background:white;padding:12px;border-radius:6px}
 .ok{color:#116329}.bad{color:#b42318}.warn{color:#9a6700}.pill{font-size:13px;font-weight:600}
@@ -10252,6 +10529,46 @@ fn render_knowledge_ops_control_panel(csrf_token: Option<&str>, controls_enabled
         html_escape(csrf_token),
         html_escape(&ops_control_idempotency_key(
             "knowledge-model-writes-due"
+        )),
+    ));
+    html.push_str(&format!(
+        r#"<form method="post" action="/ops/actions/knowledge/entity-resolution/schedule">
+<input type="hidden" name="csrf_token" value="{}">
+<input type="hidden" name="idempotency_key" value="{}">
+<div><b>Schedule entity resolution</b><p class="muted">Create or update the review-only entity-resolution watch source for source-card-backed entity pairs.</p></div>
+<div class="fields">
+<label>Max pairs<input name="max_pairs" type="number" min="1" max="100" value="25"></label>
+<label>Provider<select name="model_provider"><option value="mock">mock</option><option value="openai">openai</option></select></label>
+<label>Model<input name="model_name" maxlength="80" placeholder="gpt-4.1-mini"></label>
+<label>Endpoint<input name="endpoint" maxlength="300" placeholder="optional"></label>
+<label>Timeout<input name="timeout_seconds" type="number" min="1" max="600" placeholder="optional"></label>
+<label>Status<select name="status"><option value="active">active</option><option value="paused">paused</option></select></label>
+<label>Cadence<input name="cadence" maxlength="40" value="warm"></label>
+</div>
+<button type="submit">Schedule resolution</button>
+</form>"#,
+        html_escape(csrf_token),
+        html_escape(&ops_control_idempotency_key(
+            "knowledge-entity-resolution-schedule"
+        )),
+    ));
+    html.push_str(&format!(
+        r#"<form method="post" action="/ops/actions/knowledge/entity-resolution/enqueue-due">
+<input type="hidden" name="csrf_token" value="{}">
+<input type="hidden" name="idempotency_key" value="{}">
+<div><b>Queue due entity resolution</b><p class="muted">Find eligible entity pairs and enqueue review-only model resolution jobs.</p></div>
+<div class="fields">
+<label>Max pairs<input name="max_pairs" type="number" min="1" max="100" value="25"></label>
+<label>Provider<select name="model_provider"><option value="mock">mock</option><option value="openai">openai</option></select></label>
+<label>Model<input name="model_name" maxlength="80" placeholder="gpt-4.1-mini"></label>
+<label>Endpoint<input name="endpoint" maxlength="300" placeholder="optional"></label>
+<label>Timeout<input name="timeout_seconds" type="number" min="1" max="600" placeholder="optional"></label>
+</div>
+<button type="submit">Queue resolution</button>
+</form>"#,
+        html_escape(csrf_token),
+        html_escape(&ops_control_idempotency_key(
+            "knowledge-entity-resolution-enqueue-due"
         )),
     ));
     html.push_str(&format!(
@@ -22360,6 +22677,64 @@ reason = "ops controls may enqueue local worker jobs"
         );
         assert!(store.list_wiki_jobs().unwrap().is_empty());
 
+        let (denied_entity_resolution_schedule_status, denied_entity_resolution_schedule_json) =
+            response_json(
+                http_ops_knowledge_entity_resolution_schedule(
+                    State(state.clone()),
+                    authed_local_headers(),
+                    Uri::from_static("/ops/actions/knowledge/entity-resolution/schedule"),
+                    Bytes::from(knowledge_entity_resolution_schedule_body(
+                        &state.csrf_token,
+                        "ops-ui-knowledge-entity-resolution-schedule-denied",
+                        5,
+                        "mock",
+                        "warm",
+                        "active",
+                    )),
+                )
+                .await,
+            )
+            .await;
+        assert_eq!(
+            denied_entity_resolution_schedule_status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            denied_entity_resolution_schedule_json
+                .pointer("/error/type")
+                .and_then(Value::as_str),
+            Some("ops_action_failed")
+        );
+        assert!(store.list_watch_sources().unwrap().is_empty());
+
+        let (denied_entity_resolution_enqueue_status, denied_entity_resolution_enqueue_json) =
+            response_json(
+                http_ops_knowledge_entity_resolution_enqueue_due(
+                    State(state.clone()),
+                    authed_local_headers(),
+                    Uri::from_static("/ops/actions/knowledge/entity-resolution/enqueue-due"),
+                    Bytes::from(knowledge_entity_resolution_enqueue_body(
+                        &state.csrf_token,
+                        "ops-ui-knowledge-entity-resolution-enqueue-denied",
+                        5,
+                        "mock",
+                    )),
+                )
+                .await,
+            )
+            .await;
+        assert_eq!(
+            denied_entity_resolution_enqueue_status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            denied_entity_resolution_enqueue_json
+                .pointer("/error/type")
+                .and_then(Value::as_str),
+            Some("ops_action_failed")
+        );
+        assert!(store.list_wiki_jobs().unwrap().is_empty());
+
         let (denied_investigation_status, denied_investigation_json) = response_json(
             http_ops_knowledge_investigation_execution_enqueue(
                 State(state.clone()),
@@ -22434,6 +22809,32 @@ reason = "ops controls may enqueue local worker jobs"
             model_cluster.metadata.get("origin").and_then(Value::as_str),
             Some("model_cluster_proposal_v1")
         );
+        let entity_left = store
+            .upsert_knowledge_entity(KnowledgeEntityInput {
+                entity_type: "company".to_string(),
+                name: "Ops UI OpenAI".to_string(),
+                canonical_key: "company:ops-ui-openai".to_string(),
+                aliases: vec!["Ops UI OpenAI".to_string()],
+                homepage_url: Some("https://openai.com".to_string()),
+                source_card_ids: vec![card_a.id.clone()],
+                wiki_page_id: None,
+                confidence: 0.91,
+                metadata: json!({ "seed": "ops-ui-entity-resolution" }),
+            })
+            .unwrap();
+        let entity_right = store
+            .upsert_knowledge_entity(KnowledgeEntityInput {
+                entity_type: "company".to_string(),
+                name: "Ops UI OpenAI LP".to_string(),
+                canonical_key: "company:ops-ui-openai-lp".to_string(),
+                aliases: vec!["Ops UI OpenAI LP".to_string()],
+                homepage_url: Some("https://openai.com".to_string()),
+                source_card_ids: vec![card_b.id.clone()],
+                wiki_page_id: None,
+                confidence: 0.83,
+                metadata: json!({ "seed": "ops-ui-entity-resolution" }),
+            })
+            .unwrap();
 
         let (denied_promote_status, denied_promote_json) = response_json(
             http_ops_knowledge_cluster_promote(
@@ -22523,6 +22924,18 @@ id = "allow-ops-knowledge-model-write-enqueue-due"
 effect = "allow"
 action = "ops.knowledge_model_write.enqueue_due"
 reason = "local operator may enqueue due promoted model-origin cluster writer jobs"
+
+[[rules]]
+id = "allow-ops-knowledge-entity-resolution-schedule"
+effect = "allow"
+action = "ops.knowledge_entity_resolution.schedule"
+reason = "local operator may schedule review-only entity resolution jobs"
+
+[[rules]]
+id = "allow-ops-knowledge-entity-resolution-enqueue-due"
+effect = "allow"
+action = "ops.knowledge_entity_resolution.enqueue_due"
+reason = "local operator may enqueue due review-only entity resolution jobs"
 
 [[rules]]
 id = "allow-core-knowledge-cluster-promote"
@@ -22990,6 +23403,131 @@ reason = "ops controls may enqueue local worker jobs"
             decisions_after_due_model_writes
         );
 
+        let entity_resolution_schedule_body = knowledge_entity_resolution_schedule_body(
+            &state.csrf_token,
+            "ops-ui-knowledge-entity-resolution-schedule-allowed",
+            11,
+            "mock",
+            "warm",
+            "active",
+        );
+        let (entity_resolution_schedule_status, _) = response_text(
+            http_ops_knowledge_entity_resolution_schedule(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/entity-resolution/schedule"),
+                Bytes::from(entity_resolution_schedule_body.clone()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(entity_resolution_schedule_status, StatusCode::SEE_OTHER);
+        let sources = store.list_watch_sources().unwrap();
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.source_kind == "knowledge_entity_resolution"
+                    && source.locator == "entities"
+                    && source.metadata["model_provider"] == "mock"
+                    && source.metadata["max_pairs"] == 11)
+        );
+        let decisions_after_entity_resolution_schedule =
+            store.list_policy_decisions(60).unwrap().len();
+        let (entity_resolution_schedule_duplicate_status, _) = response_text(
+            http_ops_knowledge_entity_resolution_schedule(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/entity-resolution/schedule"),
+                Bytes::from(entity_resolution_schedule_body),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            entity_resolution_schedule_duplicate_status,
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            store.list_policy_decisions(60).unwrap().len(),
+            decisions_after_entity_resolution_schedule
+        );
+
+        let entity_resolution_enqueue_body = knowledge_entity_resolution_enqueue_body(
+            &state.csrf_token,
+            "ops-ui-knowledge-entity-resolution-enqueue-allowed",
+            7,
+            "mock",
+        );
+        let (entity_resolution_enqueue_status, _) = response_text(
+            http_ops_knowledge_entity_resolution_enqueue_due(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/entity-resolution/enqueue-due"),
+                Bytes::from(entity_resolution_enqueue_body.clone()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(entity_resolution_enqueue_status, StatusCode::SEE_OTHER);
+        assert!(
+            store
+                .list_policy_decisions(80)
+                .unwrap()
+                .iter()
+                .any(|decision| decision.allowed
+                    && decision.action == "ops.knowledge_entity_resolution.enqueue_due")
+        );
+        let entity_resolution_jobs: Vec<_> = store
+            .list_wiki_jobs()
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.kind == "knowledge_entity_resolution_model")
+            .collect();
+        assert!(!entity_resolution_jobs.is_empty());
+        let entity_resolution_job_count = entity_resolution_jobs.len();
+        let entity_job = entity_resolution_jobs
+            .iter()
+            .find(|job| {
+                let left_job_id = job.input_json.get("left_entity_id").and_then(Value::as_str);
+                let right_job_id = job
+                    .input_json
+                    .get("right_entity_id")
+                    .and_then(Value::as_str);
+                [left_job_id, right_job_id].contains(&Some(entity_left.id.as_str()))
+                    && [left_job_id, right_job_id].contains(&Some(entity_right.id.as_str()))
+            })
+            .expect("entity-resolution enqueue should include the seeded source-card-backed pair");
+        assert_eq!(
+            entity_job
+                .input_json
+                .pointer("/lineage/trigger")
+                .and_then(Value::as_str),
+            Some("ops_ui_enqueue_due")
+        );
+        let (entity_resolution_enqueue_duplicate_status, _) = response_text(
+            http_ops_knowledge_entity_resolution_enqueue_due(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/entity-resolution/enqueue-due"),
+                Bytes::from(entity_resolution_enqueue_body),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            entity_resolution_enqueue_duplicate_status,
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_entity_resolution_model")
+                .count(),
+            entity_resolution_job_count
+        );
+
         store
             .create_knowledge_cluster_investigation(&projected.cluster.id)
             .unwrap();
@@ -23068,6 +23606,28 @@ reason = "ops controls may enqueue local worker jobs"
             Some("bad_form")
         );
 
+        let (bad_entity_form_status, bad_entity_form_json) = response_json(
+            http_ops_knowledge_entity_resolution_enqueue_due(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/entity-resolution/enqueue-due"),
+                Bytes::from(format!(
+                    "csrf_token={}&idempotency_key={}&max_pairs=0&model_provider=mock&model_name=&endpoint=&timeout_seconds=",
+                    url_component(&state.csrf_token),
+                    url_component("ops-ui-knowledge-entity-resolution-bad-form")
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(bad_entity_form_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_entity_form_json
+                .pointer("/error/type")
+                .and_then(Value::as_str),
+            Some("bad_form")
+        );
+
         let html = render_ops_ui_with_options(
             &store.ops_snapshot().unwrap(),
             &OpsUiOptions::default(),
@@ -23085,6 +23645,8 @@ reason = "ops controls may enqueue local worker jobs"
         assert!(html.contains("/ops/actions/knowledge/model-writes/schedule"));
         assert!(html.contains("/ops/actions/knowledge/model-writes/enqueue"));
         assert!(html.contains("/ops/actions/knowledge/model-writes/enqueue-due"));
+        assert!(html.contains("/ops/actions/knowledge/entity-resolution/schedule"));
+        assert!(html.contains("/ops/actions/knowledge/entity-resolution/enqueue-due"));
         assert!(html.contains("/ops/actions/knowledge/investigations/enqueue-execution"));
         assert!(html.contains("Schedule model clustering"));
         assert!(html.contains("Queue model clustering"));
@@ -23093,6 +23655,8 @@ reason = "ops controls may enqueue local worker jobs"
         assert!(html.contains("Schedule model writer"));
         assert!(html.contains("Queue model writer"));
         assert!(html.contains("Queue due model writers"));
+        assert!(html.contains("Schedule entity resolution"));
+        assert!(html.contains("Queue due entity resolution"));
         assert!(html.contains("knowledge_backlog"));
     }
 
@@ -23477,6 +24041,40 @@ reason = "local operator may dead-letter reviewed edge events"
             max_clusters,
             url_component(provider),
             create_digest
+        )
+    }
+
+    fn knowledge_entity_resolution_schedule_body(
+        csrf_token: &str,
+        idempotency_key: &str,
+        max_pairs: usize,
+        provider: &str,
+        cadence: &str,
+        status: &str,
+    ) -> String {
+        format!(
+            "csrf_token={}&idempotency_key={}&model_provider={}&model_name=&endpoint=&timeout_seconds=&max_pairs={}&cadence={}&status={}",
+            url_component(csrf_token),
+            url_component(idempotency_key),
+            url_component(provider),
+            max_pairs,
+            url_component(cadence),
+            url_component(status)
+        )
+    }
+
+    fn knowledge_entity_resolution_enqueue_body(
+        csrf_token: &str,
+        idempotency_key: &str,
+        max_pairs: usize,
+        provider: &str,
+    ) -> String {
+        format!(
+            "csrf_token={}&idempotency_key={}&model_provider={}&model_name=&endpoint=&timeout_seconds=&max_pairs={}",
+            url_component(csrf_token),
+            url_component(idempotency_key),
+            url_component(provider),
+            max_pairs
         )
     }
 

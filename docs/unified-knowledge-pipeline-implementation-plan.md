@@ -198,6 +198,14 @@ Current implemented bridge slice:
   `ops.knowledge_model_write.schedule`, and
   `ops.knowledge_model_write.enqueue`; they reuse the existing worker paths and
   do not promote model-cluster quality, wiki writes, or delivery readiness.
+- Authenticated `/ops/ui` Knowledge Controls can schedule review-only
+  entity-resolution recurrence and enqueue due entity-resolution model jobs
+  through `ops.knowledge_entity_resolution.schedule` and
+  `ops.knowledge_entity_resolution.enqueue_due`. The controls create/update the
+  `knowledge_entity_resolution` watch source or enqueue
+  `knowledge_entity_resolution_model` jobs for eligible source-card-backed
+  entity pairs; they cannot merge entities, create relations, write wiki pages,
+  create reports, or authorize digest delivery.
 - `arcwell knowledge enqueue-due-model-writes` and the authenticated
   `/ops/ui` due-writer control can bulk-enqueue model-writer jobs for active
   promoted model-origin clusters. The path skips unpromoted model proposals,

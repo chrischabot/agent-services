@@ -19,9 +19,11 @@ Current first-pass implementation:
   decisions/approvals, costs, and secret health.
 - `/ops/ui` includes search/status filters, stable sorting, detail views,
   summary health scoring, queue/source/radar-run/radar-quality/credential
-  summaries, and one narrow authenticated edge-event dead-letter control with
-  token auth, hostile-origin rejection, CSRF/idempotency checks, policy
-  enforcement, and replay tests.
+  summaries, one narrow authenticated edge-event dead-letter control, X
+  schedule/enqueue/run-worker controls, and Knowledge controls for backlog,
+  model-cluster/model-writer, investigation, promotion, and review-only
+  entity-resolution recurrence. Mutations use token auth, hostile-origin
+  rejection, CSRF/idempotency checks, policy enforcement, and replay tests.
 - `scripts/ops-ui-browser-smoke` runs browser-backed desktop, detail, and
   mobile validation against a seeded authenticated local `/ops/ui`, preserving
   screenshots and a proof packet under `.arcwell-dev/proofs/`.

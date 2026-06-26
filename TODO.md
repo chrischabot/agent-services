@@ -464,12 +464,14 @@ PR, implementation note, or final report:
       policy. The same control panel now has CSRF/idempotency-protected,
       policy-gated schedule/enqueue actions for review-only model-cluster
       proposal jobs, promoted-cluster model-writer jobs, and due promoted
-      model-origin writer sweeps; severe HTTP tests prove denied policy,
-      durable watch-source/job writes, duplicate
-      idempotency suppression, and rendered routes. This is an operator
-      control surface for already-scoped model clustering/writing paths, not
-      broad production-corpus clustering quality or a full repair/control
-      surface.
+      model-origin writer sweeps. It now also has CSRF/idempotency-protected,
+      policy-gated schedule/enqueue-due actions for review-only
+      entity-resolution model jobs; severe HTTP tests prove denied policy,
+      durable watch-source/job writes, duplicate idempotency suppression,
+      invalid form rejection, and rendered routes. This is an operator control
+      surface for already-scoped model clustering/writing/entity-resolution
+      paths, not broad production-corpus clustering quality, automatic entity
+      merging, or a full repair/control surface.
       X provider fetches now share a local-proof bearer freshness path: recent
       search, bookmark import, following/watch rebuild, and watch-source
       monitor refresh an expired stored `X_BEARER_TOKEN` through stored

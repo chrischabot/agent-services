@@ -355,8 +355,18 @@ PR, implementation note, or final report:
       digest writes except a blocked editorial decision where appropriate. This
       closes the "model writer scaffold exists but writes ungated link dumps"
       mirage for a proof-scoped corpus. It is still not broad production-corpus
-      model-writing quality, automatic scheduled model writing, multi-day
-      service operation, or external delivery.
+      model-writing quality, live scheduled model-writer recurrence, broad
+      automatic cluster sweeps, multi-day service operation, or external
+      delivery. The next slice adds explicit cluster-scoped
+      `arcwell knowledge schedule-cluster-model-write` recurrence: severe tests
+      prove unpromoted model-origin clusters cannot be scheduled, due
+      `knowledge_model_write` watch sources enqueue exactly one writer job after
+      promotion and worker-enqueue policy, deterministic expansion is suppressed
+      while that writer job is active, source health advances only after durable
+      model-writer output, terminal decisions suppress recurrence, and active
+      writer jobs do not create retry storms. This promotes only Local Proof for
+      explicit cluster-scoped scheduling; live scheduled model-writer recurrence
+      and broad automatic production sweeps remain open.
       The authenticated `/ops/ui` Knowledge Controls now also expose a
       CSRF/idempotency-protected model-cluster promotion action, double-gated by
       `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`
@@ -381,7 +391,8 @@ PR, implementation note, or final report:
       quota/tier/live coverage beyond the capped smoke, multi-day scheduled
       source recurrence, live external delivery recurrence, production
       monitoring, broad production-corpus model-backed writer/editor synthesis,
-      automatic scheduled model writing, and broader ops UI repair controls.
+      live scheduled model-writer recurrence, broad automatic model-writing
+      sweeps, and broader ops UI repair controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

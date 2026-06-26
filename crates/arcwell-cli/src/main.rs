@@ -1810,6 +1810,23 @@ enum KnowledgeSubcommand {
         #[arg(long)]
         skip_digest: bool,
     },
+    ScheduleClusterModelWrite {
+        cluster_id: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long)]
+        skip_digest: bool,
+        #[arg(long, default_value = "warm")]
+        cadence: String,
+        #[arg(long, default_value = "active")]
+        status: String,
+    },
     EnqueueClusterInvestigation {
         cluster_id: String,
     },
@@ -3960,6 +3977,25 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
             endpoint.as_deref(),
             timeout_seconds,
             !skip_digest,
+        )?),
+        KnowledgeSubcommand::ScheduleClusterModelWrite {
+            cluster_id,
+            provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            skip_digest,
+            cadence,
+            status,
+        } => print_json(&store.schedule_knowledge_cluster_model_write(
+            &cluster_id,
+            &provider,
+            model_name.as_deref(),
+            endpoint.as_deref(),
+            timeout_seconds,
+            !skip_digest,
+            &cadence,
+            &status,
         )?),
         KnowledgeSubcommand::EnqueueClusterInvestigation { cluster_id } => {
             print_json(&store.enqueue_knowledge_cluster_investigation_job(&cluster_id)?)

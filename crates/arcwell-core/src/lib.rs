@@ -13679,7 +13679,35 @@ impl Store {
         timeout_seconds: Option<u64>,
         create_digest: bool,
     ) -> Result<WikiJob> {
+        self.enqueue_knowledge_cluster_model_writer_job_with_lineage(
+            cluster_id,
+            model_provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            create_digest,
+            None,
+        )
+    }
+
+    fn enqueue_knowledge_cluster_model_writer_job_with_lineage(
+        &self,
+        cluster_id: &str,
+        model_provider: &str,
+        model_name: Option<&str>,
+        endpoint: Option<&str>,
+        timeout_seconds: Option<u64>,
+        create_digest: bool,
+        lineage: Option<Value>,
+    ) -> Result<WikiJob> {
         validate_id(cluster_id)?;
+        let cluster = self
+            .get_knowledge_cluster(cluster_id)?
+            .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
+        ensure_knowledge_cluster_can_expand(&cluster)?;
+        if self.knowledge_cluster_model_writer_has_active_job(cluster_id)? {
+            bail!("knowledge cluster model writer job already active for cluster {cluster_id}");
+        }
         let provider = model_provider.trim().to_ascii_lowercase();
         if !matches!(provider.as_str(), "mock" | "openai") {
             bail!("unsupported knowledge cluster writer model provider: {provider}");
@@ -13694,16 +13722,120 @@ impl Store {
         if let Some(endpoint) = endpoint {
             validated_endpoint(Some(endpoint), "https://api.openai.com/v1/responses")?;
         }
-        self.enqueue_wiki_job(
-            "knowledge_cluster_model_write",
-            json!({
+        let mut input = json!({
+            "cluster_id": cluster_id,
+            "model_provider": provider,
+            "model_name": model_name,
+            "endpoint": endpoint,
+            "timeout_seconds": timeout_seconds,
+            "create_digest": create_digest,
+        });
+        if let Some(lineage) = lineage
+            && let Some(object) = input.as_object_mut()
+        {
+            object.insert("lineage".to_string(), lineage);
+        }
+        self.enqueue_wiki_job("knowledge_cluster_model_write", input)
+    }
+
+    pub fn schedule_knowledge_cluster_model_write(
+        &self,
+        cluster_id: &str,
+        model_provider: &str,
+        model_name: Option<&str>,
+        endpoint: Option<&str>,
+        timeout_seconds: Option<u64>,
+        create_digest: bool,
+        cadence: &str,
+        status: &str,
+    ) -> Result<WatchSource> {
+        validate_id(cluster_id)?;
+        let cluster = self
+            .get_knowledge_cluster(cluster_id)?
+            .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
+        ensure_knowledge_cluster_can_expand(&cluster)?;
+        let provider = model_provider.trim().to_ascii_lowercase();
+        if !matches!(provider.as_str(), "mock" | "openai") {
+            bail!("unsupported knowledge cluster writer model provider: {provider}");
+        }
+        let model_name = model_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        if let Some(model_name) = &model_name {
+            validate_key(model_name)?;
+        }
+        if let Some(endpoint) = endpoint {
+            validated_endpoint(Some(endpoint), "https://api.openai.com/v1/responses")?;
+        }
+        self.upsert_watch_source(WatchSourceInput {
+            source_kind: "knowledge_model_write".to_string(),
+            locator: cluster_id.to_string(),
+            label: format!("Knowledge model writer: {}", cluster.topic),
+            cadence: cadence.to_string(),
+            status: status.to_string(),
+            metadata: json!({
                 "cluster_id": cluster_id,
                 "model_provider": provider,
                 "model_name": model_name,
                 "endpoint": endpoint,
                 "timeout_seconds": timeout_seconds,
                 "create_digest": create_digest,
+                "origin": "knowledge_model_write_schedule",
+                "boundary": "Scheduled model writing is cluster-scoped and still requires promotion, provider policy, cost, source-card citations, wiki/report quality gates, and separate digest delivery policy."
             }),
+        })
+    }
+
+    fn enqueue_due_knowledge_cluster_model_write_job_from_source(
+        &self,
+        source: &WatchSource,
+        source_key: &str,
+    ) -> Result<WikiJob> {
+        let cluster_id = source
+            .metadata
+            .get("cluster_id")
+            .and_then(Value::as_str)
+            .unwrap_or(source.locator.as_str());
+        validate_id(cluster_id)?;
+        if let Some(status) = self.knowledge_cluster_model_writer_decision_status(cluster_id)?
+            && matches!(status.as_str(), "completed" | "blocked")
+        {
+            bail!("knowledge cluster model writer already has terminal decision for {cluster_id}");
+        }
+        let model_provider = source
+            .metadata
+            .get("model_provider")
+            .and_then(Value::as_str)
+            .unwrap_or("mock");
+        let model_name = source.metadata.get("model_name").and_then(Value::as_str);
+        let endpoint = source.metadata.get("endpoint").and_then(Value::as_str);
+        let timeout_seconds = source
+            .metadata
+            .get("timeout_seconds")
+            .and_then(Value::as_u64);
+        let create_digest = source
+            .metadata
+            .get("create_digest")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        self.enqueue_knowledge_cluster_model_writer_job_with_lineage(
+            cluster_id,
+            model_provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            create_digest,
+            Some(json!({
+                "trigger": "watch_source_due",
+                "watch_source_id": source.id,
+                "watch_source_key": source_key,
+                "source_kind": source.source_kind,
+                "locator": source.locator,
+                "cluster_id": cluster_id,
+                "cadence": source.cadence,
+                "metadata": source.metadata,
+            })),
         )
     }
 
@@ -13952,6 +14084,10 @@ impl Store {
                 report.skipped += 1;
                 continue;
             }
+            if self.knowledge_cluster_model_writer_has_active_job(&cluster.id)? {
+                report.skipped += 1;
+                continue;
+            }
             match self.enqueue_knowledge_cluster_expansion_job(&cluster.id, true) {
                 Ok(job) => {
                     report.enqueued += 1;
@@ -14093,6 +14229,28 @@ impl Store {
             .map_err(Into::into)
     }
 
+    fn knowledge_cluster_model_writer_decision_status(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<String>> {
+        validate_id(cluster_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT status
+                FROM knowledge_editorial_decisions
+                WHERE cluster_id = ?1
+                  AND decision IN ('model_write_wiki_and_digest', 'model_write_wiki')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                "#,
+                params![cluster_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn knowledge_cluster_investigation_execution_decision_status(
         &self,
         cluster_id: &str,
@@ -14161,6 +14319,24 @@ impl Store {
                   AND json_extract(input_json, '$.query') = ?1
                 "#,
                 params![query],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .map_err(Into::into)
+    }
+
+    fn knowledge_cluster_model_writer_has_active_job(&self, cluster_id: &str) -> Result<bool> {
+        validate_id(cluster_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM wiki_jobs
+                WHERE kind = 'knowledge_cluster_model_write'
+                  AND status IN ('pending', 'running', 'deferred')
+                  AND json_extract(input_json, '$.cluster_id') = ?1
+                "#,
+                params![cluster_id],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count > 0)
@@ -14647,6 +14823,39 @@ impl Store {
                             "cadence": source.cadence,
                             "metadata": source.metadata,
                         })),
+                    )
+                }
+                "knowledge_model_write" => {
+                    let cluster_id = source
+                        .metadata
+                        .get("cluster_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(source.locator.as_str());
+                    if self.knowledge_cluster_model_writer_has_active_job(cluster_id)? {
+                        report.skipped += 1;
+                        continue;
+                    }
+                    if let Some(status) =
+                        self.knowledge_cluster_model_writer_decision_status(cluster_id)?
+                        && matches!(status.as_str(), "completed" | "blocked")
+                    {
+                        self.record_source_success(SourceHealthUpdate {
+                            key: &source_key,
+                            provider: "arcwell",
+                            source_kind: "knowledge_model_write",
+                            locator: &source.locator,
+                            last_item_id: Some(cluster_id),
+                            last_item_date: None,
+                            cursor_key: None,
+                            cursor_value: None,
+                            next_run_at: Some(&now_plus_seconds(3600)),
+                        })?;
+                        report.skipped += 1;
+                        continue;
+                    }
+                    self.enqueue_due_knowledge_cluster_model_write_job_from_source(
+                        &source,
+                        &source_key,
                     )
                 }
                 other => Err(anyhow::anyhow!("unsupported watch source kind: {other}")),
@@ -33323,6 +33532,25 @@ impl Store {
                 timeout_seconds,
                 create_digest,
             })?;
+        if let Some(lineage) = input.get("lineage")
+            && let Some(source_key) = lineage.get("watch_source_key").and_then(Value::as_str)
+        {
+            let locator = lineage
+                .get("locator")
+                .and_then(Value::as_str)
+                .unwrap_or(report.cluster.id.as_str());
+            self.record_source_success(SourceHealthUpdate {
+                key: source_key,
+                provider: "arcwell",
+                source_kind: "knowledge_model_write",
+                locator,
+                last_item_id: Some(report.cluster.id.as_str()),
+                last_item_date: None,
+                cursor_key: None,
+                cursor_value: None,
+                next_run_at: Some(&now_plus_seconds(3600)),
+            })?;
+        }
         Ok(json!({
             "cluster_id": report.cluster.id,
             "wiki_page_id": report.wiki_page.id,
@@ -51866,6 +52094,7 @@ fn validate_watch_source_input(input: &WatchSourceInput) -> Result<()> {
             }
         }
         "knowledge_model_clusters" => validate_query(&input.locator)?,
+        "knowledge_model_write" => validate_id(&input.locator)?,
         _ => unreachable!("source kind validated above"),
     }
     Ok(())
@@ -51882,7 +52111,8 @@ fn validate_watch_source_kind(kind: &str) -> Result<()> {
         | "x_bookmarks"
         | "x_handle"
         | "knowledge_backlog"
-        | "knowledge_model_clusters" => Ok(()),
+        | "knowledge_model_clusters"
+        | "knowledge_model_write" => Ok(()),
         other => bail!("unsupported watch source kind: {other}"),
     }
 }
@@ -51935,6 +52165,7 @@ fn watch_source_health_key(source: &WatchSource) -> Result<String> {
         "x_handle" => Ok(format!("x:watch:{}", source.locator)),
         "knowledge_backlog" => Ok("knowledge:source-card-backlog".to_string()),
         "knowledge_model_clusters" => Ok(format!("knowledge:model-clusters:{}", source.locator)),
+        "knowledge_model_write" => Ok(format!("knowledge:model-write:{}", source.locator)),
         other => bail!("unsupported watch source kind: {other}"),
     }
 }
@@ -61961,6 +62192,229 @@ reason = "writer disabled token=sk-writer-secret"
         );
         assert_eq!(store.list_digest_candidates().unwrap().len(), 1);
         assert!(store.list_cost_decisions(20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn severe_scheduled_model_writer_requires_promotion_and_runs_once() {
+        // CLAIM: scheduled model writing is an explicit cluster-scoped
+        // recurrence path, not a broad model-output publication bypass.
+        // ORACLE: unpromoted model-origin clusters cannot be scheduled; after
+        // policy promotion, a due watch source enqueues one model-writer job,
+        // the worker completes it through the same quality gate, source health
+        // advances only after the durable write, and a second due poll does not
+        // enqueue duplicates after the terminal decision.
+        // SEVERITY: Severe because "scheduled writer" can otherwise recreate
+        // the original mirage: recurring empty/log-like generated pages.
+        let store = test_store("knowledge-cluster-model-writer-scheduled");
+        let release = seed_knowledge_source_card(
+            &store,
+            "scheduled-writer-release",
+            "Scheduled writer evidence says OpenAI released an agent tooling package with MCP integration.",
+        );
+        let reaction = seed_knowledge_source_card(
+            &store,
+            "scheduled-writer-reaction",
+            "Scheduled writer evidence says developers compared that package with other agent SDKs.",
+        );
+        let invocation = store
+            .invoke_knowledge_cluster_model(KnowledgeClusterProposalModelInput {
+                source_card_ids: vec![release.id.clone(), reaction.id.clone()],
+                model_provider: "mock".to_string(),
+                model_name: None,
+                endpoint: None,
+                timeout_seconds: None,
+                max_clusters: 6,
+            })
+            .unwrap();
+        let cluster = invocation.clusters.first().expect("model cluster");
+        let schedule_error = store
+            .schedule_knowledge_cluster_model_write(
+                &cluster.id,
+                "mock",
+                None,
+                None,
+                None,
+                true,
+                "warm",
+                "active",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            schedule_error.contains("requires knowledge_cluster.promote"),
+            "{schedule_error}"
+        );
+        assert!(store.list_watch_sources().unwrap().is_empty());
+
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-scheduled-model-writer-promotion"
+effect = "allow"
+action = "knowledge_cluster.promote"
+package = "arcwell-librarian"
+source = "knowledge_cluster_model_review"
+reason = "allow reviewed scheduled model writer test"
+priority = 20
+
+[[rules]]
+id = "allow-scheduled-model-writer-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+source = "knowledge_cluster_model_write"
+reason = "allow scheduled model writer worker enqueue in severe test"
+priority = 20
+"#,
+        );
+        let promotion = store
+            .promote_knowledge_cluster(
+                &cluster.id,
+                Some("scheduled-writer-test"),
+                Some("Source-card evidence is coherent enough for a model writer proof."),
+            )
+            .unwrap();
+        assert_eq!(promotion.cluster.status, "active");
+        let source = store
+            .schedule_knowledge_cluster_model_write(
+                &cluster.id,
+                "mock",
+                None,
+                None,
+                None,
+                true,
+                "warm",
+                "active",
+            )
+            .unwrap();
+        assert_eq!(source.source_kind, "knowledge_model_write");
+        assert_eq!(source.locator, cluster.id);
+        assert_eq!(
+            source.metadata.get("cluster_id").and_then(Value::as_str),
+            Some(cluster.id.as_str())
+        );
+
+        let worker = store.run_worker_once(10).unwrap();
+        let watch_poll = worker.watch_poll.as_ref().expect("watch poll report");
+        assert_eq!(watch_poll.enqueued, 1, "{watch_poll:?}");
+        assert_eq!(worker.processed, 1, "{worker:#?}");
+        assert_eq!(worker.jobs[0].kind, "knowledge_cluster_model_write");
+        assert_eq!(worker.jobs[0].status, "completed", "{worker:#?}");
+        let result = worker.jobs[0].result_json.as_ref().unwrap();
+        assert_eq!(
+            result.get("cluster_id").and_then(Value::as_str),
+            Some(cluster.id.as_str())
+        );
+        assert!(
+            result
+                .get("model_writer")
+                .is_some_and(|value| value.get("proof_level").is_some())
+        );
+        assert!(
+            worker
+                .knowledge_cluster_expansion
+                .as_ref()
+                .is_some_and(|report| report.enqueued == 0),
+            "{worker:#?}"
+        );
+        let health = store
+            .get_source_health(&format!("knowledge:model-write:{}", cluster.id))
+            .unwrap()
+            .expect("model writer source health");
+        assert_eq!(health.status, "healthy");
+        assert_eq!(health.last_item_id.as_deref(), Some(cluster.id.as_str()));
+        assert!(health.next_run_at.is_some());
+        assert_eq!(store.list_knowledge_reports(50).unwrap().len(), 1);
+        assert_eq!(store.list_digest_candidates().unwrap().len(), 1);
+        assert!(
+            store
+                .list_knowledge_editorial_decisions(20)
+                .unwrap()
+                .iter()
+                .any(|decision| decision.cluster_id == cluster.id
+                    && decision.decision == "model_write_wiki_and_digest"
+                    && decision.status == "completed")
+        );
+
+        let second = store.enqueue_due_watch_source_jobs(10).unwrap();
+        assert_eq!(second.enqueued, 0, "{second:?}");
+        assert!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_cluster_model_write")
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn severe_scheduled_model_writer_suppresses_active_duplicate_jobs() {
+        // CLAIM: scheduled model writing must not create retry storms or
+        // duplicate writer jobs for the same cluster.
+        // ORACLE: an already-pending writer job makes the due watch source skip
+        // instead of enqueueing another job, and deterministic expansion is also
+        // suppressed while the model writer is active.
+        // SEVERITY: Severe because duplicate writer jobs can create duplicate
+        // pages/digest candidates or burn provider budget repeatedly.
+        let store = test_store("knowledge-cluster-model-writer-duplicate");
+        seed_knowledge_source_card(
+            &store,
+            "scheduled-duplicate-a",
+            "Scheduled duplicate evidence says a source-backed cluster should get one model writer job.",
+        );
+        seed_knowledge_source_card(
+            &store,
+            "scheduled-duplicate-b",
+            "Scheduled duplicate evidence says a second source supports the same cluster.",
+        );
+        let projected = store
+            .project_knowledge_from_source_card_query(
+                "Scheduled duplicate evidence",
+                Some("Scheduled duplicate writer cluster"),
+                10,
+            )
+            .unwrap();
+        store
+            .schedule_knowledge_cluster_model_write(
+                &projected.cluster.id,
+                "mock",
+                None,
+                None,
+                None,
+                true,
+                "warm",
+                "active",
+            )
+            .unwrap();
+        store
+            .enqueue_knowledge_cluster_model_writer_job(
+                &projected.cluster.id,
+                "mock",
+                None,
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        let due = store.enqueue_due_watch_source_jobs(10).unwrap();
+        assert_eq!(due.enqueued, 0, "{due:?}");
+        assert_eq!(due.skipped, 1, "{due:?}");
+        let expansion_due = store
+            .enqueue_due_knowledge_cluster_expansion_jobs(10)
+            .unwrap();
+        assert_eq!(expansion_due.enqueued, 0, "{expansion_due:?}");
+        assert_eq!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_cluster_model_write")
+                .count(),
+            1
+        );
     }
 
     #[test]

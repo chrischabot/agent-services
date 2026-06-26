@@ -216,6 +216,15 @@ PR, implementation note, or final report:
       backlog job is active. Severe tests prove adapter completion can feed a
       source-card-backed cluster through the worker and cannot bypass
       `worker.enqueue` policy.
+      Completed `knowledge_cluster_backlog` jobs now visibly auto-enqueue
+      `knowledge_cluster_expand` follow-ups, and completed expansion jobs
+      visibly auto-enqueue `knowledge_cluster_investigation_execute` follow-ups
+      when they create source-linked investigation tasks. Severe tests prove a
+      single-cluster local worker pass can process backlog -> expansion ->
+      investigation execution without a hidden manual step, and that policy
+      denial is recorded without creating a hidden follow-up job. This does not
+      promote multi-cluster fanout capacity, wall-clock recurrence, or live
+      primary-source acquisition.
       Copied-home production-corpus proof
       `.arcwell-dev/proofs/knowledge-backlog-production-proof-20260626T051406Z/artifacts/proof-packet.md`
       inspected 500 real source cards, accepted 157, skipped 343, considered

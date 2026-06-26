@@ -32447,6 +32447,27 @@ impl Store {
         {
             object.insert("auto_knowledge_backlog".to_string(), auto_knowledge_backlog);
         }
+        if let Some(auto_expansion) =
+            self.auto_enqueue_knowledge_expansion_after_backlog_job(&existing, &result_json)?
+            && let Some(object) = result_json.as_object_mut()
+        {
+            object.insert(
+                "auto_knowledge_cluster_expansion".to_string(),
+                auto_expansion,
+            );
+        }
+        if let Some(auto_execution) = self
+            .auto_enqueue_knowledge_investigation_execution_after_expansion_job(
+                &existing,
+                &result_json,
+            )?
+            && let Some(object) = result_json.as_object_mut()
+        {
+            object.insert(
+                "auto_knowledge_investigation_execution".to_string(),
+                auto_execution,
+            );
+        }
         self.conn.execute(
             r#"
             UPDATE wiki_jobs
@@ -32530,6 +32551,121 @@ impl Store {
                 "error": excerpt(&redact_secret_like_text(&error.to_string()), 500),
                 "source_card_count": source_card_ids.len(),
                 "source_card_ids": source_card_ids,
+            }))),
+        }
+    }
+
+    fn auto_enqueue_knowledge_expansion_after_backlog_job(
+        &self,
+        job: &WikiJob,
+        result_json: &Value,
+    ) -> Result<Option<Value>> {
+        if job.kind != "knowledge_cluster_backlog" {
+            return Ok(None);
+        }
+        let cluster_ids = knowledge_cluster_ids_from_result(result_json);
+        if cluster_ids.is_empty() {
+            return Ok(None);
+        }
+        let mut enqueued = Vec::new();
+        let mut skipped = Vec::new();
+        let mut errors = Vec::new();
+        for cluster_id in &cluster_ids {
+            if let Some(status) = self.knowledge_cluster_expansion_decision_status(cluster_id)?
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                skipped.push(json!({
+                    "cluster_id": cluster_id,
+                    "reason": format!("expansion_decision_{status}")
+                }));
+                continue;
+            }
+            if self.knowledge_cluster_expansion_has_active_job(cluster_id)? {
+                skipped.push(json!({
+                    "cluster_id": cluster_id,
+                    "reason": "knowledge_cluster_expand_job_already_active"
+                }));
+                continue;
+            }
+            match self.enqueue_knowledge_cluster_expansion_job(cluster_id, true) {
+                Ok(expansion_job) => enqueued.push(json!({
+                    "cluster_id": cluster_id,
+                    "job_id": expansion_job.id,
+                })),
+                Err(error) => errors.push(json!({
+                    "cluster_id": cluster_id,
+                    "error": excerpt(&redact_secret_like_text(&error.to_string()), 500),
+                })),
+            }
+        }
+        let status = if !enqueued.is_empty() {
+            "enqueued"
+        } else if !errors.is_empty() {
+            "blocked"
+        } else {
+            "skipped"
+        };
+        Ok(Some(json!({
+            "status": status,
+            "cluster_count": cluster_ids.len(),
+            "enqueued": enqueued,
+            "skipped": skipped,
+            "errors": errors,
+        })))
+    }
+
+    fn auto_enqueue_knowledge_investigation_execution_after_expansion_job(
+        &self,
+        job: &WikiJob,
+        result_json: &Value,
+    ) -> Result<Option<Value>> {
+        if job.kind != "knowledge_cluster_expand" {
+            return Ok(None);
+        }
+        let Some(cluster_id) = result_json.get("cluster_id").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        validate_id(cluster_id)?;
+        let task_count = result_json
+            .get("investigation_task_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if task_count == 0 {
+            return Ok(Some(json!({
+                "status": "skipped",
+                "cluster_id": cluster_id,
+                "reason": "no_investigation_tasks",
+            })));
+        }
+        if let Some(status) =
+            self.knowledge_cluster_investigation_execution_decision_status(cluster_id)?
+            && matches!(status.as_str(), "completed" | "blocked")
+        {
+            return Ok(Some(json!({
+                "status": "skipped",
+                "cluster_id": cluster_id,
+                "reason": format!("investigation_execution_decision_{status}"),
+            })));
+        }
+        if self.knowledge_cluster_investigation_execution_has_active_job(cluster_id)? {
+            return Ok(Some(json!({
+                "status": "skipped",
+                "cluster_id": cluster_id,
+                "reason": "knowledge_cluster_investigation_execute_job_already_active",
+            })));
+        }
+        match self.enqueue_knowledge_cluster_investigation_execution_job(cluster_id) {
+            Ok(execution_job) => Ok(Some(json!({
+                "status": "enqueued",
+                "cluster_id": cluster_id,
+                "job_id": execution_job.id,
+                "investigation_task_count": task_count,
+            }))),
+            Err(error) => Ok(Some(json!({
+                "status": "blocked",
+                "cluster_id": cluster_id,
+                "error": excerpt(&redact_secret_like_text(&error.to_string()), 500),
+                "investigation_task_count": task_count,
             }))),
         }
     }
@@ -37477,6 +37613,23 @@ fn adapter_source_card_ids_from_result(result: &Value) -> Vec<String> {
             items
                 .iter()
                 .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn knowledge_cluster_ids_from_result(result: &Value) -> Vec<String> {
+    result
+        .get("cluster_ids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| validate_id(value).is_ok())
                 .map(ToOwned::to_owned)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
@@ -58143,6 +58296,15 @@ mod tests {
                 .and_then(Value::as_str),
             Some(projected.cluster.id.as_str())
         );
+        assert_eq!(
+            first.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("auto_knowledge_investigation_execution"))
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("enqueued")
+        );
         assert_eq!(store.list_digest_candidates().unwrap().len(), 1);
         assert!(
             store
@@ -58171,7 +58333,8 @@ mod tests {
             .as_ref()
             .expect("knowledge cluster investigation execution enqueue report");
         assert_eq!(investigation_execution_enqueue.inspected, 1);
-        assert_eq!(investigation_execution_enqueue.enqueued, 1);
+        assert_eq!(investigation_execution_enqueue.enqueued, 0);
+        assert_eq!(investigation_execution_enqueue.skipped, 1);
         assert_eq!(second.processed, 1);
         assert_eq!(
             second.jobs[0].kind,
@@ -58586,11 +58749,13 @@ mod tests {
     fn severe_resident_worker_runs_scheduled_backlog_then_expands_cluster() {
         // CLAIM: scheduled knowledge recurrence is not CLI-only: a due
         // knowledge_backlog watch source enqueues and executes backlog
-        // clustering, then the next worker pass expands the newly created
-        // cluster through the existing wiki/report/digest route.
+        // clustering, records the queued expansion follow-up, then the next
+        // worker pass expands the newly created cluster through the existing
+        // wiki/report/digest route and queues source-linked investigation.
         // ORACLE: first pass completes a knowledge_cluster_backlog job and
-        // advances source health; second pass skips the not-due backlog source
-        // but processes a knowledge_cluster_expand job for the created cluster.
+        // advances source health while recording an expansion enqueue; second
+        // pass skips duplicate expansion enqueue but processes the already
+        // queued knowledge_cluster_expand job for the created cluster.
         // SEVERITY: Severe because autonomous recurrence can otherwise be a
         // schedule row that never drives durable wiki/digest work.
         let store = test_store("knowledge-backlog-worker-recurrence");
@@ -58623,6 +58788,15 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(1)
         );
+        assert_eq!(
+            first.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("enqueued")
+        );
         let health = store
             .get_source_health("knowledge:source-card-backlog")
             .unwrap()
@@ -58645,7 +58819,8 @@ mod tests {
             .knowledge_cluster_expansion
             .expect("knowledge expansion enqueue report");
         assert_eq!(expansion.inspected, 1);
-        assert_eq!(expansion.enqueued, 1);
+        assert_eq!(expansion.enqueued, 0);
+        assert_eq!(expansion.skipped, 1);
         assert_eq!(second.processed, 1);
         assert_eq!(second.jobs[0].kind, "knowledge_cluster_expand");
         assert_eq!(second.jobs[0].status, "completed");
@@ -58656,6 +58831,15 @@ mod tests {
                 .and_then(|value| value.get("cluster_id"))
                 .and_then(Value::as_str),
             Some(cluster.id.as_str())
+        );
+        assert_eq!(
+            second.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("auto_knowledge_investigation_execution"))
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("enqueued")
         );
         assert!(store.list_digest_candidates().unwrap().len() >= 1);
         assert!(
@@ -59125,6 +59309,157 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
                         && decision.action == "worker.enqueue"
                         && decision.source.as_deref() == Some("knowledge_cluster_backlog")
                 })
+        );
+    }
+
+    #[test]
+    fn severe_worker_chains_backlog_expansion_and_investigation_in_one_pass() {
+        // CLAIM: Once source cards reach the shared backlog, the resident worker
+        // can continue through clustering, wiki/digest expansion, and source-
+        // linked investigation execution in the same bounded pass when capacity
+        // and policy allow it.
+        // ORACLE: one worker run processes backlog -> expansion -> execution,
+        // each prior job result names the auto-enqueued follow-up, and durable
+        // wiki/report/digest/research artifacts exist.
+        // SEVERITY: Severe because a pipeline that requires hidden extra manual
+        // ticks after each phase can look autonomous while still being brittle.
+        let store = test_store("worker-same-pass-knowledge-chain");
+        seed_knowledge_source_card(
+            &store,
+            "same-pass-openai-package",
+            "Same pass chain evidence says OpenAI published an agent package and developers connected it to MCP workflows.",
+        );
+        seed_knowledge_source_card(
+            &store,
+            "same-pass-sdk-reaction",
+            "Same pass chain evidence says independent developers compared the OpenAI release with MCP agent workflow infrastructure.",
+        );
+        store
+            .enqueue_knowledge_cluster_backlog_job(50, 2, 1)
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert_eq!(worker.processed, 3);
+        assert_eq!(worker.completed, 3);
+        assert_eq!(worker.jobs[0].kind, "knowledge_cluster_backlog");
+        assert_eq!(worker.jobs[1].kind, "knowledge_cluster_expand");
+        assert_eq!(
+            worker.jobs[2].kind,
+            "knowledge_cluster_investigation_execute"
+        );
+
+        let backlog_auto = worker.jobs[0]
+            .result_json
+            .as_ref()
+            .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
+            .expect("backlog job should record auto expansion enqueue");
+        assert_eq!(backlog_auto["status"], "enqueued");
+        assert_eq!(
+            backlog_auto
+                .get("enqueued")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        let expansion_auto = worker.jobs[1]
+            .result_json
+            .as_ref()
+            .and_then(|value| value.get("auto_knowledge_investigation_execution"))
+            .expect("expansion job should record auto investigation execution enqueue");
+        assert_eq!(expansion_auto["status"], "enqueued");
+        assert_eq!(
+            worker.jobs[2]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("executed_task_count"))
+                .and_then(Value::as_u64),
+            Some(4)
+        );
+        assert_eq!(store.list_digest_candidates().unwrap().len(), 1);
+        assert!(
+            store
+                .list_knowledge_reports(10)
+                .unwrap()
+                .iter()
+                .any(|report| report.status == "draft")
+        );
+        let execution_result = worker.jobs[2].result_json.as_ref().unwrap();
+        let run_id = execution_result
+            .get("research_run_id")
+            .and_then(Value::as_str)
+            .expect("research run id");
+        assert_eq!(
+            store
+                .list_research_artifacts(run_id)
+                .unwrap()
+                .iter()
+                .filter(
+                    |artifact| artifact.artifact_type == "knowledge_cluster_investigation_artifact"
+                )
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn severe_backlog_auto_expansion_is_policy_visible_and_no_hidden_followup() {
+        // CLAIM: Backlog completion may enqueue expansion, but only through the
+        // normal worker.enqueue policy boundary.
+        // ORACLE: with expansion enqueue denied, the backlog job completes with a
+        // redacted blocked auto-expansion result and no expansion job is written.
+        // SEVERITY: Severe because automatic chaining must not turn into an
+        // implicit policy bypass.
+        let store = test_store("worker-chain-expansion-policy-deny");
+        seed_knowledge_source_card(
+            &store,
+            "chain-policy-openai",
+            "Chain policy evidence says OpenAI package release clustering should be blocked before expansion enqueue.",
+        );
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-backlog-job"
+effect = "allow"
+action = "worker.enqueue"
+source = "knowledge_cluster_backlog"
+reason = "allow backlog job for policy-denial proof"
+
+[[rules]]
+id = "deny-expansion-job"
+effect = "deny"
+action = "worker.enqueue"
+source = "knowledge_cluster_expand"
+reason = "block expansion enqueue token=sk-chain-secret"
+"#,
+        );
+        store
+            .enqueue_knowledge_cluster_backlog_job(50, 1, 5)
+            .unwrap();
+
+        let worker = store.run_worker_once(3).unwrap();
+        assert_eq!(worker.processed, 1);
+        assert_eq!(worker.jobs[0].kind, "knowledge_cluster_backlog");
+        assert_eq!(worker.jobs[0].status, "completed");
+        let auto = worker.jobs[0]
+            .result_json
+            .as_ref()
+            .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
+            .expect("blocked auto expansion status");
+        assert_eq!(auto["status"], "blocked");
+        let errors = auto
+            .get("errors")
+            .and_then(Value::as_array)
+            .expect("blocked errors");
+        let error = errors[0].get("error").and_then(Value::as_str).unwrap_or("");
+        assert!(error.contains("policy denied worker.enqueue"), "{error}");
+        assert!(!error.contains("sk-chain-secret"), "{error}");
+        assert!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .all(|job| job.kind != "knowledge_cluster_expand")
         );
     }
 

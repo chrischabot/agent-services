@@ -291,18 +291,20 @@ PR, implementation note, or final report:
       shared clusters and scheduled digest routing, but it still is not
       wall-clock resident-service recurrence or live external inbox delivery.
       Shared knowledge wall-clock recurrence proof
-      `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081032Z-11178/proof-packet.json`
+      `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081914Z-31980/proof-packet.json`
       then proved a bounded resident `worker run --max-ticks 80` loop, running
       over 21 seconds of wall-clock time in a copied production-data home,
       detects the due shared backlog watch source, clusters copied source cards,
       expands a shared cluster, writes a wiki page/report/editorial-linked
-      digest candidate, accepts explicit proof-harness approval while the same
-      worker loop is still alive, sends the scheduled digest through the
+      digest candidate, auto-approves it through explicit
+      `digest_candidate.auto_approve` policy while the same worker loop is still
+      alive, sends the scheduled digest through the
       controlled email provider, writes heartbeat state, and exposes the
       cluster/report/digest/delivery in ops. This closes the foreground
-      `run-once` mirage for the copied-home shared knowledge digest path. It is
-      still not multi-day launchd/systemd operation, live external inbox
-      recurrence, autonomous approval, or production monitoring.
+      `run-once` and manual-review mirages for the copied-home shared knowledge
+      digest path. It is still not multi-day launchd/systemd operation, live
+      external inbox recurrence, broad semantic/model clustering, or production
+      monitoring.
       X provider fetches now share a local-proof bearer freshness path: recent
       search, bookmark import, following/watch rebuild, and watch-source
       monitor refresh an expired stored `X_BEARER_TOKEN` through stored
@@ -320,9 +322,8 @@ PR, implementation note, or final report:
       Remaining work is broad live fresh primary-source acquisition,
       production-data semantic/model clustering, broad X quota/tier/live
       coverage beyond the capped smoke, multi-day scheduled source recurrence,
-      live external delivery recurrence, autonomous approval policy,
-      production monitoring, richer model-backed writer/editor synthesis, and
-      broader ops UI repair controls.
+      live external delivery recurrence, production monitoring, richer
+      model-backed writer/editor synthesis, and broader ops UI repair controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

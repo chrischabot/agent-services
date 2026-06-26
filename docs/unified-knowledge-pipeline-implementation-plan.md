@@ -148,7 +148,7 @@ Current implemented bridge slice:
 - Preserved production-data foreground proof:
   `.arcwell-dev/proofs/knowledge-live-e2e-proof-20260625T173937Z-37414/artifacts/proof-packet.json`.
 - Preserved bounded resident recurrence proof:
-  `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081032Z-11178/proof-packet.json`.
+  `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081914Z-31980/proof-packet.json`.
 
 What the bridge proof showed:
 
@@ -1246,11 +1246,11 @@ Add preserved proof scripts:
       recurrence.
 - [x] `scripts/knowledge-wall-clock-recurrence-proof`
       passed at
-      `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081032Z-11178/proof-packet.json`:
+      `.arcwell-dev/proofs/knowledge-wall-clock-recurrence-proof-20260626T081914Z-31980/proof-packet.json`:
       copied real source cards -> scheduled backlog watch source -> one
       bounded resident worker loop over 80 wall-clock ticks -> backlog cluster
-      -> wiki/report expansion -> editorial-linked digest candidate -> explicit
-      proof-harness approval while the same worker was alive -> scheduled
+      -> wiki/report expansion -> editorial-linked digest candidate ->
+      policy-gated auto-approval while the same worker was alive -> scheduled
       controlled-provider delivery -> heartbeat and ops visibility. It is not
       multi-day service operation or live external inbox recurrence.
 - [ ] `scripts/knowledge-ops-browser-smoke`

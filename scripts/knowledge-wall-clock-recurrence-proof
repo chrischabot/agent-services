@@ -208,6 +208,15 @@ reason = "allow resident wall-clock proof worker enqueue"
 priority = 20
 
 [[rules]]
+id = "allow-knowledge-wall-clock-auto-approval"
+effect = "allow"
+action = "digest_candidate.auto_approve"
+package = "arcwell-librarian"
+source = "knowledge_cluster_expand"
+reason = "allow controlled wall-clock shared knowledge digest auto-approval after quality gate"
+priority = 20
+
+[[rules]]
 id = "allow-knowledge-wall-clock-generic-delivery"
 effect = "allow"
 action = "digest_candidate.deliver"
@@ -272,16 +281,14 @@ log "starting bounded resident worker loop: max_ticks=$MAX_TICKS idle_sleep_ms=$
 WORKER_PID=$!
 printf '%s\n' "$WORKER_PID" >"$ARTIFACT_DIR/worker.pid"
 
-log "waiting for resident worker to create a shared-cluster digest candidate"
-CANDIDATE_ID="$(wait_for_sql_value "expansion-created digest candidate" 18 "SELECT digest_candidate_id FROM knowledge_editorial_decisions WHERE digest_candidate_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1;")"
+log "waiting for resident worker to create and auto-approve a shared-cluster digest candidate"
+CANDIDATE_ID="$(wait_for_sql_value "auto-approved expansion-created digest candidate" 18 "SELECT ked.digest_candidate_id FROM knowledge_editorial_decisions ked JOIN digest_candidates dc ON dc.id = ked.digest_candidate_id WHERE ked.digest_candidate_id IS NOT NULL AND dc.status = 'approved' AND dc.review_status = 'approved' ORDER BY ked.updated_at DESC LIMIT 1;")"
 CLUSTER_ID="$(query_one "SELECT cluster_id FROM knowledge_editorial_decisions WHERE digest_candidate_id = '$CANDIDATE_ID' ORDER BY updated_at DESC LIMIT 1;")"
 WIKI_PAGE_ID="$(query_one "SELECT wiki_page_id FROM knowledge_editorial_decisions WHERE digest_candidate_id = '$CANDIDATE_ID' ORDER BY updated_at DESC LIMIT 1;")"
 REPORT_ID="$(query_one "SELECT json_extract(metadata_json, '$.report_id') FROM knowledge_editorial_decisions WHERE digest_candidate_id = '$CANDIDATE_ID' ORDER BY updated_at DESC LIMIT 1;")"
 [ -n "$CLUSTER_ID" ] || fail "candidate has no linked cluster"
 [ -n "$WIKI_PAGE_ID" ] || fail "candidate has no linked wiki page"
-
-log "approving the worker-created digest candidate while resident worker remains active"
-"$ARCWELL_BIN" digest-candidate-approve --json "{\"id\":\"$CANDIDATE_ID\",\"reviewed_by\":\"knowledge-wall-clock-recurrence-proof\",\"note\":\"approved while resident worker loop was still running\"}" >"$ARTIFACT_DIR/candidate-approved.json"
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" "SELECT id, status, review_status, COALESCE(reviewed_by,''), printf('%.6f', score) FROM digest_candidates WHERE id = '$CANDIDATE_ID';" >"$ARTIFACT_DIR/candidate-after-expansion.tsv"
 
 log "creating digest alert schedule while resident worker remains active"
 "$ARCWELL_BIN" digest-alert-schedule-create --json "{\"name\":\"knowledge wall clock digest $RUN_STAMP\",\"channel\":\"email\",\"recipient_ref\":\"email:$RECIPIENT\",\"min_score\":0,\"max_candidates\":1,\"interval_hours\":24}" >"$ARTIFACT_DIR/digest-schedule.json"
@@ -359,7 +366,14 @@ const after = readCounts("counts-after.tsv");
 const workerLines = readJsonl("worker-loop.jsonl");
 const final = workerLines[workerLines.length - 1];
 const nonFinalReports = workerLines.slice(0, -1);
-const candidate = read("candidate-approved.json");
+const candidateFields = readText("candidate-after-expansion.tsv").trim().split("|");
+const candidate = {
+  id: candidateFields[0],
+  status: candidateFields[1],
+  review_status: candidateFields[2],
+  reviewed_by: candidateFields[3],
+  score: Number(candidateFields[4]),
+};
 const schedule = read("digest-schedule.json");
 const ticks = read("digest-ticks.json");
 const deliveries = read("digest-deliveries.json");
@@ -378,7 +392,8 @@ assert(nonFinalReports.some((report) => (report.jobs || []).some((job) => job.ki
 assert(nonFinalReports.some((report) => (report.jobs || []).some((job) => job.kind === "knowledge_cluster_expand" && job.status === "completed")), "resident loop should complete expansion job", nonFinalReports);
 assert(nonFinalReports.some((report) => (report.jobs || []).some((job) => job.kind === "digest_scheduled_alert" && job.status === "completed")), "resident loop should complete scheduled digest job", nonFinalReports);
 assert(!stderr.match(/worker run-once/i), "proof must use worker run, not worker run-once", stderr);
-assert(candidate.id === candidateId && candidate.review_status === "approved", "worker-created candidate should be approved", candidate);
+assert(candidate.id === candidateId && candidate.status === "approved" && candidate.review_status === "approved", "worker-created candidate should be auto-approved before scheduling", candidate);
+assert(candidate.reviewed_by === "arcwell-knowledge-auto-approval", "candidate should be approved by the shared knowledge auto-approval path", candidate);
 assert(schedule.id === scheduleId && schedule.status === "active", "digest schedule should be active", schedule);
 assert(ticks.length === 1 && ticks[0].status === "sent", "resident loop should record one sent digest tick", ticks);
 assert(ticks[0].candidate_ids.includes(candidateId), "tick should include worker-created candidate", ticks[0]);
@@ -431,7 +446,7 @@ const proofPacket = {
     due_backlog_watch_source_detected_by_worker: true,
     shared_cluster_created_by_worker: true,
     wiki_report_digest_created_by_worker: true,
-    candidate_approved_while_worker_still_running: true,
+    candidate_auto_approved_by_policy_while_worker_still_running: true,
     scheduled_digest_sent_by_same_worker_loop: true,
     human_readable_digest_body_checked: true,
     ops_visibility_checked: true,
@@ -439,7 +454,7 @@ const proofPacket = {
   remaining_risk: [
     "This proof uses copied local source-card data and a controlled local email provider.",
     "It proves a bounded resident loop over wall-clock seconds, not a multi-day production daemon or real external inbox delivery.",
-    "Digest candidate approval is still an explicit review step performed by the proof harness.",
+    "Digest candidate auto-approval is explicitly policy-enabled in the proof home and still does not bypass delivery policy or channel authorization.",
   ],
 };
 fs.writeFileSync(path.join(proofRoot, "proof-packet.json"), `${JSON.stringify(proofPacket, null, 2)}\n`);

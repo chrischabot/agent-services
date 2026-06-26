@@ -17012,10 +17012,20 @@ impl Store {
                 "create_digest": create_digest,
             }),
         })?;
-        let digest_candidate = if create_digest {
-            Some(self.create_digest_candidate(&cluster.topic, &cluster.source_card_ids)?)
+        let (digest_candidate, auto_approval) = if create_digest {
+            let candidate =
+                self.create_digest_candidate(&cluster.topic, &cluster.source_card_ids)?;
+            let (candidate, approval) =
+                self.maybe_auto_approve_knowledge_digest_candidate(&cluster, &report, &candidate)?;
+            (Some(candidate), approval)
         } else {
-            None
+            (
+                None,
+                json!({
+                    "status": "skipped",
+                    "reason": "digest creation disabled"
+                }),
+            )
         };
         let decision = self.record_knowledge_editorial_decision(KnowledgeEditorialDecisionInput {
             cluster_id: cluster.id.clone(),
@@ -17044,6 +17054,7 @@ impl Store {
                 "proof_level": "Local Proof: deterministic source-card-backed shared cluster expansion",
                 "report_id": report.id,
                 "wiki_page_title": wiki_title,
+                "digest_auto_approval": auto_approval,
             }),
         })?;
         let investigation = self.create_knowledge_cluster_investigation(&cluster.id)?;
@@ -17060,8 +17071,126 @@ impl Store {
             metadata: json!({
                 "origin": "knowledge_cluster_editor_v1",
                 "create_digest": create_digest,
+                "digest_auto_approval": auto_approval,
             }),
         })
+    }
+
+    fn maybe_auto_approve_knowledge_digest_candidate(
+        &self,
+        cluster: &KnowledgeCluster,
+        report: &KnowledgeReport,
+        candidate: &DigestCandidate,
+    ) -> Result<(DigestCandidate, Value)> {
+        if candidate.review_status == "approved" && candidate.status == "approved" {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "already_approved",
+                    "candidate_id": candidate.id,
+                }),
+            ));
+        }
+        if candidate.review_status != "unreviewed" {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "skipped",
+                    "reason": "candidate_already_reviewed",
+                    "candidate_status": candidate.status,
+                    "review_status": candidate.review_status,
+                }),
+            ));
+        }
+        if candidate.status != "ready" || candidate.score < 0.75 {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "skipped",
+                    "reason": "candidate_below_auto_approval_threshold",
+                    "candidate_status": candidate.status,
+                    "score": candidate.score,
+                    "minimum_score": 0.75,
+                }),
+            ));
+        }
+        if candidate.source_card_ids.len() < 2 {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "skipped",
+                    "reason": "auto_approval_requires_multiple_source_cards",
+                    "source_card_count": candidate.source_card_ids.len(),
+                }),
+            ));
+        }
+        if report.status != "draft"
+            || report.source_card_ids.len() != candidate.source_card_ids.len()
+        {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "skipped",
+                    "reason": "report_candidate_evidence_mismatch",
+                    "report_status": report.status,
+                    "report_source_card_count": report.source_card_ids.len(),
+                    "candidate_source_card_count": candidate.source_card_ids.len(),
+                }),
+            ));
+        }
+
+        let decision = self.policy_check(PolicyRequest {
+            action: "digest_candidate.auto_approve".to_string(),
+            package: Some("arcwell-librarian".to_string()),
+            provider: None,
+            source: Some("knowledge_cluster_expand".to_string()),
+            channel: None,
+            subject: Some(candidate.id.clone()),
+            target: Some(cluster.id.clone()),
+            projected_usd: None,
+            metadata: json!({
+                "cluster_id": cluster.id,
+                "cluster_topic": cluster.topic,
+                "candidate_id": candidate.id,
+                "candidate_score": candidate.score,
+                "candidate_reason": candidate.reason,
+                "source_card_count": candidate.source_card_ids.len(),
+                "report_id": report.id,
+                "report_status": report.status,
+                "quality_gate": "passed",
+                "boundary": "Auto-approval only marks the digest candidate as reviewed; delivery still requires digest_candidate.deliver policy and channel authorization.",
+            }),
+            untrusted_excerpt: Some(cluster.topic.clone()),
+        })?;
+        if !decision.allowed {
+            return Ok((
+                candidate.clone(),
+                json!({
+                    "status": "blocked",
+                    "reason": redact_secret_like_text(&decision.reason),
+                    "policy_decision_id": decision.id,
+                    "policy_effect": decision.effect,
+                    "matched_rule_id": decision.matched_rule_id,
+                }),
+            ));
+        }
+
+        let reviewed = self.approve_digest_candidate(
+            &candidate.id,
+            Some("arcwell-knowledge-auto-approval"),
+            Some("Auto-approved after shared knowledge wiki/report quality gate and explicit digest_candidate.auto_approve policy."),
+        )?;
+        Ok((
+            reviewed,
+            json!({
+                "status": "approved",
+                "reviewed_by": "arcwell-knowledge-auto-approval",
+                "policy_decision_id": decision.id,
+                "matched_rule_id": decision.matched_rule_id,
+                "candidate_score": candidate.score,
+                "source_card_count": candidate.source_card_ids.len(),
+            }),
+        ))
     }
 
     pub fn create_knowledge_cluster_investigation(
@@ -74785,30 +74914,18 @@ priority = 10
         assert!(projected.cluster.source_card_ids.contains(&release.id));
         assert!(projected.cluster.source_card_ids.contains(&reaction.id));
 
-        let expansion = store
-            .expand_knowledge_cluster(&projected.cluster.id, true)
-            .unwrap();
-        assert!(expansion.quality_findings.is_empty());
-        let digest = expansion
-            .digest_candidate
-            .as_ref()
-            .expect("shared expansion should create digest candidate");
-        assert_eq!(
-            expansion.editorial_decision.digest_candidate_id.as_deref(),
-            Some(digest.id.as_str())
-        );
-        assert_eq!(digest.source_card_ids.len(), 2);
-        store
-            .approve_digest_candidate(
-                &digest.id,
-                Some("shared-knowledge-schedule-test"),
-                Some("route shared cluster through schedule"),
-            )
-            .unwrap();
-
         fs::write(
             store.paths.home.join("arcwell-policy.toml"),
             r#"
+[[rules]]
+id = "allow-shared-knowledge-auto-approval"
+effect = "allow"
+action = "digest_candidate.auto_approve"
+package = "arcwell-librarian"
+source = "knowledge_cluster_expand"
+reason = "allow source-card-backed shared knowledge reports to auto-approve digest candidates"
+priority = 20
+
 [[rules]]
 id = "allow-shared-knowledge-digest-worker-enqueue"
 effect = "allow"
@@ -74841,6 +74958,43 @@ priority = 10
 "#,
         )
         .unwrap();
+
+        let expansion = store
+            .expand_knowledge_cluster(&projected.cluster.id, true)
+            .unwrap();
+        assert!(expansion.quality_findings.is_empty());
+        assert_eq!(
+            expansion
+                .metadata
+                .get("digest_auto_approval")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("approved")
+        );
+        let digest = expansion
+            .digest_candidate
+            .as_ref()
+            .expect("shared expansion should create digest candidate");
+        assert_eq!(
+            expansion.editorial_decision.digest_candidate_id.as_deref(),
+            Some(digest.id.as_str())
+        );
+        assert_eq!(digest.source_card_ids.len(), 2);
+        assert_eq!(digest.status, "approved");
+        assert_eq!(digest.review_status, "approved");
+        assert_eq!(
+            digest.reviewed_by.as_deref(),
+            Some("arcwell-knowledge-auto-approval")
+        );
+        assert!(
+            store
+                .list_policy_decisions(10)
+                .unwrap()
+                .iter()
+                .any(|decision| decision.allowed
+                    && decision.action == "digest_candidate.auto_approve"
+                    && decision.source.as_deref() == Some("knowledge_cluster_expand"))
+        );
         store
             .authorize_channel_subject("telegram", "telegram:chat:456", false, false, true)
             .unwrap();
@@ -74914,6 +75068,119 @@ priority = 10
                 .len(),
             1,
             "shared knowledge digest schedule should suppress immediate duplicate tick"
+        );
+    }
+
+    #[test]
+    fn severe_shared_knowledge_digest_auto_approval_requires_policy_and_threshold() {
+        // CLAIM: shared-cluster digest auto-approval is a policy-gated review
+        // action over high-confidence reports, not a blanket approval shortcut.
+        // ORACLE: absent policy records a blocked auto-approval and keeps a
+        // high-scoring candidate unreviewed; explicit allow policy still cannot
+        // approve a low-scoring/pending candidate.
+        // SEVERITY: Severe because automatic digest review can otherwise turn
+        // generated or weak clusters into unattended alerts.
+        let blocked_store = test_store("shared-knowledge-auto-approval-blocked");
+        seed_knowledge_source_card(
+            &blocked_store,
+            "blocked-openai-release",
+            "Blocked auto approval evidence says OpenAI published an agent package release with MCP workflows.",
+        );
+        seed_knowledge_source_card(
+            &blocked_store,
+            "blocked-hn-reaction",
+            "Blocked auto approval evidence says developers discussed the OpenAI release as agent infrastructure.",
+        );
+        let blocked_projection = blocked_store
+            .project_knowledge_from_source_card_query(
+                "Blocked auto approval evidence",
+                Some("OpenAI release blocked auto approval"),
+                10,
+            )
+            .unwrap();
+        let blocked_expansion = blocked_store
+            .expand_knowledge_cluster(&blocked_projection.cluster.id, true)
+            .unwrap();
+        let blocked_digest = blocked_expansion.digest_candidate.as_ref().unwrap();
+        assert_eq!(blocked_digest.status, "ready");
+        assert_eq!(blocked_digest.review_status, "unreviewed");
+        assert_eq!(
+            blocked_expansion
+                .metadata
+                .get("digest_auto_approval")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("blocked")
+        );
+        assert!(
+            blocked_store
+                .list_policy_decisions(10)
+                .unwrap()
+                .iter()
+                .any(|decision| !decision.allowed
+                    && decision.action == "digest_candidate.auto_approve"
+                    && decision.source.as_deref() == Some("knowledge_cluster_expand"))
+        );
+
+        let low_store = test_store("shared-knowledge-auto-approval-low-score");
+        seed_knowledge_source_card(
+            &low_store,
+            "low-score-first",
+            "Low score auto approval evidence says routine internal notes were updated.",
+        );
+        seed_knowledge_source_card(
+            &low_store,
+            "low-score-second",
+            "Low score auto approval evidence says another routine note changed.",
+        );
+        let low_projection = low_store
+            .project_knowledge_from_source_card_query(
+                "Low score auto approval evidence",
+                Some("Routine note update"),
+                10,
+            )
+            .unwrap();
+        write_policy(
+            &low_store,
+            r#"
+[[rules]]
+id = "allow-low-score-auto-approval-attempt"
+effect = "allow"
+action = "digest_candidate.auto_approve"
+package = "arcwell-librarian"
+source = "knowledge_cluster_expand"
+reason = "policy allow cannot override local quality threshold"
+"#,
+        );
+        let low_expansion = low_store
+            .expand_knowledge_cluster(&low_projection.cluster.id, true)
+            .unwrap();
+        let low_digest = low_expansion.digest_candidate.as_ref().unwrap();
+        assert_eq!(low_digest.status, "pending");
+        assert_eq!(low_digest.review_status, "unreviewed");
+        assert_eq!(
+            low_expansion
+                .metadata
+                .get("digest_auto_approval")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("skipped")
+        );
+        assert_eq!(
+            low_expansion
+                .metadata
+                .get("digest_auto_approval")
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str),
+            Some("candidate_below_auto_approval_threshold")
+        );
+        assert!(
+            low_store
+                .list_policy_decisions(10)
+                .unwrap()
+                .iter()
+                .all(|decision| decision.action != "digest_candidate.auto_approve"),
+            "low-confidence candidates should not even spend a policy decision"
         );
     }
 

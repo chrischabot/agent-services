@@ -5,7 +5,8 @@ Date: 2026-06-25
 Status: design plus implemented foreground bridge slices. This document does
 not claim that the unified cross-source pipeline is operational. The shared
 knowledge substrate and a live source-card/radar projection bridge are now
-implemented and tested; scheduled recurrence, wiki expansion, digest routing,
+implemented and tested; bounded scheduled recurrence exists for selected
+knowledge paths, while multi-day service recurrence, live external delivery,
 broad production-data semantic clustering, and broad provider coverage remain
 open.
 
@@ -190,9 +191,23 @@ Current implemented bridge slice:
   unpromoted model-origin clusters cannot be scheduled, a due watch source
   enqueues exactly one `knowledge_cluster_model_write` job only after promotion
   and worker-enqueue policy, deterministic expansion is suppressed while that
-  writer job is active, source health advances only after durable writer output,
-  terminal writer decisions suppress recurrence, and active writer jobs do not
-  create retry storms. This is not a broad autonomous model-writing sweep.
+  writer job is active and after terminal model-writer decisions, source health
+  advances only after durable writer output, terminal writer decisions suppress
+  recurrence, and active or provider-policy-denied writer jobs do not create
+  retry storms. Fresh scheduled proof
+  `.arcwell-dev/proofs/knowledge-model-writer-scheduled-proof-20260626T095734Z-12775/artifacts/proof-packet.json`
+  ran a bounded 50-tick resident worker over a proof-scoped promoted cluster,
+  detected the due watch source, completed live OpenAI `gpt-4.1-mini` writer
+  job `cbec70a7-5e54-4f76-b682-7197f1794c56`, recorded cost decision
+  `eafc92b1-56ca-4fb7-932b-013897bb5faf`, wrote wiki page
+  `knowledge-agent-tooling-and-mcp-infrastructure-model-draft-782645b5`,
+  report `krpt-66297b3e919fa209`, digest candidate
+  `98d9a313-408b-428b-a133-1c20a812cad5`, advanced source health only after
+  durable output, completed one local investigation-execution follow-through
+  job without enqueue-deferral churn, created no deterministic expansion job or
+  duplicate active writer job, delivered nothing externally, and
+  browser-checked authenticated desktop/mobile `/ops/ui`. This is not a broad
+  autonomous model-writing sweep.
 - `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
   decisions, reports, entities, relations, adapter runs, and entity-resolution
   proposals.
@@ -250,11 +265,10 @@ What it still does not prove:
   worker candidate-only path, while the promotion/expansion proof is still a
   foreground provider attempt over proof fixture data with one policy-gated
   promoted expansion.
-- Broad production-corpus model-backed writer/editor synthesis, live scheduled
-  model-writer recurrence, and broad automatic model-writing sweeps. The live
-  writer proof is source-card-gated and accepted over a proof-scoped promoted
-  cluster; the scheduled-writer path has local explicit cluster-scoped proof,
-  not broad autonomous production analyst quality.
+- Broad production-corpus model-backed writer/editor synthesis and broad
+  automatic model-writing sweeps. The live foreground and scheduled writer
+  proofs are source-card-gated and accepted over proof-scoped promoted
+  clusters, not broad autonomous production analyst quality.
 - Autonomous approval, broad wiki page update decisions, and live external
   delivery from shared knowledge reports.
 - Broad ops repair controls.
@@ -1185,7 +1199,9 @@ Refuting tests:
       source-card citation, uncertainty, and wiki/report quality gates.
 - [x] Add explicit cluster-scoped scheduled model writer watch source that
       reuses the same writer job and suppresses duplicate deterministic
-      expansion while active.
+      expansion while active and after terminal model-writer decisions.
+- [x] Add live OpenAI scheduled model-writer proof through a bounded resident
+      worker loop over a proof-scoped promoted cluster.
 - [ ] Add cluster revisioning or metadata to avoid stale report reuse.
 
 Refuting tests:
@@ -1209,6 +1225,9 @@ Refuting tests:
       closed with no wiki/report/digest writes.
 - [x] Scheduled model writing cannot be configured for unpromoted model-origin
       clusters and does not create duplicate active writer jobs.
+- [x] Live OpenAI scheduled model-writer proof completes from due watch source
+      through resident worker, source-health advancement, local investigation
+      follow-through, ops/browser visibility, and no external delivery.
 
 ### Milestone 5: Editorial Decision Worker
 
@@ -1331,8 +1350,19 @@ Add preserved proof scripts:
       writer denial -> explicit policy promotion -> live OpenAI model-backed
       wiki/report/digest-candidate creation -> no external delivery ->
       authenticated desktop/mobile ops visibility. This is not broad
-      production-corpus writer quality, live scheduled model-writer recurrence,
-      or broad automatic model-writing sweeps.
+      production-corpus writer quality or broad automatic model-writing sweeps.
+- [x] `scripts/knowledge-model-writer-scheduled-proof`
+      passed at
+      `.arcwell-dev/proofs/knowledge-model-writer-scheduled-proof-20260626T095734Z-12775/artifacts/proof-packet.json`:
+      proof source cards -> review-only model-origin cluster -> pre-promotion
+      schedule denial -> explicit policy promotion -> due `knowledge_model_write`
+      watch source -> bounded resident worker -> live OpenAI model-backed
+      wiki/report/digest-candidate creation -> source-health advancement ->
+      local investigation-execution follow-through -> no deterministic
+      expansion job -> no external delivery -> authenticated desktop/mobile ops
+      visibility. This is not broad production-corpus writer quality,
+      multi-day service recurrence, external delivery, or broad automatic
+      model-writing sweeps.
 - [x] `scripts/knowledge-digest-recurrence-proof`
       passed at
       `.arcwell-dev/proofs/knowledge-digest-recurrence-proof-20260626T075355Z-75160/proof-packet.json`:

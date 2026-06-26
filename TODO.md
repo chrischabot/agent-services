@@ -1,6 +1,6 @@
 # Arcwell Remaining Work
 
-Last updated: 2026-06-25
+Last updated: 2026-06-26
 
 This file is intentionally only unfinished work. Completed historical checklist
 items were removed. Existing unchecked items from the prior `TODO.md` have been
@@ -355,18 +355,33 @@ PR, implementation note, or final report:
       digest writes except a blocked editorial decision where appropriate. This
       closes the "model writer scaffold exists but writes ungated link dumps"
       mirage for a proof-scoped corpus. It is still not broad production-corpus
-      model-writing quality, live scheduled model-writer recurrence, broad
-      automatic cluster sweeps, multi-day service operation, or external
-      delivery. The next slice adds explicit cluster-scoped
-      `arcwell knowledge schedule-cluster-model-write` recurrence: severe tests
-      prove unpromoted model-origin clusters cannot be scheduled, due
-      `knowledge_model_write` watch sources enqueue exactly one writer job after
-      promotion and worker-enqueue policy, deterministic expansion is suppressed
-      while that writer job is active, source health advances only after durable
-      model-writer output, terminal decisions suppress recurrence, and active
-      writer jobs do not create retry storms. This promotes only Local Proof for
-      explicit cluster-scoped scheduling; live scheduled model-writer recurrence
-      and broad automatic production sweeps remain open.
+      model-writing quality, broad automatic cluster sweeps, multi-day service
+      operation, or external delivery. The next slice adds explicit
+      cluster-scoped `arcwell knowledge schedule-cluster-model-write`
+      recurrence: severe tests prove unpromoted model-origin clusters cannot be
+      scheduled, due `knowledge_model_write` watch sources enqueue exactly one
+      writer job after promotion and worker-enqueue policy, deterministic
+      expansion is suppressed while that writer job is active and after
+      terminal model-writer decisions, source health advances only after durable
+      model-writer output, terminal decisions suppress recurrence, active and
+      provider-policy-denied writer jobs do not create retry storms, and cost/
+      output rows are not written on provider-policy denial. Fresh scheduled
+      proof
+      `.arcwell-dev/proofs/knowledge-model-writer-scheduled-proof-20260626T095734Z-12775/artifacts/proof-packet.json`
+      ran a bounded 50-tick resident worker over a proof-scoped promoted
+      cluster, detected the due `knowledge_model_write` watch source, completed
+      live OpenAI `gpt-4.1-mini` writer job
+      `cbec70a7-5e54-4f76-b682-7197f1794c56`, recorded cost decision
+      `eafc92b1-56ca-4fb7-932b-013897bb5faf`, wrote wiki page
+      `knowledge-agent-tooling-and-mcp-infrastructure-model-draft-782645b5`,
+      report `krpt-66297b3e919fa209`, digest candidate
+      `98d9a313-408b-428b-a133-1c20a812cad5`, advanced source-health only
+      after durable output, completed one local investigation-execution
+      follow-through job without enqueue-deferral churn, created no
+      deterministic expansion job or duplicate active writer job, delivered
+      nothing externally, and browser-checked authenticated desktop/mobile
+      `/ops/ui`. This is live scheduled proof for the proof-scoped
+      cluster-writer slice, not broad autonomous production analyst quality.
       The authenticated `/ops/ui` Knowledge Controls now also expose a
       CSRF/idempotency-protected model-cluster promotion action, double-gated by
       `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`
@@ -391,8 +406,7 @@ PR, implementation note, or final report:
       quota/tier/live coverage beyond the capped smoke, multi-day scheduled
       source recurrence, live external delivery recurrence, production
       monitoring, broad production-corpus model-backed writer/editor synthesis,
-      live scheduled model-writer recurrence, broad automatic model-writing
-      sweeps, and broader ops UI repair controls.
+      broad automatic model-writing sweeps, and broader ops UI repair controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

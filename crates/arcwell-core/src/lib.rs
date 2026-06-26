@@ -14074,6 +14074,13 @@ impl Store {
                 report.skipped += 1;
                 continue;
             }
+            if let Some(status) =
+                self.knowledge_cluster_model_writer_decision_status(&cluster.id)?
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                report.skipped += 1;
+                continue;
+            }
             if let Some(status) = self.knowledge_cluster_expansion_decision_status(&cluster.id)?
                 && matches!(status.as_str(), "completed" | "blocked")
             {
@@ -14333,7 +14340,10 @@ impl Store {
                 SELECT COUNT(*)
                 FROM wiki_jobs
                 WHERE kind = 'knowledge_cluster_model_write'
-                  AND status IN ('pending', 'running', 'deferred')
+                  AND (
+                    status IN ('pending', 'running', 'deferred')
+                    OR (status = 'failed' AND attempts < max_attempts)
+                  )
                   AND json_extract(input_json, '$.cluster_id') = ?1
                 "#,
                 params![cluster_id],
@@ -39522,6 +39532,7 @@ fn provider_network_source_for_job(kind: &str) -> &str {
         "ingest_rendered_page" => "rendered_page_snapshot",
         "x_import_bookmarks" => "x_import_bookmarks",
         "x_monitor_watch_source" => "x_monitor",
+        "knowledge_cluster_model_write" => "knowledge_cluster_writer",
         other => other,
     }
 }
@@ -62338,6 +62349,11 @@ priority = 20
 
         let second = store.enqueue_due_watch_source_jobs(10).unwrap();
         assert_eq!(second.enqueued, 0, "{second:?}");
+        let expansion_after_model_write = store
+            .enqueue_due_knowledge_cluster_expansion_jobs(10)
+            .unwrap();
+        assert_eq!(expansion_after_model_write.enqueued, 0);
+        assert_eq!(expansion_after_model_write.skipped, 1);
         assert!(
             store
                 .list_wiki_jobs()
@@ -62406,6 +62422,117 @@ priority = 20
             .enqueue_due_knowledge_cluster_expansion_jobs(10)
             .unwrap();
         assert_eq!(expansion_due.enqueued, 0, "{expansion_due:?}");
+        assert_eq!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_cluster_model_write")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn severe_scheduled_model_writer_provider_policy_denial_does_not_retry_storm() {
+        // CLAIM: a scheduled OpenAI model-writer job that fails provider policy
+        // leaves one retryable failed job and does not let the due watch source
+        // enqueue a fresh job every worker tick.
+        // ORACLE: provider policy denial happens before cost/output writes, and
+        // a second due-watch enqueue sees the retryable failed writer job and
+        // skips instead of creating another job.
+        // SEVERITY: Severe because a denied provider path otherwise becomes a
+        // local retry storm and can bury the real policy failure in dozens of
+        // duplicate jobs.
+        let store = test_store("knowledge-cluster-model-writer-policy-storm");
+        seed_knowledge_source_card(
+            &store,
+            "scheduled-deny-a",
+            "Scheduled policy denial evidence says a source-backed cluster is ready for a model writer.",
+        );
+        seed_knowledge_source_card(
+            &store,
+            "scheduled-deny-b",
+            "Scheduled policy denial evidence says another source supports the same cluster.",
+        );
+        let projected = store
+            .project_knowledge_from_source_card_query(
+                "Scheduled policy denial evidence",
+                Some("Scheduled policy denial writer cluster"),
+                10,
+            )
+            .unwrap();
+        let report_count_before = store.list_knowledge_reports(20).unwrap().len();
+        let digest_count_before = store.list_digest_candidates().unwrap().len();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-scheduled-deny-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+source = "knowledge_cluster_model_write"
+reason = "allow enqueue but deny provider network in severe test"
+priority = 20
+
+[[rules]]
+id = "deny-scheduled-writer-provider-network"
+effect = "deny"
+action = "provider.network"
+package = "arcwell-knowledge"
+provider = "openai"
+source = "knowledge_cluster_writer"
+reason = "deny scheduled writer provider path without creating retry storm"
+priority = 30
+"#,
+        );
+        store
+            .schedule_knowledge_cluster_model_write(
+                &projected.cluster.id,
+                "openai",
+                Some("gpt-test"),
+                None,
+                Some(2),
+                true,
+                "warm",
+                "active",
+            )
+            .unwrap();
+
+        let first = store.run_worker_once(1).unwrap();
+        assert_eq!(first.processed, 1, "{first:#?}");
+        assert_eq!(first.jobs[0].kind, "knowledge_cluster_model_write");
+        assert_eq!(first.jobs[0].status, "failed");
+        assert!(
+            first.jobs[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("policy denied provider.network"),
+            "{first:#?}"
+        );
+        assert!(store.list_cost_decisions(20).unwrap().is_empty());
+        assert_eq!(
+            store.list_knowledge_reports(20).unwrap().len(),
+            report_count_before
+        );
+        assert_eq!(
+            store.list_digest_candidates().unwrap().len(),
+            digest_count_before
+        );
+        assert!(
+            store
+                .list_policy_decisions(20)
+                .unwrap()
+                .iter()
+                .any(|decision| !decision.allowed
+                    && decision.action == "provider.network"
+                    && decision.source.as_deref() == Some("knowledge_cluster_writer"))
+        );
+
+        let due = store.enqueue_due_watch_source_jobs(10).unwrap();
+        assert_eq!(due.enqueued, 0, "{due:?}");
+        assert_eq!(due.skipped, 1, "{due:?}");
         assert_eq!(
             store
                 .list_wiki_jobs()

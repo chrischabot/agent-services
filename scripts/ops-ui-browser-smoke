@@ -127,6 +127,9 @@ agent-browser --session "$SESSION" eval "$(cat <<'JS'
     "Health score",
     "Radar Runs",
     "Radar run scores",
+    "Knowledge Controls",
+    "Schedule entity resolution",
+    "Queue due entity resolution",
     "Source Cards",
     "Ops browser launch benchmark",
     "Ops browser security release",
@@ -140,6 +143,12 @@ agent-browser --session "$SESSION" eval "$(cat <<'JS'
   if (!document.querySelector('input[name="q"]')) throw new Error("missing search input");
   if (!document.querySelector('input[name="status"]')) throw new Error("missing status input");
   if (!document.querySelector('select[name="sort"]')) throw new Error("missing sort select");
+  if (!document.querySelector('form[action="/ops/actions/knowledge/entity-resolution/schedule"]')) {
+    throw new Error("missing entity-resolution schedule control");
+  }
+  if (!document.querySelector('form[action="/ops/actions/knowledge/entity-resolution/enqueue-due"]')) {
+    throw new Error("missing entity-resolution enqueue control");
+  }
   if (!document.querySelector('[aria-label="radar score distribution"]')) {
     throw new Error("missing radar score distribution bar");
   }
@@ -245,6 +254,7 @@ const proof = {
     "desktop viewport has expected sections and no body horizontal overflow",
     "mobile viewport has expected sections and no body horizontal overflow",
     "filter form controls render",
+    "Knowledge entity-resolution schedule/enqueue controls render",
     "radar run score distribution bar renders",
     "radar-run detail link opens and exposes score_distribution/status_counts",
     "hostile source-card HTML remains inert text"

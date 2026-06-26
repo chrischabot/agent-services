@@ -1766,12 +1766,18 @@ enum KnowledgeSubcommand {
     InvestigateCluster {
         cluster_id: String,
     },
+    ExecuteClusterInvestigation {
+        cluster_id: String,
+    },
     EnqueueClusterExpansion {
         cluster_id: String,
         #[arg(long)]
         skip_digest: bool,
     },
     EnqueueClusterInvestigation {
+        cluster_id: String,
+    },
+    EnqueueClusterInvestigationExecution {
         cluster_id: String,
     },
     EnqueueBacklogClustering {
@@ -3802,12 +3808,18 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
         KnowledgeSubcommand::InvestigateCluster { cluster_id } => {
             print_json(&store.create_knowledge_cluster_investigation(&cluster_id)?)
         }
+        KnowledgeSubcommand::ExecuteClusterInvestigation { cluster_id } => {
+            print_json(&store.execute_knowledge_cluster_investigation(&cluster_id)?)
+        }
         KnowledgeSubcommand::EnqueueClusterExpansion {
             cluster_id,
             skip_digest,
         } => print_json(&store.enqueue_knowledge_cluster_expansion_job(&cluster_id, !skip_digest)?),
         KnowledgeSubcommand::EnqueueClusterInvestigation { cluster_id } => {
             print_json(&store.enqueue_knowledge_cluster_investigation_job(&cluster_id)?)
+        }
+        KnowledgeSubcommand::EnqueueClusterInvestigationExecution { cluster_id } => {
+            print_json(&store.enqueue_knowledge_cluster_investigation_execution_job(&cluster_id)?)
         }
         KnowledgeSubcommand::EnqueueBacklogClustering {
             max_source_cards,

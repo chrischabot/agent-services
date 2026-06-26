@@ -228,10 +228,16 @@ PR, implementation note, or final report:
       expanded a copied-production 65-source cluster into a wiki page, report,
       digest candidate, `deep_open` research run, four pending research tasks,
       and 65 research-run source links. This promotes durable investigation
-      planning from shared clusters only; task execution, autonomous primary
-      source acquisition, accepted model synthesis, and recurrence proofs remain
-      open.
-      Remaining work is investigation task execution, broad production-data
+      planning from shared clusters only.
+      Investigation execution proof
+      `.arcwell-dev/proofs/knowledge-cluster-investigation-execution-production-proof-20260626T062000Z/artifacts/proof-packet.md`
+      then executed that copied-production cluster into four completed role
+      runs, four human-readable source-card-cited artifacts, run status
+      `investigation_evidence_ready`, no quality findings, no hostile source
+      instruction leakage, and replay with zero new task execution. This is
+      deterministic task-artifact execution only; autonomous primary-source
+      acquisition, accepted model synthesis, and recurrence proofs remain open.
+      Remaining work is fresh primary-source acquisition, broad production-data
       semantic/model clustering, X credential-refresh live proof, wall-clock
       scheduled source recurrence, external delivery recurrence, richer
       model-backed writer/editor synthesis, and broader ops UI repair controls.

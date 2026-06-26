@@ -5997,6 +5997,10 @@ async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
             post(http_ops_knowledge_cluster_expansions_enqueue),
         )
         .route(
+            "/ops/actions/knowledge/clusters/promote",
+            post(http_ops_knowledge_cluster_promote),
+        )
+        .route(
             "/ops/actions/knowledge/investigations/enqueue-execution",
             post(http_ops_knowledge_investigation_execution_enqueue),
         )
@@ -6171,6 +6175,15 @@ struct OpsKnowledgeDueClustersForm {
     csrf_token: String,
     idempotency_key: String,
     max_clusters: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpsKnowledgeClusterPromoteForm {
+    csrf_token: String,
+    idempotency_key: String,
+    cluster_id: String,
+    reviewer: String,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6711,6 +6724,94 @@ async fn http_ops_knowledge_cluster_expansions_enqueue(
     }
 }
 
+async fn http_ops_knowledge_cluster_promote(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_knowledge_cluster_promote_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "knowledge-cluster-promote:{}:{}",
+        form.cluster_id, form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=knowledge_cluster&notice=duplicate");
+    }
+
+    let result = (|| -> Result<String> {
+        let store = Store::open(state.paths.clone())?;
+        let cluster = store
+            .get_knowledge_cluster(&form.cluster_id)?
+            .with_context(|| format!("knowledge cluster not found: {}", form.cluster_id))?;
+        let decision = store.policy_check(PolicyRequest {
+            action: "ops.knowledge_clusters.promote".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: None,
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some(cluster.id.clone()),
+            projected_usd: None,
+            metadata: json!({
+                "cluster_id": cluster.id,
+                "cluster_topic": cluster.topic,
+                "cluster_status": cluster.status,
+                "cluster_origin": cluster.metadata.get("origin").and_then(Value::as_str),
+                "reviewer": form.reviewer.clone(),
+                "idempotency_key": form.idempotency_key,
+                "boundary": "Ops control only authorizes the local operator action; core knowledge_cluster.promote policy still gates activating model-origin clusters.",
+            }),
+            untrusted_excerpt: Some(form.reason.clone()),
+        })?;
+        if !decision.allowed {
+            bail!(
+                "policy denied ops.knowledge_clusters.promote: {}",
+                decision.reason
+            );
+        }
+        let report = store.promote_knowledge_cluster(
+            &cluster.id,
+            Some(&form.reviewer),
+            Some(&form.reason),
+        )?;
+        Ok(report.cluster.id)
+    })();
+
+    match result {
+        Ok(id) => redirect_to_ops_ui(&format!(
+            "/ops/ui?q=knowledge_cluster&notice=knowledge_cluster_promoted&cluster={}",
+            url_component(&id)
+        )),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
 async fn http_ops_knowledge_investigation_execution_enqueue(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -7232,6 +7333,28 @@ fn parse_ops_knowledge_due_clusters_form(
         csrf_token: take_required_form_string(&mut values, "csrf_token")?,
         idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
         max_clusters: take_required_form_usize(&mut values, "max_clusters", 1, 100)?,
+    })
+}
+
+fn parse_ops_knowledge_cluster_promote_form(
+    body: &[u8],
+) -> std::result::Result<OpsKnowledgeClusterPromoteForm, HttpError> {
+    let mut values = parse_ops_form_fields(
+        body,
+        &[
+            "csrf_token",
+            "idempotency_key",
+            "cluster_id",
+            "reviewer",
+            "reason",
+        ],
+    )?;
+    Ok(OpsKnowledgeClusterPromoteForm {
+        csrf_token: take_required_form_string(&mut values, "csrf_token")?,
+        idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
+        cluster_id: take_required_form_string(&mut values, "cluster_id")?,
+        reviewer: take_required_form_string(&mut values, "reviewer")?,
+        reason: take_required_form_string(&mut values, "reason")?,
     })
 }
 
@@ -8888,6 +9011,21 @@ fn render_knowledge_ops_control_panel(csrf_token: Option<&str>, controls_enabled
 </form>"#,
         html_escape(csrf_token),
         html_escape(&ops_control_idempotency_key("knowledge-cluster-expansions")),
+    ));
+    html.push_str(&format!(
+        r#"<form method="post" action="/ops/actions/knowledge/clusters/promote">
+<input type="hidden" name="csrf_token" value="{}">
+<input type="hidden" name="idempotency_key" value="{}">
+<div><b>Promote model cluster</b><p class="muted">Mark one reviewed model-origin candidate cluster active before expansion can write wiki/report/digest artifacts.</p></div>
+<div class="fields">
+<label>Cluster id<input name="cluster_id" maxlength="120" placeholder="kcl-..."></label>
+<label>Reviewer<input name="reviewer" maxlength="200" value="ops-ui"></label>
+<label>Reason<input name="reason" maxlength="2000" value="Reviewed source-card evidence and approved promotion."></label>
+</div>
+<button type="submit">Promote cluster</button>
+</form>"#,
+        html_escape(csrf_token),
+        html_escape(&ops_control_idempotency_key("knowledge-cluster-promote")),
     ));
     html.push_str(&format!(
         r#"<form method="post" action="/ops/actions/knowledge/investigations/enqueue-execution">
@@ -20966,6 +21104,54 @@ reason = "ops controls may enqueue local worker jobs"
             .unwrap();
         assert!(projected.cluster.source_card_ids.contains(&card_a.id));
         assert!(projected.cluster.source_card_ids.contains(&card_b.id));
+        let model_invocation = store
+            .invoke_knowledge_cluster_model(KnowledgeClusterProposalModelInput {
+                source_card_ids: vec![card_a.id.clone(), card_b.id.clone()],
+                model_provider: "mock".to_string(),
+                model_name: None,
+                endpoint: None,
+                timeout_seconds: None,
+                max_clusters: 6,
+            })
+            .unwrap();
+        let model_cluster = model_invocation.clusters.first().unwrap().clone();
+        assert_eq!(model_cluster.status, "candidate");
+        assert_eq!(
+            model_cluster.metadata.get("origin").and_then(Value::as_str),
+            Some("model_cluster_proposal_v1")
+        );
+
+        let (denied_promote_status, denied_promote_json) = response_json(
+            http_ops_knowledge_cluster_promote(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/clusters/promote"),
+                Bytes::from(knowledge_cluster_promote_body(
+                    &state.csrf_token,
+                    "ops-ui-knowledge-cluster-promote-denied",
+                    &model_cluster.id,
+                    "ops-ui-test",
+                    "Denied promotion before explicit policy.",
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(denied_promote_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            denied_promote_json
+                .pointer("/error/type")
+                .and_then(Value::as_str),
+            Some("ops_action_failed")
+        );
+        assert_eq!(
+            store
+                .get_knowledge_cluster(&model_cluster.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "candidate"
+        );
 
         std::fs::write(
             state.paths.home.join("arcwell-policy.toml"),
@@ -20987,6 +21173,20 @@ id = "allow-ops-knowledge-cluster-expansions"
 effect = "allow"
 action = "ops.knowledge_clusters.enqueue_expansions"
 reason = "local operator may enqueue due shared knowledge cluster expansions"
+
+[[rules]]
+id = "allow-ops-knowledge-cluster-promote"
+effect = "allow"
+action = "ops.knowledge_clusters.promote"
+reason = "local operator may promote reviewed model-origin clusters"
+
+[[rules]]
+id = "allow-core-knowledge-cluster-promote"
+effect = "allow"
+action = "knowledge_cluster.promote"
+package = "arcwell-librarian"
+source = "knowledge_cluster_model_review"
+reason = "reviewed model-origin cluster may become active"
 
 [[rules]]
 id = "allow-ops-knowledge-investigation-execution"
@@ -21126,6 +21326,78 @@ reason = "ops controls may enqueue local worker jobs"
             expansion_job_count
         );
 
+        let (promote_status, _) = response_text(
+            http_ops_knowledge_cluster_promote(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/clusters/promote"),
+                Bytes::from(knowledge_cluster_promote_body(
+                    &state.csrf_token,
+                    "ops-ui-knowledge-cluster-promote-allowed",
+                    &model_cluster.id,
+                    "ops-ui-test",
+                    "Reviewed source-card evidence and approved active promotion.",
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(promote_status, StatusCode::SEE_OTHER);
+        let promoted = store
+            .get_knowledge_cluster(&model_cluster.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(promoted.status, "active");
+        assert!(
+            promoted
+                .metadata
+                .get("promotion")
+                .and_then(|value| value.get("policy_decision_id"))
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(
+            store
+                .list_knowledge_editorial_decisions(20)
+                .unwrap()
+                .iter()
+                .any(|decision| decision.cluster_id == model_cluster.id
+                    && decision.decision == "promote_model_cluster"
+                    && decision.status == "completed")
+        );
+        let decisions_after_promote = store.list_policy_decisions(20).unwrap();
+        assert!(decisions_after_promote.iter().any(
+            |decision| decision.allowed && decision.action == "ops.knowledge_clusters.promote"
+        ));
+        assert!(
+            decisions_after_promote
+                .iter()
+                .any(|decision| decision.allowed && decision.action == "knowledge_cluster.promote")
+        );
+        let editorial_count_after_promote =
+            store.list_knowledge_editorial_decisions(20).unwrap().len();
+        let (promote_duplicate_status, _) = response_text(
+            http_ops_knowledge_cluster_promote(
+                State(state.clone()),
+                authed_local_headers(),
+                Uri::from_static("/ops/actions/knowledge/clusters/promote"),
+                Bytes::from(knowledge_cluster_promote_body(
+                    &state.csrf_token,
+                    "ops-ui-knowledge-cluster-promote-allowed",
+                    &model_cluster.id,
+                    "ops-ui-test",
+                    "Reviewed source-card evidence and approved active promotion.",
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(promote_duplicate_status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            store.list_knowledge_editorial_decisions(20).unwrap().len(),
+            editorial_count_after_promote
+        );
+
         store
             .create_knowledge_cluster_investigation(&projected.cluster.id)
             .unwrap();
@@ -21214,7 +21486,9 @@ reason = "ops controls may enqueue local worker jobs"
         assert!(html.contains("/ops/actions/knowledge/backlog/schedule"));
         assert!(html.contains("/ops/actions/knowledge/backlog/enqueue"));
         assert!(html.contains("/ops/actions/knowledge/clusters/enqueue-expansions"));
+        assert!(html.contains("/ops/actions/knowledge/clusters/promote"));
         assert!(html.contains("/ops/actions/knowledge/investigations/enqueue-execution"));
+        assert!(html.contains("Promote model cluster"));
         assert!(html.contains("knowledge_backlog"));
     }
 
@@ -21515,6 +21789,23 @@ reason = "local operator may dead-letter reviewed edge events"
             url_component(csrf_token),
             url_component(idempotency_key),
             max_clusters
+        )
+    }
+
+    fn knowledge_cluster_promote_body(
+        csrf_token: &str,
+        idempotency_key: &str,
+        cluster_id: &str,
+        reviewer: &str,
+        reason: &str,
+    ) -> String {
+        format!(
+            "csrf_token={}&idempotency_key={}&cluster_id={}&reviewer={}&reason={}",
+            url_component(csrf_token),
+            url_component(idempotency_key),
+            url_component(cluster_id),
+            url_component(reviewer),
+            url_component(reason)
         )
     }
 

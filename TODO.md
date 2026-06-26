@@ -318,6 +318,11 @@ PR, implementation note, or final report:
       silently became publication" mirage. It is still a proof-fixture provider
       attempt plus deterministic expansion, not broad production-corpus semantic
       clustering or accepted model-backed writer synthesis.
+      The authenticated `/ops/ui` Knowledge Controls now also expose a
+      CSRF/idempotency-protected model-cluster promotion action, double-gated by
+      `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`
+      policy. This is an operator control for the promotion seam, not the full
+      broad repair/control surface.
       X provider fetches now share a local-proof bearer freshness path: recent
       search, bookmark import, following/watch rebuild, and watch-source
       monitor refresh an expired stored `X_BEARER_TOKEN` through stored

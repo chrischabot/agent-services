@@ -149,6 +149,11 @@ Current implemented bridge slice:
   decision, flips the cluster to `active`, and still leaves digest delivery
   behind separate review, policy, channel, quiet-hours, idempotency, and retry
   gates.
+- Authenticated `/ops/ui` Knowledge Controls can promote a reviewed
+  model-origin cluster by id. The HTTP action is CSRF/idempotency protected and
+  double-gated: `ops.knowledge_clusters.promote` authorizes the operator
+  action, while core `knowledge_cluster.promote` still authorizes activating the
+  cluster.
 - `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
   decisions, reports, entities, relations, adapter runs, and entity-resolution
   proposals.

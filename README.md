@@ -266,6 +266,9 @@ arcwell secrets list-values
 ```
 
 `list-values` shows names, scopes, and timestamps only. It does not print secret values.
+`secrets health`, `health`, `doctor`, and `/ops` warn before stored credentials
+expire and call out missing X refresh/client material when scheduled bookmark
+ingestion would otherwise depend on stale user-context credentials.
 For X OAuth user-context credentials, use `scripts/x-credential-probe` before
 claiming a live credential path is healthy. Forced refresh from copied homes is
 guarded because provider-side refresh-token rotation can otherwise leave the

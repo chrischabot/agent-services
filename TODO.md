@@ -1137,6 +1137,13 @@ PR, implementation note, or final report:
       reused the refreshed stored credential without forcing refresh and passed
       both recent search and a tiny bookmark/follow watch-source rebuild.
 - [ ] Add scheduled credential rotation reminders and stale-scope warnings.
+      Partial: `secret_health`, `health`, `doctor`, and `ops_snapshot` now warn
+      when local/ref credentials expire within 72 hours, and active scheduled
+      X bookmark ingestion surfaces missing/expired `X_REFRESH_TOKEN` or
+      `X_CLIENT_ID` with the required user-context scope names
+      (`tweet.read`, `users.read`, `bookmark.read`, `follows.read`,
+      `offline.access`). Still missing: scheduled outbound reminder jobs and
+      recipient routing for credential rotation warnings.
 - [ ] Add ops UI burn-down and override controls for budgets only after
       idempotency, policy, and audit behavior are tested.
 

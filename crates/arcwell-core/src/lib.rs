@@ -32,6 +32,7 @@ const MAX_COST_USD: f64 = 1_000_000.0;
 const SOURCE_CARD_STALE_DAYS: i64 = 180;
 const PROJECT_SYNC_DEFAULT_STALE_AFTER_SECONDS: i64 = 6 * 60 * 60;
 const PROJECT_SYNC_MAX_STALE_AFTER_SECONDS: i64 = 7 * 24 * 60 * 60;
+const SECRET_EXPIRY_WARNING_WINDOW_SECONDS: i64 = 72 * 60 * 60;
 const X_MONITOR_MAX_SOURCES: usize = 1_000;
 const X_ARCHIVE_MAX_FILE_BYTES: u64 = 25_000_000;
 const X_ARCHIVE_MAX_TOTAL_BYTES: u64 = 100_000_000;
@@ -8945,6 +8946,49 @@ impl Store {
         }
         for value in self.list_secret_values()? {
             by_name.insert(value.name.clone(), secret_value_health(value)?);
+        }
+        let x_bookmark_schedule_active = self
+            .list_watch_sources()?
+            .into_iter()
+            .any(|source| source.status == "active" && source.source_kind == "x_bookmarks");
+        if x_bookmark_schedule_active {
+            let x_scope_warning = "X bookmark ingestion is scheduled; stored X OAuth credentials must include user-context tweet.read, users.read, bookmark.read, follows.read, and offline.access scopes.";
+            let refresh_ready = by_name
+                .get("X_REFRESH_TOKEN")
+                .is_some_and(|item| item.present && item.status != "expired");
+            let client_id_ready = by_name
+                .get("X_CLIENT_ID")
+                .is_some_and(|item| item.present && item.status != "expired");
+            if !refresh_ready {
+                push_secret_warning(
+                    &mut by_name,
+                    "X_REFRESH_TOKEN",
+                    "x",
+                    Some("x"),
+                    &format!(
+                        "{x_scope_warning} X_REFRESH_TOKEN is missing or expired, so scheduled bookmark ingestion cannot refresh stale bearer credentials."
+                    ),
+                );
+            }
+            if !client_id_ready {
+                push_secret_warning(
+                    &mut by_name,
+                    "X_CLIENT_ID",
+                    "x",
+                    Some("x"),
+                    &format!(
+                        "{x_scope_warning} X_CLIENT_ID is missing or expired, so scheduled bookmark ingestion cannot perform OAuth refresh."
+                    ),
+                );
+            }
+            if let Some(bearer) = by_name.get_mut("X_BEARER_TOKEN")
+                && bearer.status == "expiring_soon"
+                && (!refresh_ready || !client_id_ready)
+            {
+                bearer.warnings.push(
+                    "X_BEARER_TOKEN expires soon and scheduled X bookmark ingestion lacks complete stored refresh material; refresh credentials before the next scheduled run.".to_string(),
+                );
+            }
         }
         Ok(by_name.into_values().collect())
     }
@@ -47331,6 +47375,17 @@ fn secret_ref_health(secret: &SecretRef, has_local_value: bool) -> SecretHealth 
                 secret.expires_at.clone().unwrap_or_default()
             ));
         }
+        Ok(Some(expires_at))
+            if expires_at
+                <= Utc::now() + ChronoDuration::seconds(SECRET_EXPIRY_WARNING_WINDOW_SECONDS) =>
+        {
+            status = "expiring_soon".to_string();
+            warnings.push(format!(
+                "secret {} expires soon at {}",
+                secret.name,
+                secret.expires_at.clone().unwrap_or_default()
+            ));
+        }
         Err(error) => {
             status = "invalid_expiry".to_string();
             warnings.push(format!(
@@ -47371,6 +47426,15 @@ fn secret_value_health(secret: SecretValue) -> Result<SecretHealth> {
                 secret.name,
                 secret.expires_at.clone().unwrap_or_default()
             ));
+        } else if expires_at
+            <= Utc::now() + ChronoDuration::seconds(SECRET_EXPIRY_WARNING_WINDOW_SECONDS)
+        {
+            status = "expiring_soon".to_string();
+            warnings.push(format!(
+                "secret {} expires soon at {}",
+                secret.name,
+                secret.expires_at.clone().unwrap_or_default()
+            ));
         }
     }
     Ok(SecretHealth {
@@ -47384,6 +47448,42 @@ fn secret_value_health(secret: SecretValue) -> Result<SecretHealth> {
         updated_at: secret.updated_at,
         warnings,
     })
+}
+
+fn missing_secret_health(
+    name: &str,
+    scope: &str,
+    provider: Option<&str>,
+    warning: &str,
+) -> SecretHealth {
+    SecretHealth {
+        name: name.to_string(),
+        scope: scope.to_string(),
+        provider: provider.map(ToOwned::to_owned),
+        source: "required".to_string(),
+        present: false,
+        status: "missing".to_string(),
+        expires_at: None,
+        updated_at: now(),
+        warnings: vec![warning.to_string()],
+    }
+}
+
+fn push_secret_warning(
+    health: &mut BTreeMap<String, SecretHealth>,
+    name: &str,
+    scope: &str,
+    provider: Option<&str>,
+    warning: &str,
+) {
+    health
+        .entry(name.to_string())
+        .and_modify(|item| {
+            if !item.warnings.iter().any(|existing| existing == warning) {
+                item.warnings.push(warning.to_string());
+            }
+        })
+        .or_insert_with(|| missing_secret_health(name, scope, provider, warning));
 }
 
 fn parse_json_column(raw: &str, index: usize) -> rusqlite::Result<Value> {
@@ -86531,6 +86631,93 @@ reason = "test denies X link expansion"
             store.get_secret_value("X_BEARER_TOKEN").unwrap().as_deref(),
             Some("super-secret-token")
         );
+    }
+
+    #[test]
+    fn severe_secret_health_warns_on_expiring_x_credentials_and_scheduled_scope_gaps() {
+        // CLAIM: credential rotation reminders and stale-scope warnings appear
+        // before scheduled X bookmark ingestion fails, without leaking token values.
+        // PRECONDITIONS: X bookmark ingestion is scheduled; the bearer expires
+        // soon; refresh/client material required for user-context account-data
+        // refresh is absent.
+        // POSTCONDITIONS: health, doctor, and ops expose redacted warnings for
+        // expiry and required X scopes/material.
+        // ORACLE: SecretHealth statuses/warnings and serialized ops/doctor text.
+        // SEVERITY: Severe because scheduled ingestion otherwise looks healthy
+        // until it silently fails on stale credentials or missing account-data scopes.
+        let store = test_store("secret-health-x-expiring-scope");
+        let token = format!("x-access-{}", "r".repeat(48));
+        let expires_soon = (Utc::now() + ChronoDuration::hours(12)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                &token,
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .schedule_x_bookmark_import(92, 100, "warm", "active")
+            .unwrap();
+
+        let secret_health = store.secret_health().unwrap();
+        let bearer = secret_health
+            .iter()
+            .find(|item| item.name == "X_BEARER_TOKEN")
+            .expect("bearer health");
+        assert_eq!(bearer.status, "expiring_soon");
+        assert!(
+            bearer
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("expires soon")),
+            "{bearer:?}"
+        );
+        assert!(
+            bearer.warnings.iter().any(|warning| warning
+                .contains("scheduled X bookmark ingestion lacks complete stored refresh material")),
+            "{bearer:?}"
+        );
+        for required in ["X_REFRESH_TOKEN", "X_CLIENT_ID"] {
+            let item = secret_health
+                .iter()
+                .find(|item| item.name == required)
+                .unwrap_or_else(|| panic!("{required} warning missing"));
+            assert_eq!(item.status, "missing");
+            assert!(!item.present);
+            assert!(
+                item.warnings.iter().any(|warning| {
+                    warning.contains("bookmark.read")
+                        && warning.contains("follows.read")
+                        && warning.contains("offline.access")
+                }),
+                "{item:?}"
+            );
+        }
+
+        let health = store.health().unwrap();
+        assert!(!health.ok);
+        assert!(
+            health
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("X_REFRESH_TOKEN is missing or expired")),
+            "{:?}",
+            health.warnings
+        );
+        let doctor = store.doctor(DoctorOptions::default()).unwrap();
+        assert!(!doctor.ok);
+        let serialized = serde_json::to_string(&json!({
+            "health": health,
+            "ops": store.ops_snapshot().unwrap(),
+            "doctor": doctor,
+        }))
+        .unwrap();
+        assert!(serialized.contains("expiring_soon"));
+        assert!(serialized.contains("bookmark.read"));
+        assert!(serialized.contains("offline.access"));
+        assert!(!serialized.contains(&token));
     }
 
     #[test]

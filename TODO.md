@@ -207,8 +207,9 @@ PR, implementation note, or final report:
       scheduled backlog clustering to automatic wiki/report/digest expansion.
       The current ops-control slice adds authenticated `/ops/ui` Knowledge
       Controls for scheduling the backlog watch source and enqueueing a
-      one-shot backlog clustering job, with CSRF, idempotency, policy gates,
-      and severe HTTP tests.
+      one-shot backlog clustering job, plus queueing due shared cluster
+      expansion jobs and due source-linked investigation execution jobs, with
+      CSRF, idempotency, policy gates, and severe HTTP tests.
       Copied-home production-corpus proof
       `.arcwell-dev/proofs/knowledge-backlog-production-proof-20260626T051406Z/artifacts/proof-packet.md`
       inspected 500 real source cards, accepted 157, skipped 343, considered

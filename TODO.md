@@ -177,7 +177,13 @@ PR, implementation note, or final report:
       prompt-injection/malformed-output/cost-denial/policy-denial severe
       tests, and repeatable mock plus live OpenAI browser proof at
       `.arcwell-dev/proofs/knowledge-entity-resolution-production-proof-20260625T181411Z-84883/artifacts/proof-packet.json`.
-      Remaining work is investigation jobs, semantic/model clustering,
+      This slice adds `arcwell knowledge propose-clusters`, schema-gated
+      semantic/model cluster proposals behind policy/cost, severe tests for
+      prompt-injection, out-of-prompt evidence, duplicate evidence reuse,
+      policy denial, cost denial, and no writer/digest side effects, plus
+      repeatable mock and live OpenAI browser proof at
+      `.arcwell-dev/proofs/knowledge-cluster-proposal-production-proof-20260626T042922Z-52005/artifacts/proof-packet.json`.
+      Remaining work is investigation jobs, broad production-data clustering,
       wiki/digest worker integration, X credential-refresh live proof,
       scheduled recurrence, external delivery recurrence, and broader ops UI
       controls.

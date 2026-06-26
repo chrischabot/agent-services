@@ -3,9 +3,9 @@ use arcwell_core::{
     AppPaths, CommerceAvailabilityProofInput, CommerceCandidateInput, CommerceContextFactInput,
     CommerceRenderedPageCheckInput, CommerceReportJudgmentInput, CommerceRunConfigInput,
     CommerceVerificationAttemptInput, DigestAlertScheduleInput, DoctorOptions, ImportRunFinish,
-    KnowledgeEntityInput, KnowledgeEntityResolutionModelInput, OpsSnapshot, PolicyRequest,
-    ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput, RadarRun,
-    RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
+    KnowledgeClusterProposalModelInput, KnowledgeEntityInput, KnowledgeEntityResolutionModelInput,
+    OpsSnapshot, PolicyRequest, ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput,
+    RadarRun, RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
     ResearchConvergenceCloseLoopInput, ResearchConvergenceProviderSearchInput,
     ResearchConvergenceStartInput, ResearchConvergenceStepInput, ResearchDocumentInput,
     ResearchEditorialInvokeInput, ResearchEditorialRunInput, ResearchHostSearchInput,
@@ -1749,6 +1749,21 @@ enum KnowledgeSubcommand {
     Clusters {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    ProposeClusters {
+        query: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long, default_value_t = 24)]
+        max_source_cards: usize,
+        #[arg(long, default_value_t = 6)]
+        max_clusters: usize,
     },
     Reports {
         #[arg(long, default_value_t = 50)]
@@ -3726,6 +3741,32 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
         KnowledgeSubcommand::Events { limit } => print_json(&store.list_knowledge_events(limit)?),
         KnowledgeSubcommand::Clusters { limit } => {
             print_json(&store.list_knowledge_clusters(limit)?)
+        }
+        KnowledgeSubcommand::ProposeClusters {
+            query,
+            provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            max_source_cards,
+            max_clusters,
+        } => {
+            let source_card_ids = store
+                .search_source_cards(&query)?
+                .into_iter()
+                .take(max_source_cards.clamp(1, 80))
+                .map(|card| card.id)
+                .collect::<Vec<_>>();
+            print_json(&store.invoke_knowledge_cluster_model(
+                KnowledgeClusterProposalModelInput {
+                    source_card_ids,
+                    model_provider: provider,
+                    model_name,
+                    endpoint,
+                    timeout_seconds,
+                    max_clusters,
+                },
+            )?)
         }
         KnowledgeSubcommand::Reports { limit } => print_json(&store.list_knowledge_reports(limit)?),
         KnowledgeSubcommand::Entities { limit } => {

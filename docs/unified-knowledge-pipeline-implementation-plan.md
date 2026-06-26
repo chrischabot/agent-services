@@ -6,7 +6,8 @@ Status: design plus implemented foreground bridge slices. This document does
 not claim that the unified cross-source pipeline is operational. The shared
 knowledge substrate and a live source-card/radar projection bridge are now
 implemented and tested; scheduled recurrence, wiki expansion, digest routing,
-semantic clustering, and broad provider coverage remain open.
+broad production-data semantic clustering, and broad provider coverage remain
+open.
 
 Skill gate: `arc:anti-mirage`.
 
@@ -135,6 +136,11 @@ Current implemented bridge slice:
   `arcwell knowledge resolve-entity-model`, with policy/cost gates,
   schema-validated output, source-card citation requirements, prompt-injection
   reason rejection, and pending-review-only writes.
+- Schema-gated semantic/model cluster proposals through
+  `arcwell knowledge propose-clusters`, with policy/cost gates, source-card
+  citation requirements, duplicate-source-card rejection across proposed
+  clusters, prompt-injection topic/reason rejection, confirmed event backing,
+  and candidate-only cluster writes.
 - `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
   decisions, reports, entities, relations, adapter runs, and entity-resolution
   proposals.
@@ -158,6 +164,15 @@ What the bridge proof showed:
   `pending_review` resolution, source-card-backed evidence boundary, zero graph
   relations, and authenticated desktop/mobile `/ops/ui` screenshots at
   `.arcwell-dev/proofs/knowledge-entity-resolution-production-proof-20260625T181411Z-84883/artifacts/proof-packet.json`.
+- `scripts/knowledge-cluster-proposal-production-proof` invoked model-backed
+  cluster proposals with both deterministic mock provider and live OpenAI
+  `gpt-4.1-mini`; the live proof wrote candidate clusters
+  `kcl-205fe1128dc14509`, `kcl-802d116c38631d29`, and
+  `kcl-75ca99fa8fd4702a`, recorded cost decision
+  `b00e23a5-f30d-493c-8369-97cfe41fea9a`, confirmed event/source evidence,
+  created no knowledge reports/wiki pages/digests, and browser-checked ops
+  visibility at
+  `.arcwell-dev/proofs/knowledge-cluster-proposal-production-proof-20260626T042922Z-52005/artifacts/proof-packet.json`.
 - Cursors and ops state were visible after durable writes.
 - Authenticated `/ops/ui` rendered desktop and mobile knowledge tables through
   browser automation without horizontal overflow.
@@ -169,7 +184,9 @@ What it still does not prove:
 - Model-invoked entity resolution over broad production clusters or scheduled
   recurrence; the live proof is a foreground provider attempt over proof
   fixture data.
-- Model-backed semantic synthesis or semantic multi-cluster splitting.
+- Model-backed semantic synthesis, broad production-data clustering, or
+  scheduled recurrence; the cluster proof is a foreground provider attempt over
+  proof fixture data.
 - Wiki page expansion/update jobs.
 - Digest candidate routing and external delivery from shared knowledge reports.
 - Broad ops repair controls.
@@ -1089,7 +1106,7 @@ Refuting tests:
 - [ ] Implement wiki novelty lookup.
 - [x] Implement first deterministic relation extraction for provider reporting,
       GitHub owner/repo ownership, and cluster co-occurrence.
-- [ ] Add semantic/model cluster proposal behind schema validation.
+- [x] Add semantic/model cluster proposal behind schema validation.
 - [ ] Add cluster revisioning or metadata to avoid stale report reuse.
 
 Refuting tests:

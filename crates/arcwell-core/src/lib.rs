@@ -74595,6 +74595,193 @@ priority = 10
     }
 
     #[test]
+    fn severe_shared_knowledge_expansion_digest_routes_through_schedule() {
+        // CLAIM: a shared knowledge cluster can autonomously produce a digest
+        // candidate that the resident digest schedule routes through the same
+        // reviewed delivery ledger, without needing a manually-created generic
+        // candidate.
+        // ORACLE: source cards -> shared cluster -> expansion creates wiki,
+        // report, editorial decision, and digest candidate; after review, the
+        // digest alert worker selects that exact candidate, records tick and
+        // delivery lineage, and suppresses immediate duplicate recurrence.
+        // SEVERITY: Severe because otherwise "knowledge drives alerts" could
+        // be two separately true features with a hollow seam between them.
+        let store = test_store("shared-knowledge-digest-schedule");
+        let release = store
+            .add_source_card(SourceCardInput {
+                title: "OpenAI agent package release for scheduled digest".to_string(),
+                url: "https://github.com/openai/agents/releases/tag/scheduled-digest".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary: "Knowledge schedule proof says OpenAI published an agent package release with MCP workflow support, and this source should become scheduled shared-knowledge alert evidence.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "OpenAI published an agent package release.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.9,
+                }],
+                retrieved_at: Some("2026-06-26T08:10:00Z".to_string()),
+                metadata: json!({ "owner": "openai", "repo": "agents" }),
+            })
+            .unwrap();
+        let reaction = store
+            .add_source_card(SourceCardInput {
+                title: "Developer reaction to scheduled digest release".to_string(),
+                url: "https://news.ycombinator.com/item?id=42626001".to_string(),
+                source_type: "hackernews_story".to_string(),
+                provider: "hackernews".to_string(),
+                summary: "Knowledge schedule proof says developers discussed the OpenAI agent package release as MCP agent infrastructure, making it eligible for scheduled shared-knowledge alerts.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "Developers discussed the package as MCP infrastructure.".to_string(),
+                    kind: "reaction".to_string(),
+                    confidence: 0.78,
+                }],
+                retrieved_at: Some("2026-06-26T08:12:00Z".to_string()),
+                metadata: json!({ "source_kind": "hackernews" }),
+            })
+            .unwrap();
+        let projected = store
+            .project_knowledge_from_source_card_query(
+                "Knowledge schedule proof",
+                Some("OpenAI package release scheduled digest proof"),
+                10,
+            )
+            .unwrap();
+        assert!(projected.cluster.source_card_ids.contains(&release.id));
+        assert!(projected.cluster.source_card_ids.contains(&reaction.id));
+
+        let expansion = store
+            .expand_knowledge_cluster(&projected.cluster.id, true)
+            .unwrap();
+        assert!(expansion.quality_findings.is_empty());
+        let digest = expansion
+            .digest_candidate
+            .as_ref()
+            .expect("shared expansion should create digest candidate");
+        assert_eq!(
+            expansion.editorial_decision.digest_candidate_id.as_deref(),
+            Some(digest.id.as_str())
+        );
+        assert_eq!(digest.source_card_ids.len(), 2);
+        store
+            .approve_digest_candidate(
+                &digest.id,
+                Some("shared-knowledge-schedule-test"),
+                Some("route shared cluster through schedule"),
+            )
+            .unwrap();
+
+        fs::write(
+            store.paths.home.join("arcwell-policy.toml"),
+            r#"
+[[rules]]
+id = "allow-shared-knowledge-digest-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow shared knowledge digest schedule worker enqueue"
+priority = 20
+
+[[rules]]
+id = "allow-shared-knowledge-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-librarian"
+source = "digest_candidate_delivery"
+channel = "telegram"
+subject = "telegram:chat:456"
+target = "telegram:chat:456"
+reason = "allow shared knowledge scheduled digest delivery"
+priority = 10
+
+[[rules]]
+id = "allow-shared-knowledge-channel-send"
+effect = "allow"
+action = "channel.send"
+provider = "telegram"
+channel = "telegram"
+subject = "telegram:chat:456"
+target = "456"
+reason = "allow shared knowledge scheduled Telegram send"
+priority = 10
+"#,
+        )
+        .unwrap();
+        store
+            .authorize_channel_subject("telegram", "telegram:chat:456", false, false, true)
+            .unwrap();
+        let api = mock_status_server(
+            "200 OK",
+            "",
+            r#"{"ok":true,"result":{"message_id":456}}"#,
+            "application/json",
+        );
+        store
+            .set_secret_value("TELEGRAM_BOT_TOKEN", "TOKEN", "telegram")
+            .unwrap();
+        store
+            .set_secret_value("TELEGRAM_API_BASE", &api, "telegram")
+            .unwrap();
+        let schedule = store
+            .create_digest_alert_schedule(DigestAlertScheduleInput {
+                name: "shared knowledge digest alerts".to_string(),
+                channel: "telegram".to_string(),
+                recipient_ref: "telegram:chat:456".to_string(),
+                min_score: 0.0,
+                max_candidates: 3,
+                interval_hours: 1,
+                quiet_hours: None,
+                status: None,
+            })
+            .unwrap();
+
+        let worker = store.run_worker_once(2).unwrap();
+        assert_eq!(worker.processed, 2, "{worker:#?}");
+        assert_eq!(worker.digest_alert_schedule.as_ref().unwrap().enqueued, 1);
+        let digest_job = worker
+            .jobs
+            .iter()
+            .find(|job| job.kind == "digest_scheduled_alert")
+            .expect("scheduled digest job");
+        assert_eq!(digest_job.status, "completed");
+        assert_eq!(
+            digest_job
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("sent")
+        );
+        assert!(
+            worker
+                .jobs
+                .iter()
+                .any(|job| job.kind == "knowledge_cluster_investigation_execute"
+                    && job.status == "completed"),
+            "{worker:#?}"
+        );
+        let ticks = store.list_digest_alert_ticks(Some(&schedule.id)).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].status, "sent");
+        assert_eq!(ticks[0].candidate_ids, vec![digest.id.clone()]);
+        assert_eq!(ticks[0].delivery_ids.len(), 1);
+        let deliveries = store.list_digest_deliveries(Some(&digest.id)).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "sent");
+        assert_eq!(deliveries[0].id, ticks[0].delivery_ids[0]);
+        assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+
+        let duplicate = store.run_worker_once(2).unwrap();
+        assert_eq!(duplicate.processed, 0);
+        assert_eq!(
+            store
+                .list_digest_alert_ticks(Some(&schedule.id))
+                .unwrap()
+                .len(),
+            1,
+            "shared knowledge digest schedule should suppress immediate duplicate tick"
+        );
+    }
+
+    #[test]
     fn severe_digest_alert_schedule_retries_after_blocked_delivery_policy_is_fixed() {
         // CLAIM: a blocked/failed digest delivery row is not a permanent
         // scheduled-alert dedupe tombstone.

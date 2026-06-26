@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+for required in node rsync sqlite3; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "BLOCKED: $required is required for this proof." >&2
+    exit 2
+  fi
+done
+
+RUN_STAMP="${ARCWELL_KNOWLEDGE_DIGEST_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_KNOWLEDGE_DIGEST_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/knowledge-digest-recurrence-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+SOURCE_HOME="${ARCWELL_KNOWLEDGE_DIGEST_SOURCE_HOME:-${ARCWELL_HOME:-$HOME/.arcwell}}"
+export ARCWELL_HOME="${ARCWELL_KNOWLEDGE_DIGEST_PROOF_HOME:-$PROOF_ROOT/home}"
+RECIPIENT="${ARCWELL_KNOWLEDGE_DIGEST_EMAIL_TO:-digest-proof@example.com}"
+FROM="${ARCWELL_KNOWLEDGE_DIGEST_EMAIL_FROM:-agent@example.com}"
+MAX_SOURCE_CARDS="${ARCWELL_KNOWLEDGE_DIGEST_MAX_SOURCE_CARDS:-500}"
+MIN_GROUP_SIZE="${ARCWELL_KNOWLEDGE_DIGEST_MIN_GROUP_SIZE:-2}"
+MAX_CLUSTERS="${ARCWELL_KNOWLEDGE_DIGEST_MAX_CLUSTERS:-5}"
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log() {
+  printf '[knowledge-digest-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[knowledge-digest-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+if [ ! -d "$SOURCE_HOME" ]; then
+  fail "source Arcwell home not found: $SOURCE_HOME"
+fi
+
+log "proof root: $PROOF_ROOT"
+log "copying source home into disposable proof home"
+rsync -a --exclude 'backups/' --exclude 'proofs/' "$SOURCE_HOME"/ "$ARCWELL_HOME"/ >/dev/null
+
+if [ -f "$ARCWELL_HOME/arcwell.sqlite3" ]; then
+  log "clearing copied derived state while preserving source cards/wiki evidence"
+  sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<'SQL'
+PRAGMA foreign_keys = OFF;
+DELETE FROM wiki_jobs;
+DELETE FROM channel_delivery_attempts;
+DELETE FROM channel_messages;
+DELETE FROM digest_alert_ticks;
+DELETE FROM digest_alert_schedules;
+DELETE FROM digest_deliveries;
+DELETE FROM digest_candidates;
+DELETE FROM knowledge_editorial_decisions;
+DELETE FROM knowledge_reports;
+DELETE FROM knowledge_relations;
+DELETE FROM knowledge_entity_resolutions;
+DELETE FROM knowledge_entities;
+DELETE FROM knowledge_event_sources;
+DELETE FROM knowledge_events;
+DELETE FROM knowledge_clusters;
+DELETE FROM policy_decisions;
+DELETE FROM cost_decisions;
+PRAGMA foreign_keys = ON;
+SQL
+fi
+
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<'SQL' >"$ARTIFACT_DIR/counts-before.tsv"
+SELECT 'source_cards', COUNT(*) FROM source_cards;
+SELECT 'wiki_pages', COUNT(*) FROM wiki_pages;
+SELECT 'knowledge_clusters', COUNT(*) FROM knowledge_clusters;
+SELECT 'digest_candidates', COUNT(*) FROM digest_candidates;
+SELECT 'digest_alert_schedules', COUNT(*) FROM digest_alert_schedules;
+SELECT 'digest_deliveries', COUNT(*) FROM digest_deliveries;
+SQL
+
+MOCK_BASE_FILE="$ARTIFACT_DIR/email-api-base.txt"
+MOCK_LOG_FILE="$ARTIFACT_DIR/email-provider-requests.jsonl"
+node - "$MOCK_BASE_FILE" "$MOCK_LOG_FILE" <<'NODE' &
+const fs = require("fs");
+const http = require("http");
+const [basePath, logPath] = process.argv.slice(2);
+
+const server = http.createServer((req, res) => {
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => {
+    const body = Buffer.concat(chunks).toString("utf8");
+    fs.appendFileSync(
+      logPath,
+      `${JSON.stringify({
+        method: req.method,
+        url: req.url,
+        content_type: req.headers["content-type"] || null,
+        authorization: req.headers.authorization ? "<redacted>" : null,
+        body,
+      })}\n`
+    );
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: { id: "knowledge_digest_email_ok" } }));
+  });
+});
+
+server.listen(0, "127.0.0.1", () => {
+  const address = server.address();
+  fs.writeFileSync(basePath, `http://127.0.0.1:${address.port}\n`);
+});
+
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+NODE
+MOCK_PID=$!
+trap 'kill "$MOCK_PID" >/dev/null 2>&1 || true' EXIT
+
+for _ in $(seq 1 50); do
+  [ -s "$MOCK_BASE_FILE" ] && break
+  sleep 0.1
+done
+[ -s "$MOCK_BASE_FILE" ] || fail "controlled Cloudflare Email endpoint did not start"
+EMAIL_API_BASE="$(tr -d '\n' <"$MOCK_BASE_FILE")"
+
+log "clustering copied source-card backlog"
+"$ARCWELL_BIN" knowledge cluster-backlog \
+  --max-source-cards "$MAX_SOURCE_CARDS" \
+  --min-group-size "$MIN_GROUP_SIZE" \
+  --max-clusters "$MAX_CLUSTERS" \
+  >"$ARTIFACT_DIR/backlog.json"
+
+CLUSTER_ID="$(node - "$ARTIFACT_DIR/backlog.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const projections = Array.isArray(report.projections) ? report.projections : [];
+const projection = projections
+  .filter((item) => {
+    const count = (item.cluster?.source_card_ids || []).length;
+    return count >= 2 && count <= 24;
+  })
+  .sort((left, right) => {
+    const leftCount = (left.cluster?.source_card_ids || []).length;
+    const rightCount = (right.cluster?.source_card_ids || []).length;
+    return leftCount - rightCount;
+  })[0];
+if (!projection) {
+  console.error(`expected at least one backlog projection with 2-24 source cards; saw ${projections.length}`);
+  process.exit(2);
+}
+process.stdout.write(projection.cluster.id);
+NODE
+)"
+
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<SQL
+PRAGMA foreign_keys = OFF;
+DELETE FROM knowledge_editorial_decisions WHERE cluster_id <> '$CLUSTER_ID';
+DELETE FROM knowledge_reports WHERE cluster_id <> '$CLUSTER_ID';
+DELETE FROM knowledge_clusters WHERE id <> '$CLUSTER_ID';
+PRAGMA foreign_keys = ON;
+SQL
+
+log "expanding selected shared knowledge cluster: $CLUSTER_ID"
+"$ARCWELL_BIN" knowledge expand-cluster "$CLUSTER_ID" >"$ARTIFACT_DIR/expansion.json"
+CANDIDATE_ID="$(node - "$ARTIFACT_DIR/expansion.json" <<'NODE'
+const fs = require("fs");
+const expansion = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const id = expansion.digest_candidate?.id;
+if (!id) {
+  console.error("knowledge expansion did not create a digest candidate");
+  process.exit(2);
+}
+process.stdout.write(id);
+NODE
+)"
+
+log "approving expansion-created digest candidate"
+"$ARCWELL_BIN" digest-candidate-approve --json "{\"id\":\"$CANDIDATE_ID\",\"reviewed_by\":\"knowledge-digest-recurrence-proof\",\"note\":\"approved after shared-cluster expansion quality gate in disposable proof\"}" >"$ARTIFACT_DIR/candidate-approved.json"
+
+cat >"$ARCWELL_HOME/arcwell-policy.toml" <<POLICY
+[[rules]]
+id = "allow-knowledge-digest-account-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_ACCOUNT_ID"
+reason = "allow controlled shared knowledge digest account secret"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-token-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_EMAIL_API_TOKEN"
+reason = "allow controlled shared knowledge digest token secret"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-from-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "ARCWELL_AGENT_EMAIL_FROM"
+reason = "allow controlled shared knowledge digest sender secret"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-base-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_EMAIL_API_BASE"
+reason = "allow controlled shared knowledge digest email API base secret"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow shared knowledge digest proof worker enqueue"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-generic-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-librarian"
+source = "digest_candidate_delivery"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "email:$RECIPIENT"
+reason = "allow controlled generic shared knowledge digest delivery"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-x-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-x"
+source = "x_digest_delivery"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "email:$RECIPIENT"
+reason = "allow controlled X-backed shared knowledge digest delivery"
+priority = 20
+
+[[rules]]
+id = "allow-knowledge-digest-email-send"
+effect = "allow"
+action = "channel.send"
+package = "arcwell-email"
+provider = "cloudflare_email"
+source = "email_send"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "$RECIPIENT"
+reason = "allow controlled shared knowledge digest email send"
+priority = 20
+POLICY
+
+log "authorizing controlled email recipient and storing controlled provider config"
+"$ARCWELL_BIN" email authorize "$RECIPIENT" --send >"$ARTIFACT_DIR/email-authorization.json"
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_ACCOUNT_ID knowledgedigestacct --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_EMAIL_API_TOKEN knowledge-digest-token --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value ARCWELL_AGENT_EMAIL_FROM "$FROM" --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_EMAIL_API_BASE "$EMAIL_API_BASE" --provider email >/dev/null
+
+log "creating scheduled digest alert and draining worker"
+"$ARCWELL_BIN" digest-alert-schedule-create --json "{\"name\":\"shared knowledge digest proof $RUN_STAMP\",\"channel\":\"email\",\"recipient_ref\":\"email:$RECIPIENT\",\"min_score\":0,\"max_candidates\":1,\"interval_hours\":24}" >"$ARTIFACT_DIR/schedule.json"
+SCHEDULE_ID="$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(j.id)' "$ARTIFACT_DIR/schedule.json")"
+"$ARCWELL_BIN" worker run-once --max-jobs 10 >"$ARTIFACT_DIR/worker-first.json"
+"$ARCWELL_BIN" digest-alert-ticks --json "{\"schedule_id\":\"$SCHEDULE_ID\"}" >"$ARTIFACT_DIR/ticks-after-first.json"
+"$ARCWELL_BIN" digest-candidate-deliveries --json "{\"candidate_id\":\"$CANDIDATE_ID\"}" >"$ARTIFACT_DIR/deliveries-after-first.json"
+
+log "draining worker again to prove duplicate suppression"
+"$ARCWELL_BIN" worker run-once --max-jobs 10 >"$ARTIFACT_DIR/worker-second.json"
+"$ARCWELL_BIN" digest-alert-ticks --json "{\"schedule_id\":\"$SCHEDULE_ID\"}" >"$ARTIFACT_DIR/ticks-after-second.json"
+
+NOW_MINUTES="$(date -u '+%H %M' | awk '{ print ($1 * 60) + $2 }')"
+START_MINUTES=$(( (NOW_MINUTES + 24 * 60 - 5) % (24 * 60) ))
+END_MINUTES=$(( (NOW_MINUTES + 5) % (24 * 60) ))
+START_HHMM="$(printf '%02d:%02d' $((START_MINUTES / 60)) $((START_MINUTES % 60)))"
+END_HHMM="$(printf '%02d:%02d' $((END_MINUTES / 60)) $((END_MINUTES % 60)))"
+
+log "creating quiet-hours schedule against the same candidate"
+"$ARCWELL_BIN" digest-alert-schedule-create --json "{\"name\":\"shared knowledge digest quiet proof $RUN_STAMP\",\"channel\":\"email\",\"recipient_ref\":\"email:$RECIPIENT\",\"min_score\":0,\"max_candidates\":1,\"interval_hours\":24,\"quiet_hours\":{\"timezone\":\"UTC\",\"start\":\"$START_HHMM\",\"end\":\"$END_HHMM\"}}" >"$ARTIFACT_DIR/quiet-schedule.json"
+QUIET_SCHEDULE_ID="$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(j.id)' "$ARTIFACT_DIR/quiet-schedule.json")"
+"$ARCWELL_BIN" worker run-once --max-jobs 10 >"$ARTIFACT_DIR/worker-quiet.json"
+"$ARCWELL_BIN" digest-alert-ticks --json "{\"schedule_id\":\"$QUIET_SCHEDULE_ID\"}" >"$ARTIFACT_DIR/quiet-ticks.json"
+"$ARCWELL_BIN" digest-candidate-deliveries --json "{\"candidate_id\":\"$CANDIDATE_ID\"}" >"$ARTIFACT_DIR/deliveries-after-quiet.json"
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops-after.json"
+
+log "validating proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$CLUSTER_ID" "$CANDIDATE_ID" "$SCHEDULE_ID" "$QUIET_SCHEDULE_ID" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, proofRoot, clusterId, candidateId, scheduleId, quietScheduleId] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const readText = (name) => fs.readFileSync(path.join(artifactDir, name), "utf8");
+const readJsonl = (name) => {
+  const file = path.join(artifactDir, name);
+  if (!fs.existsSync(file) || fs.statSync(file).size === 0) return [];
+  return fs.readFileSync(file, "utf8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line));
+};
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+const counts = Object.fromEntries(readText("counts-before.tsv").trim().split(/\n/).map((line) => {
+  const [key, value] = line.split("|");
+  return [key, Number(value)];
+}));
+const backlog = read("backlog.json");
+const expansion = read("expansion.json");
+const candidate = read("candidate-approved.json");
+const schedule = read("schedule.json");
+const first = read("worker-first.json");
+const second = read("worker-second.json");
+const ticks = read("ticks-after-first.json");
+const ticksSecond = read("ticks-after-second.json");
+const deliveries = read("deliveries-after-first.json");
+const quietWorker = read("worker-quiet.json");
+const quietTicks = read("quiet-ticks.json");
+const deliveriesAfterQuiet = read("deliveries-after-quiet.json");
+const providerRequests = readJsonl("email-provider-requests.jsonl");
+const ops = read("ops-after.json");
+
+assert(counts.source_cards >= 2, "copied proof home must contain source cards", counts);
+assert(backlog.accepted >= 2, "backlog clustering should accept source cards", backlog);
+assert(Array.isArray(backlog.projections) && backlog.projections.length >= 1, "backlog should create at least one projection", backlog);
+const projection = backlog.projections.find((item) => item.cluster?.id === clusterId);
+assert(projection, "selected cluster should come from backlog projection", backlog.projections);
+assert((projection.cluster.source_card_ids || []).length >= 2, "selected cluster should cite multiple source cards", projection.cluster);
+assert(expansion.cluster.id === clusterId, "expansion should target selected cluster", expansion.cluster);
+assert((expansion.quality_findings || []).length === 0, "wiki expansion quality gate should pass", expansion.quality_findings);
+assert(expansion.wiki_page?.id, "expansion should write a wiki page", expansion);
+assert(expansion.report?.id, "expansion should write a report", expansion);
+assert(expansion.editorial_decision?.wiki_page_id === expansion.wiki_page.id, "editorial decision should link wiki page", expansion.editorial_decision);
+assert(expansion.editorial_decision?.digest_candidate_id === candidateId, "editorial decision should link digest candidate", expansion.editorial_decision);
+assert(expansion.digest_candidate?.id === candidateId, "digest candidate should be created by expansion", expansion.digest_candidate);
+assert(candidate.id === candidateId && candidate.review_status === "approved", "candidate should be approved", candidate);
+assert(JSON.stringify(candidate.source_card_ids) === JSON.stringify(expansion.cluster.source_card_ids), "candidate should preserve cluster evidence", { candidate, cluster: expansion.cluster });
+
+const wikiText = expansion.wiki_page.content || "";
+for (const sourceCardId of expansion.cluster.source_card_ids) {
+  assert(wikiText.includes(sourceCardId), "wiki page should cite every source-card id", { sourceCardId });
+}
+assert(wikiText.includes(clusterId), "wiki page should link back to cluster", wikiText.slice(0, 1000));
+assert(wikiText.includes("Confidence And Uncertainty"), "wiki page should name uncertainty", wikiText.slice(0, 1000));
+assert(!wikiText.includes("source_cards: 0"), "wiki page must not be empty/generated-only", wikiText.slice(0, 1000));
+
+assert(schedule.id === scheduleId && schedule.status === "active", "schedule should be active", schedule);
+assert(first.digest_alert_schedule?.enqueued === 1, "first worker pass should enqueue one digest alert", first);
+const digestJob = (first.jobs || []).find((job) => job.kind === "digest_scheduled_alert");
+assert(digestJob && digestJob.status === "completed", "scheduled digest job should complete", first.jobs);
+assert(digestJob.result_json?.status === "sent", "scheduled digest should be sent", digestJob);
+assert(ticks.length === 1 && ticks[0].status === "sent", "sent tick should be recorded", ticks);
+assert(ticks[0].schedule_id === scheduleId, "sent tick should belong to schedule", ticks[0]);
+assert(ticks[0].candidate_ids.includes(candidateId), "sent tick should record expansion-created candidate", ticks[0]);
+assert(ticks[0].delivery_ids.length === 1, "sent tick should link delivery", ticks[0]);
+assert(deliveries.length === 1 && deliveries[0].status === "sent", "digest delivery should be sent", deliveries);
+assert(deliveries[0].id === ticks[0].delivery_ids[0], "delivery should link back to tick", { deliveries, ticks });
+assert(second.processed === 0, "second worker pass should suppress duplicate recurrence", second);
+assert(ticksSecond.length === 1, "second worker pass should not create another tick", ticksSecond);
+
+assert(quietWorker.processed === 1 && quietWorker.deferred === 1, "quiet-hours worker should defer exactly one job", quietWorker);
+assert(quietTicks.length === 1 && quietTicks[0].status === "deferred", "quiet-hours tick should be deferred", quietTicks);
+assert(quietTicks[0].schedule_id === quietScheduleId, "quiet tick should belong to quiet schedule", quietTicks[0]);
+assert(quietTicks[0].delivery_ids.length === 0, "quiet-hours tick should not send delivery", quietTicks[0]);
+assert(deliveriesAfterQuiet.length === 1, "quiet-hours proof should not create an extra delivery", deliveriesAfterQuiet);
+assert(providerRequests.length === 1, "controlled provider should receive exactly one email request", providerRequests);
+
+const providerBody = JSON.parse(providerRequests[0].body);
+const emailText = providerBody.text || "";
+for (const required of ["Bottom line", "What changed", "Why it matters", "Suggested follow-up", "Evidence quality", "Sources", "Audit trail"]) {
+  assert(emailText.includes(required), `delivered digest email missing ${required}`, emailText);
+}
+assert(!emailText.startsWith("Arcwell digest candidate\nTopic:"), "delivered digest must not be old metadata/link dump", emailText);
+assert(emailText.indexOf("Sources") > emailText.indexOf("Evidence quality"), "sources should be appendix after report body", emailText);
+
+assert((ops.knowledge_clusters || []).some((item) => item.id === clusterId), "ops should expose knowledge cluster", ops.knowledge_clusters);
+assert((ops.digest_candidates || []).some((item) => item.id === candidateId), "ops should expose digest candidate", ops.digest_candidates);
+assert((ops.digest_deliveries || []).some((item) => item.id === deliveries[0].id), "ops should expose digest delivery", ops.digest_deliveries);
+
+const artifactText = fs.readdirSync(artifactDir)
+  .filter((name) => /\.(json|jsonl|md|txt|tsv)$/.test(name))
+  .map((name) => readText(name))
+  .join("\n");
+assert(!/(^|[^A-Za-z0-9])(bearer\s+|xoxp|xoxb|sk-|ghp_)[A-Za-z0-9_.=-]{20,}/i.test(artifactText), "proof artifacts should not contain obvious token-shaped secrets");
+
+const proofPacket = {
+  proof_name: "knowledge-digest-recurrence-proof",
+  proof_level: "Production Data Proof on copied local source-card corpus with controlled provider; not wall-clock live external recurrence",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  copied_counts: counts,
+  backlog: {
+    inspected: backlog.inspected,
+    accepted: backlog.accepted,
+    skipped: backlog.skipped,
+    groups_considered: backlog.groups_considered,
+    projections: backlog.projections.length,
+  },
+  cluster_id: clusterId,
+  wiki_page_id: expansion.wiki_page.id,
+  report_id: expansion.report.id,
+  editorial_decision_id: expansion.editorial_decision.id,
+  digest_candidate_id: candidateId,
+  schedule_id: scheduleId,
+  sent_delivery_id: deliveries[0].id,
+  quiet_schedule_id: quietScheduleId,
+  gates: {
+    copied_real_source_cards_used: true,
+    backlog_cluster_created: true,
+    wiki_expansion_quality_gate_passed: true,
+    editorial_decision_links_wiki_and_digest: true,
+    digest_candidate_reviewed: true,
+    scheduled_worker_sent_exact_candidate: true,
+    duplicate_worker_pass_suppressed: true,
+    quiet_hours_deferred_without_provider_send: true,
+    human_readable_digest_body_checked: true,
+    ops_visibility_checked: true,
+  },
+  remaining_risk: [
+    "This proof uses a controlled local email provider, not a real external inbox delivery.",
+    "This proof drains worker passes immediately; it does not prove wall-clock resident recurrence over time.",
+  ],
+};
+fs.writeFileSync(path.join(proofRoot, "proof-packet.json"), `${JSON.stringify(proofPacket, null, 2)}\n`);
+fs.writeFileSync(path.join(proofRoot, "final-report.md"), [
+  "# Knowledge Digest Recurrence Proof",
+  "",
+  `Proof level: ${proofPacket.proof_level}`,
+  `Cluster: \`${clusterId}\``,
+  `Wiki page: \`${expansion.wiki_page.id}\``,
+  `Digest candidate: \`${candidateId}\``,
+  `Delivery: \`${deliveries[0].id}\``,
+  "",
+  "## Gates",
+  ...Object.entries(proofPacket.gates).map(([key, value]) => `- ${value ? "[x]" : "[ ]"} ${key}`),
+  "",
+  "## Remaining Risk",
+  ...proofPacket.remaining_risk.map((item) => `- ${item}`),
+  "",
+].join("\n"));
+console.log(JSON.stringify(proofPacket, null, 2));
+NODE
+
+log "proof packet: $PROOF_ROOT/proof-packet.json"
+log "final report: $PROOF_ROOT/final-report.md"

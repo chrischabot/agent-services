@@ -335,7 +335,28 @@ PR, implementation note, or final report:
       leaves the cluster candidate-only. This closes the "review-only model JSON
       silently became publication" mirage. It is still a proof-fixture provider
       attempt plus deterministic expansion, not broad production-corpus semantic
-      clustering or accepted model-backed writer synthesis.
+      clustering or broad production-corpus model-backed writer quality.
+      Model-backed cluster writer proof
+      `.arcwell-dev/proofs/knowledge-cluster-model-writer-proof-20260626T092354Z-43488/artifacts/proof-packet.json`
+      then proved `arcwell knowledge write-cluster-model` and queued
+      `arcwell knowledge enqueue-cluster-model-write` use the same promotion,
+      provider-policy, cost, source-card citation, uncertainty, cluster-link,
+      and wiki/report quality gates before writing a page/report/digest
+      candidate. The proof seeded proof source cards, created a review-only
+      model-origin cluster, proved pre-promotion writer denial, promoted cluster
+      `kcl-d05b33585b8fa1ab` by explicit policy, ran live OpenAI
+      `gpt-4.1-mini`, recorded cost decision
+      `f1573158-929f-47c8-8216-387efea12f12`, wrote model-backed wiki page
+      `knowledge-agent-tooling-and-mcp-infrastructure-model-draft-224af13a`,
+      report `krpt-03e5a617cf07c686`, and digest candidate
+      `ba7b0fe4-d28c-43ab-96f6-a3f3d8ea2e00`, while delivering nothing
+      externally. Severe tests prove malformed, uncited, delivery-authorizing,
+      and provider-policy-denied model outputs fail closed with no wiki/report/
+      digest writes except a blocked editorial decision where appropriate. This
+      closes the "model writer scaffold exists but writes ungated link dumps"
+      mirage for a proof-scoped corpus. It is still not broad production-corpus
+      model-writing quality, automatic scheduled model writing, multi-day
+      service operation, or external delivery.
       The authenticated `/ops/ui` Knowledge Controls now also expose a
       CSRF/idempotency-protected model-cluster promotion action, double-gated by
       `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`
@@ -359,8 +380,8 @@ PR, implementation note, or final report:
       production-data semantic/model clustering over real corpora, broad X
       quota/tier/live coverage beyond the capped smoke, multi-day scheduled
       source recurrence, live external delivery recurrence, production
-      monitoring, richer model-backed writer/editor synthesis, and broader ops
-      UI repair controls.
+      monitoring, broad production-corpus model-backed writer/editor synthesis,
+      automatic scheduled model writing, and broader ops UI repair controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

@@ -167,6 +167,23 @@ Current implemented bridge slice:
   double-gated: `ops.knowledge_clusters.promote` authorizes the operator
   action, while core `knowledge_cluster.promote` still authorizes activating the
   cluster.
+- Source-card-gated model cluster writing through
+  `arcwell knowledge write-cluster-model`,
+  `arcwell knowledge enqueue-cluster-model-write`, and the resident
+  `knowledge_cluster_model_write` job. The writer path requires prior model
+  cluster promotion, provider policy, cost budget, exact source-card citations,
+  uncertainty language, a cluster link, and the existing wiki/report quality
+  audit before it can write a wiki page, report, or digest candidate; malformed,
+  uncited, delivery-authorizing, and provider-policy-denied outputs fail closed.
+  Fresh proof
+  `.arcwell-dev/proofs/knowledge-cluster-model-writer-proof-20260626T092354Z-43488/artifacts/proof-packet.json`
+  seeded proof source cards, created a review-only model-origin cluster, proved
+  pre-promotion denial, promoted cluster `kcl-d05b33585b8fa1ab`, invoked live
+  OpenAI `gpt-4.1-mini`, wrote model-backed wiki page
+  `knowledge-agent-tooling-and-mcp-infrastructure-model-draft-224af13a`, report
+  `krpt-03e5a617cf07c686`, digest candidate
+  `ba7b0fe4-d28c-43ab-96f6-a3f3d8ea2e00`, delivered nothing externally, and
+  browser-checked `/ops/ui`.
 - `/ops` and `/ops/ui` visibility for knowledge events, clusters, editorial
   decisions, reports, entities, relations, adapter runs, and entity-resolution
   proposals.
@@ -224,8 +241,10 @@ What it still does not prove:
   worker candidate-only path, while the promotion/expansion proof is still a
   foreground provider attempt over proof fixture data with one policy-gated
   promoted expansion.
-- Accepted model-backed writer/editor synthesis; promoted model clusters still
-  use deterministic source-card-backed expansion prose.
+- Broad production-corpus model-backed writer/editor synthesis and automatic
+  scheduled model writing. The live writer proof is source-card-gated and
+  accepted over a proof-scoped promoted cluster, not broad autonomous production
+  analyst quality.
 - Autonomous approval, broad wiki page update decisions, and live external
   delivery from shared knowledge reports.
 - Broad ops repair controls.
@@ -1152,6 +1171,8 @@ Refuting tests:
       resident worker loop.
 - [x] Add policy-gated promotion before model-origin clusters can drive
       wiki/report/digest expansion.
+- [x] Add explicit model-backed cluster writer behind promotion, policy/cost,
+      source-card citation, uncertainty, and wiki/report quality gates.
 - [ ] Add cluster revisioning or metadata to avoid stale report reuse.
 
 Refuting tests:
@@ -1170,6 +1191,9 @@ Refuting tests:
       wiki/report/digest side effects before promotion.
 - [x] Live OpenAI scheduled model-cluster proof over copied source-card corpus
       creates candidate-only clusters and no expansion side effects.
+- [x] Model writer output missing exact source-card citations, missing
+      uncertainty/cluster-link structure, or trying to authorize delivery fails
+      closed with no wiki/report/digest writes.
 
 ### Milestone 5: Editorial Decision Worker
 
@@ -1221,6 +1245,8 @@ Refuting tests:
 - [x] Add prompt-injection-as-data regression coverage for source-card-backed
       knowledge projection and ops rendering.
 - [x] Add uncertainty/confidence section validator for `knowledge_reports`.
+- [x] Add proof-scoped model-backed wiki writer path that cannot write without
+      exact source-card ids and the existing report quality gate.
 - [ ] Add wiki page versioning and rollback.
 
 Refuting tests:
@@ -1232,6 +1258,8 @@ Refuting tests:
 - [ ] Prompt injection in source remains quoted evidence.
 - [ ] Existing page gets update with version history.
 - [ ] Report includes human-readable explanation without requiring source clicks.
+- [x] Model writer output that is uncited, malformed, or delivery-authorizing
+      fails closed without creating wiki/report/digest rows.
 
 ### Milestone 8: Digest Routing
 
@@ -1281,6 +1309,14 @@ Add preserved proof scripts:
 - [ ] `scripts/knowledge-model-release-proof`
 - [ ] `scripts/knowledge-research-fanout-proof`
 - [ ] `scripts/knowledge-wiki-quality-proof`
+- [x] `scripts/knowledge-cluster-model-writer-proof`
+      passed at
+      `.arcwell-dev/proofs/knowledge-cluster-model-writer-proof-20260626T092354Z-43488/artifacts/proof-packet.json`:
+      proof source cards -> review-only model-origin cluster -> pre-promotion
+      writer denial -> explicit policy promotion -> live OpenAI model-backed
+      wiki/report/digest-candidate creation -> no external delivery ->
+      authenticated desktop/mobile ops visibility. This is not broad
+      production-corpus writer quality or automatic scheduled model writing.
 - [x] `scripts/knowledge-digest-recurrence-proof`
       passed at
       `.arcwell-dev/proofs/knowledge-digest-recurrence-proof-20260626T075355Z-75160/proof-packet.json`:

@@ -3,14 +3,15 @@ use arcwell_core::{
     AppPaths, CommerceAvailabilityProofInput, CommerceCandidateInput, CommerceContextFactInput,
     CommerceRenderedPageCheckInput, CommerceReportJudgmentInput, CommerceRunConfigInput,
     CommerceVerificationAttemptInput, DigestAlertScheduleInput, DoctorOptions, ImportRunFinish,
-    KnowledgeClusterProposalModelInput, KnowledgeEntityInput, KnowledgeEntityResolutionModelInput,
-    OpsSnapshot, PolicyRequest, ProcedureCandidateInput, RadarDeliveryInput, RadarProfileInput,
-    RadarRun, RenderedPageSnapshotInput, ResearchActiveFactCheckInput, ResearchArtifactInput,
-    ResearchConvergenceCloseLoopInput, ResearchConvergenceProviderSearchInput,
-    ResearchConvergenceStartInput, ResearchConvergenceStepInput, ResearchDocumentInput,
-    ResearchEditorialInvokeInput, ResearchEditorialRunInput, ResearchHostSearchInput,
-    ResearchHostSearchResultInput, ResearchRoleRunStart, ResearchSourceInput, SourceCardInput,
-    Store, WebSearchConfig, XStatsReport, personal_memory_eval_corpus,
+    KnowledgeClusterProposalModelInput, KnowledgeClusterWriterModelInput, KnowledgeEntityInput,
+    KnowledgeEntityResolutionModelInput, OpsSnapshot, PolicyRequest, ProcedureCandidateInput,
+    RadarDeliveryInput, RadarProfileInput, RadarRun, RenderedPageSnapshotInput,
+    ResearchActiveFactCheckInput, ResearchArtifactInput, ResearchConvergenceCloseLoopInput,
+    ResearchConvergenceProviderSearchInput, ResearchConvergenceStartInput,
+    ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
+    ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
+    ResearchRoleRunStart, ResearchSourceInput, SourceCardInput, Store, WebSearchConfig,
+    XStatsReport, personal_memory_eval_corpus,
 };
 use axum::{
     Json, Router,
@@ -1765,6 +1766,19 @@ enum KnowledgeSubcommand {
         #[arg(long)]
         skip_digest: bool,
     },
+    WriteClusterModel {
+        cluster_id: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long)]
+        skip_digest: bool,
+    },
     PromoteCluster {
         cluster_id: String,
         #[arg(long)]
@@ -1780,6 +1794,19 @@ enum KnowledgeSubcommand {
     },
     EnqueueClusterExpansion {
         cluster_id: String,
+        #[arg(long)]
+        skip_digest: bool,
+    },
+    EnqueueClusterModelWrite {
+        cluster_id: String,
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        #[arg(long)]
+        model_name: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         #[arg(long)]
         skip_digest: bool,
     },
@@ -3883,6 +3910,23 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
             cluster_id,
             skip_digest,
         } => print_json(&store.expand_knowledge_cluster(&cluster_id, !skip_digest)?),
+        KnowledgeSubcommand::WriteClusterModel {
+            cluster_id,
+            provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            skip_digest,
+        } => print_json(&store.expand_knowledge_cluster_with_model_writer(
+            KnowledgeClusterWriterModelInput {
+                cluster_id,
+                model_provider: provider,
+                model_name,
+                endpoint,
+                timeout_seconds,
+                create_digest: !skip_digest,
+            },
+        )?),
         KnowledgeSubcommand::PromoteCluster {
             cluster_id,
             reviewer,
@@ -3902,6 +3946,21 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
             cluster_id,
             skip_digest,
         } => print_json(&store.enqueue_knowledge_cluster_expansion_job(&cluster_id, !skip_digest)?),
+        KnowledgeSubcommand::EnqueueClusterModelWrite {
+            cluster_id,
+            provider,
+            model_name,
+            endpoint,
+            timeout_seconds,
+            skip_digest,
+        } => print_json(&store.enqueue_knowledge_cluster_model_writer_job(
+            &cluster_id,
+            &provider,
+            model_name.as_deref(),
+            endpoint.as_deref(),
+            timeout_seconds,
+            !skip_digest,
+        )?),
         KnowledgeSubcommand::EnqueueClusterInvestigation { cluster_id } => {
             print_json(&store.enqueue_knowledge_cluster_investigation_job(&cluster_id)?)
         }

@@ -17727,6 +17727,14 @@ impl Store {
                 continue;
             }
             let source_card_ids = cards.iter().map(|card| card.id.clone()).collect::<Vec<_>>();
+            let group_metadata = knowledge_backlog_group_projection_metadata(
+                &topic,
+                &source_card_ids,
+                &cards,
+                max_source_cards,
+                min_group_size,
+                max_clusters,
+            );
             let projection = self.project_knowledge_from_source_cards(
                 &topic,
                 cards,
@@ -17734,13 +17742,7 @@ impl Store {
                 "Local Proof",
                 "source_card_backlog_clustering",
                 Vec::new(),
-                json!({
-                    "max_source_cards": max_source_cards,
-                    "min_group_size": min_group_size,
-                    "max_clusters": max_clusters,
-                    "source_card_ids": source_card_ids,
-                    "clusterer": "deterministic_source_card_backlog_v1",
-                }),
+                group_metadata,
             )?;
             report.projections.push(projection);
         }
@@ -34605,20 +34607,45 @@ fn knowledge_backlog_entity_slug(haystack: &str, card: &SourceCard) -> Option<(S
     {
         return Some((slugify_key(owner), canonical_entity_label(owner)));
     }
+    for key in [
+        "author_handle",
+        "author_username",
+        "handle",
+        "username",
+        "user",
+    ] {
+        if let Some(value) = card.metadata.get(key).and_then(Value::as_str)
+            && let Some(entity) = known_knowledge_entity_slug(value)
+        {
+            return Some(entity);
+        }
+    }
+    if let Some(entity) = known_knowledge_entity_slug(haystack) {
+        return Some(entity);
+    }
+    None
+}
+
+fn known_knowledge_entity_slug(value: &str) -> Option<(String, String)> {
+    let lower = value.to_ascii_lowercase();
     for (needle, key, label) in [
+        ("andrej karpathy", "andrej-karpathy", "Andrej Karpathy"),
+        ("karpathy", "andrej-karpathy", "Andrej Karpathy"),
+        ("simon willison", "simon-willison", "Simon Willison"),
+        ("simonw", "simon-willison", "Simon Willison"),
         ("openai", "openai", "OpenAI"),
-        ("anthropic", "anthropic", "Anthropic"),
-        ("claude", "anthropic", "Anthropic"),
         ("vercel", "vercel", "Vercel"),
+        ("vercel eve", "vercel", "Vercel"),
+        (" eve ", "vercel", "Vercel"),
         ("nvidia", "nvidia", "NVIDIA"),
         ("nvda", "nvidia", "NVIDIA"),
         ("googledeepmind", "google-deepmind", "Google DeepMind"),
         ("google deepmind", "google-deepmind", "Google DeepMind"),
         ("deepmind", "google-deepmind", "Google DeepMind"),
-        ("karpathy", "andrej-karpathy", "Andrej Karpathy"),
-        ("simon willison", "simon-willison", "Simon Willison"),
+        ("anthropic", "anthropic", "Anthropic"),
+        ("claude", "anthropic", "Anthropic"),
     ] {
-        if haystack.contains(needle) {
+        if lower.contains(needle) {
             return Some((key.to_string(), label.to_string()));
         }
     }
@@ -34626,6 +34653,28 @@ fn knowledge_backlog_entity_slug(haystack: &str, card: &SourceCard) -> Option<(S
 }
 
 fn knowledge_backlog_theme_slug(haystack: &str, card: &SourceCard) -> Option<(String, String)> {
+    if haystack.contains("benchmark")
+        || haystack.contains("bench mark")
+        || haystack.contains("eval")
+        || haystack.contains("evaluation")
+        || haystack.contains("stork svg")
+    {
+        return Some((
+            "benchmarks-and-evaluation".to_string(),
+            "benchmarks and evaluation".to_string(),
+        ));
+    }
+    if haystack.contains("open source model")
+        || haystack.contains("model release")
+        || haystack.contains("released a model")
+        || haystack.contains("released an open model")
+        || haystack.contains("llm")
+    {
+        return Some((
+            "model-release-activity".to_string(),
+            "model release activity".to_string(),
+        ));
+    }
     if haystack.contains("mcp") || haystack.contains("model context protocol") {
         return Some((
             "mcp-agent-infrastructure".to_string(),
@@ -34643,28 +34692,126 @@ fn knowledge_backlog_theme_slug(haystack: &str, card: &SourceCard) -> Option<(St
             "agent SDK and workflow tooling".to_string(),
         ));
     }
+    if haystack.contains("slack")
+        || haystack.contains("prompt")
+        || haystack.contains("how i use")
+        || haystack.contains("workflow")
+        || haystack.contains("usage pattern")
+        || haystack.contains("uses claude")
+        || haystack.contains("using claude")
+    {
+        return Some((
+            "ai-usage-practices".to_string(),
+            "AI usage practices".to_string(),
+        ));
+    }
     if card.source_type == "github_release" || haystack.contains("release") {
         return Some((
             "release-launch-activity".to_string(),
             "release and launch activity".to_string(),
         ));
     }
-    if haystack.contains("benchmark") || haystack.contains("eval") {
-        return Some((
-            "benchmarks-and-evaluation".to_string(),
-            "benchmarks and evaluation".to_string(),
-        ));
-    }
-    if haystack.contains("open source model")
-        || haystack.contains("model release")
-        || haystack.contains("llm")
+    if card.source_type == "github_repo"
+        || haystack.contains("package")
+        || haystack.contains("repository")
+        || haystack.contains("repo")
+        || haystack.contains("library")
+        || haystack.contains("framework")
     {
         return Some((
-            "model-release-activity".to_string(),
-            "model release activity".to_string(),
+            "repository-and-package-activity".to_string(),
+            "repository and package activity".to_string(),
+        ));
+    }
+    if matches!(
+        card.source_type.as_str(),
+        "hackernews_story" | "reddit_post" | "x" | "x_tweet"
+    ) {
+        return Some((
+            "community-reaction".to_string(),
+            "community reaction".to_string(),
         ));
     }
     None
+}
+
+fn knowledge_backlog_group_projection_metadata(
+    topic: &str,
+    source_card_ids: &[String],
+    cards: &[SourceCard],
+    max_source_cards: usize,
+    min_group_size: usize,
+    max_clusters: usize,
+) -> Value {
+    let providers = sorted_card_values(cards, |card| Some(card.provider.clone()));
+    let source_types = sorted_card_values(cards, |card| Some(card.source_type.clone()));
+    let source_roles = sorted_card_values(cards, |card| {
+        Some(knowledge_backlog_signal_role_for_card(card))
+    });
+    let source_kinds = sorted_card_values(cards, |card| {
+        card.metadata
+            .get("source_kind")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    let github_repos = sorted_card_values(cards, knowledge_github_repo_key);
+    let external_domains = sorted_card_values(cards, source_card_external_domain);
+    let primary_source_count = cards
+        .iter()
+        .filter(|card| knowledge_backlog_signal_role_for_card(card).contains("primary"))
+        .count();
+    let reaction_source_count = cards
+        .iter()
+        .filter(|card| knowledge_backlog_signal_role_for_card(card).contains("reaction"))
+        .count();
+    json!({
+        "max_source_cards": max_source_cards,
+        "min_group_size": min_group_size,
+        "max_clusters": max_clusters,
+        "source_card_ids": source_card_ids,
+        "clusterer": "deterministic_source_card_backlog_v2",
+        "group": {
+            "topic": topic,
+            "providers": providers,
+            "source_types": source_types,
+            "source_roles": source_roles,
+            "source_kinds": source_kinds,
+            "github_repos": github_repos,
+            "external_domains": external_domains,
+            "primary_source_count": primary_source_count,
+            "reaction_source_count": reaction_source_count,
+            "trust_boundary": "group metadata is derived from source-card metadata and text; source text remains untrusted evidence"
+        }
+    })
+}
+
+fn sorted_card_values<F>(cards: &[SourceCard], mut f: F) -> Vec<String>
+where
+    F: FnMut(&SourceCard) -> Option<String>,
+{
+    cards
+        .iter()
+        .filter_map(|card| f(card).map(|value| value.trim().to_string()))
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn knowledge_backlog_signal_role_for_card(card: &SourceCard) -> String {
+    match card.source_type.as_str() {
+        "hackernews_story" | "reddit_post" | "x" | "x_tweet" => "reaction_evidence".to_string(),
+        _ => knowledge_source_role_for_card(card),
+    }
+}
+
+fn source_card_external_domain(card: &SourceCard) -> Option<String> {
+    card.metadata
+        .get("external_url")
+        .and_then(Value::as_str)
+        .or_else(|| Some(card.url.as_str()))
+        .and_then(|url| Url::parse(url).ok())
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
 }
 
 fn source_card_is_generated_only_evidence(card: &SourceCard) -> bool {
@@ -35070,6 +35217,19 @@ fn render_knowledge_projection_report(
         *acc.entry(card.provider.clone()).or_insert(0usize) += 1;
         acc
     });
+    let source_roles = sorted_card_values(source_cards, |card| {
+        Some(knowledge_backlog_signal_role_for_card(card))
+    });
+    let github_repos = sorted_card_values(source_cards, knowledge_github_repo_key);
+    let external_domains = sorted_card_values(source_cards, source_card_external_domain);
+    let primary_source_count = source_cards
+        .iter()
+        .filter(|card| knowledge_backlog_signal_role_for_card(card).contains("primary"))
+        .count();
+    let reaction_source_count = source_cards
+        .iter()
+        .filter(|card| knowledge_backlog_signal_role_for_card(card).contains("reaction"))
+        .count();
     let source_ids = source_cards
         .iter()
         .map(|card| card.id.clone())
@@ -35103,6 +35263,9 @@ Arcwell projected {source_count} durable source-card rows into the unified knowl
 
 ## Why it matters
 This is the first bridge between the existing live/captured ingestion machinery and the new source-agnostic knowledge substrate. A live radar run, browser-captured Reddit listing, GitHub fetch, RSS fetch, or existing source-card query can now become confirmed knowledge events, a durable cluster, an editorial decision, and a human-readable report without bypassing source-card provenance. The output is still conservative: it does not claim semantic synthesis, wiki expansion, external delivery, or scheduled recurrence unless later proof gates run those stages.
+
+## Signal mix
+The cluster contains {primary_source_count} primary-source-style rows and {reaction_source_count} reaction/community rows. Source roles present: {source_roles:?}. GitHub repositories detected: {github_repos:?}. External domains detected: {external_domains:?}. These fields are used to explain evidence shape and follow-up priorities; they are not treated as instructions from the source text.
 
 ## Evidence
 {highlights}
@@ -58743,6 +58906,278 @@ mod tests {
         let replay = store.cluster_source_card_backlog(20, 2, 10).unwrap();
         assert_eq!(replay.projections.len(), 0);
         assert_eq!(store.list_knowledge_clusters(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn severe_source_card_backlog_clustering_preserves_ai_signal_mix_without_topic_collapse() {
+        // CLAIM: deterministic backlog clustering can coalesce the named
+        // cross-source AI infra signals without collapsing unrelated people,
+        // model releases, benchmarks, and SDK launches into one generic bucket.
+        // ORACLE: five source-backed groups are created, Karpathy+Claude-in-
+        // Slack is not misattributed to Anthropic, and cluster metadata records
+        // provider/source-role/repo/domain signal mix for later writers.
+        // SEVERITY: Severe because broad "interesting AI things" clustering can
+        // look comprehensive while losing exactly the correlations the user
+        // wanted reports to explain.
+        let store = test_store("knowledge-backlog-ai-signal-mix");
+        let openai_release = store
+            .add_source_card(SourceCardInput {
+                title: "OpenAI agents package release".to_string(),
+                url: "https://github.com/openai/agents/releases/tag/v1.2.0".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary: "OpenAI published an agents package release with MCP support and agent workflow tooling.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:00:00Z".to_string()),
+                metadata: json!({ "owner": "openai", "repo": "agents", "tag": "v1.2.0" }),
+            })
+            .unwrap();
+        let openai_tweet = store
+            .add_source_card(SourceCardInput {
+                title: "OpenAI announces agents package on X".to_string(),
+                url: "https://x.com/openai/status/2067000000000000002".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "OpenAI tweeted that the agents package helps developers build MCP-connected agent workflows.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:03:00Z".to_string()),
+                metadata: json!({ "author_handle": "OpenAI", "source_kind": "x_recent_search" }),
+            })
+            .unwrap();
+        let openai_hn = store
+            .add_source_card(SourceCardInput {
+                title: "HN discusses OpenAI agents MCP package".to_string(),
+                url: "https://news.ycombinator.com/item?id=42000001".to_string(),
+                source_type: "hackernews_story".to_string(),
+                provider: "hackernews".to_string(),
+                summary: "Developers compared OpenAI's agents package with other MCP and agent infrastructure releases.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:05:00Z".to_string()),
+                metadata: json!({ "source_kind": "hackernews", "external_url": "https://github.com/openai/agents" }),
+            })
+            .unwrap();
+        let karpathy_x = store
+            .add_source_card(SourceCardInput {
+                title: "Andrej Karpathy shares Claude in Slack workflow".to_string(),
+                url: "https://x.com/karpathy/status/2067000000000000100".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Andrej Karpathy described how he uses Claude in Slack for everyday coding and research workflow practice.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:10:00Z".to_string()),
+                metadata: json!({ "author_handle": "karpathy", "source_kind": "x_recent_search" }),
+            })
+            .unwrap();
+        let karpathy_hn = store
+            .add_source_card(SourceCardInput {
+                title: "Developers discuss Karpathy Claude Slack workflow".to_string(),
+                url: "https://news.ycombinator.com/item?id=42000002".to_string(),
+                source_type: "hackernews_story".to_string(),
+                provider: "hackernews".to_string(),
+                summary: "The discussion focused on Karpathy's Claude-in-Slack usage pattern and what it implies for team AI workflows.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:12:00Z".to_string()),
+                metadata: json!({ "source_kind": "hackernews" }),
+            })
+            .unwrap();
+        let simon_blog = store
+            .add_source_card(SourceCardInput {
+                title: "Simon Willison replaces stork SVG benchmark".to_string(),
+                url: "https://simonwillison.net/2026/Jun/25/new-benchmark/".to_string(),
+                source_type: "rss".to_string(),
+                provider: "rss".to_string(),
+                summary: "Simon Willison developed a new benchmark to replace his stork SVG evaluation for coding agents.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:20:00Z".to_string()),
+                metadata: json!({ "source_kind": "rss", "source_detail": "https://simonwillison.net/atom/everything/" }),
+            })
+            .unwrap();
+        let simon_x = store
+            .add_source_card(SourceCardInput {
+                title: "Simon Willison benchmark reaction".to_string(),
+                url: "https://x.com/simonw/status/2067000000000000200".to_string(),
+                source_type: "x_tweet".to_string(),
+                provider: "x".to_string(),
+                summary: "Simon Willison posted about the benchmark replacing stork SVG and developers discussed eval coverage.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:22:00Z".to_string()),
+                metadata: json!({ "author_handle": "simonw", "source_kind": "x_recent_search" }),
+            })
+            .unwrap();
+        let nvidia_release = store
+            .add_source_card(SourceCardInput {
+                title: "NVIDIA releases open source model".to_string(),
+                url: "https://github.com/NVIDIA/open-model/releases/tag/v0.1.0".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary: "NVIDIA released an open source model and described it as a model release for agent developers.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:30:00Z".to_string()),
+                metadata: json!({ "owner": "NVIDIA", "repo": "open-model", "tag": "v0.1.0" }),
+            })
+            .unwrap();
+        let nvidia_blog = store
+            .add_source_card(SourceCardInput {
+                title: "NVIDIA open model announcement".to_string(),
+                url: "https://developer.nvidia.com/blog/open-model-release".to_string(),
+                source_type: "rss".to_string(),
+                provider: "rss".to_string(),
+                summary: "NVIDIA announced the open source model release and named deployment caveats for enterprise AI teams.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:32:00Z".to_string()),
+                metadata: json!({ "source_kind": "rss", "source_detail": "https://developer.nvidia.com/blog" }),
+            })
+            .unwrap();
+        let vercel_release = store
+            .add_source_card(SourceCardInput {
+                title: "Vercel Eve agent SDK release".to_string(),
+                url: "https://github.com/vercel/eve/releases/tag/v0.1.0".to_string(),
+                source_type: "github_release".to_string(),
+                provider: "github".to_string(),
+                summary:
+                    "Vercel released Eve, an agent SDK for simplifying agent workflow development."
+                        .to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:40:00Z".to_string()),
+                metadata: json!({ "owner": "vercel", "repo": "eve", "tag": "v0.1.0" }),
+            })
+            .unwrap();
+        let vercel_blog = store
+            .add_source_card(SourceCardInput {
+                title: "Vercel explains Eve agent workflows".to_string(),
+                url: "https://vercel.com/blog/eve-agent-sdk".to_string(),
+                source_type: "rss".to_string(),
+                provider: "rss".to_string(),
+                summary: "Vercel explained Eve as agent SDK workflow tooling for building and deploying agents.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some("2026-06-25T01:42:00Z".to_string()),
+                metadata: json!({ "source_kind": "rss", "source_detail": "https://vercel.com/blog/rss" }),
+            })
+            .unwrap();
+
+        let report = store.cluster_source_card_backlog(50, 2, 10).unwrap();
+
+        assert_eq!(report.projections.len(), 5);
+        let topics = report
+            .projections
+            .iter()
+            .map(|projection| projection.topic.clone())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "OpenAI: MCP and agent infrastructure",
+            "Andrej Karpathy: AI usage practices",
+            "Simon Willison: benchmarks and evaluation",
+            "NVIDIA: model release activity",
+            "Vercel: agent SDK and workflow tooling",
+        ] {
+            assert!(topics.contains(expected), "{topics:?}");
+        }
+        assert!(
+            !topics.contains("Anthropic: AI usage practices"),
+            "Karpathy's Claude usage practice must not be attributed to Anthropic: {topics:?}"
+        );
+
+        let openai_projection = report
+            .projections
+            .iter()
+            .find(|projection| projection.topic == "OpenAI: MCP and agent infrastructure")
+            .expect("OpenAI package cluster");
+        let openai_ids = openai_projection
+            .cluster
+            .source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(openai_ids.contains(&openai_release.id));
+        assert!(openai_ids.contains(&openai_tweet.id));
+        assert!(openai_ids.contains(&openai_hn.id));
+        let openai_group = openai_projection
+            .cluster
+            .metadata
+            .pointer("/source_metadata/group")
+            .expect("group metadata");
+        assert_eq!(
+            openai_group
+                .get("primary_source_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            openai_group
+                .get("reaction_source_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert!(
+            openai_group
+                .get("github_repos")
+                .and_then(Value::as_array)
+                .is_some_and(|repos| repos.iter().any(|repo| repo == "github:openai/agents"))
+        );
+        assert!(
+            openai_projection
+                .report
+                .body_markdown
+                .contains("## Signal mix")
+        );
+        assert!(
+            openai_projection
+                .report
+                .body_markdown
+                .contains("reaction/community rows")
+        );
+
+        let karpathy_ids = report
+            .projections
+            .iter()
+            .find(|projection| projection.topic == "Andrej Karpathy: AI usage practices")
+            .expect("Karpathy cluster")
+            .cluster
+            .source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(karpathy_ids.contains(&karpathy_x.id));
+        assert!(karpathy_ids.contains(&karpathy_hn.id));
+
+        let simon_ids = report
+            .projections
+            .iter()
+            .find(|projection| projection.topic == "Simon Willison: benchmarks and evaluation")
+            .expect("Simon benchmark cluster")
+            .cluster
+            .source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(simon_ids.contains(&simon_blog.id));
+        assert!(simon_ids.contains(&simon_x.id));
+
+        let nvidia_ids = report
+            .projections
+            .iter()
+            .find(|projection| projection.topic == "NVIDIA: model release activity")
+            .expect("NVIDIA model cluster")
+            .cluster
+            .source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(nvidia_ids.contains(&nvidia_release.id));
+        assert!(nvidia_ids.contains(&nvidia_blog.id));
+
+        let vercel_ids = report
+            .projections
+            .iter()
+            .find(|projection| projection.topic == "Vercel: agent SDK and workflow tooling")
+            .expect("Vercel Eve cluster")
+            .cluster
+            .source_card_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(vercel_ids.contains(&vercel_release.id));
+        assert!(vercel_ids.contains(&vercel_blog.id));
     }
 
     #[test]

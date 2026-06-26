@@ -205,6 +205,15 @@ PR, implementation note, or final report:
       suppression for already clustered source cards, source-health advancement
       only after durable clustering, and the two-pass worker path from
       scheduled backlog clustering to automatic wiki/report/digest expansion.
+      The deterministic backlog clusterer now keeps richer signal metadata
+      for each cluster: provider families, source types, backlog presentation
+      roles, GitHub repos, external domains, and primary-vs-reaction counts.
+      Severe tests prove the named AI-infra examples split into separate
+      source-backed clusters (`OpenAI` package/MCP, Karpathy's Claude-in-Slack
+      practice, Simon Willison's benchmark, NVIDIA model release, and Vercel
+      Eve agent SDK) without misattributing Karpathy's Claude usage to
+      Anthropic or collapsing everything into one generic AI bucket. This is
+      deterministic signal preservation, not semantic/model clustering.
       The current ops-control slice adds authenticated `/ops/ui` Knowledge
       Controls for scheduling the backlog watch source and enqueueing a
       one-shot backlog clustering job, plus queueing due shared cluster

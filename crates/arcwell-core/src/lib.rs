@@ -3200,6 +3200,7 @@ pub struct XStatsReport {
     pub digest_projections_by_status: BTreeMap<String, i64>,
     pub digest_candidates_linked_to_x: i64,
     pub sync_runs_by_status: BTreeMap<String, i64>,
+    pub unresolved_failed_sync_runs: i64,
     pub source_health_by_status: BTreeMap<String, i64>,
     pub watch_sources_by_status: BTreeMap<String, i64>,
     pub latest_sync_runs: Vec<XSyncRunSummary>,
@@ -6336,6 +6337,21 @@ impl Store {
             sync_runs_by_status: self.grouped_counts(
                 "SELECT status, COUNT(*) FROM x_sync_runs GROUP BY status ORDER BY status",
             )?,
+            unresolved_failed_sync_runs: self.count_query(
+                r#"
+                SELECT COUNT(*)
+                FROM x_sync_runs failed
+                WHERE failed.status = 'failed'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM x_sync_runs later
+                    WHERE later.status = 'completed'
+                      AND later.started_at > failed.started_at
+                      AND later.stream = failed.stream
+                      AND COALESCE(later.cursor_key, '') = COALESCE(failed.cursor_key, '')
+                  )
+                "#,
+            )?,
             source_health_by_status: self.grouped_counts(
                 "SELECT status, COUNT(*) FROM source_health WHERE provider = 'x' OR key LIKE 'x:%' GROUP BY status ORDER BY status",
             )?,
@@ -6523,10 +6539,11 @@ impl Store {
                 stats.drift.non_healthy_sources
             ));
         }
-        if let Some(failed) = stats.sync_runs_by_status.get("failed")
-            && *failed > 0
-        {
-            warnings.push(format!("X sync failures: {failed} failed sync run(s)"));
+        if stats.unresolved_failed_sync_runs > 0 {
+            warnings.push(format!(
+                "X sync failures: {} unresolved failed sync run(s)",
+                stats.unresolved_failed_sync_runs
+            ));
         }
         if stats.portable_export.missing {
             warnings.push(format!(
@@ -85567,6 +85584,64 @@ reason = "X monitor network blocked for test"
     }
 
     #[test]
+    fn severe_x_failed_sync_health_counts_only_unresolved_failures() {
+        // CLAIM: X failed-sync history remains auditable, but health/doctor only
+        // warn on failures that have no later completed run for the same
+        // stream/cursor.
+        // PRECONDITIONS: an old export_portable failure is followed by a
+        // successful export_portable run.
+        // POSTCONDITIONS: x_stats still counts the historical failed row, but
+        // unresolved_failed_sync_runs is zero and health emits no sync-failure
+        // warning.
+        // SEVERITY: Severe because otherwise repaired provider/export failures
+        // become permanent operational mirages.
+        let store = test_store("x-resolved-sync-failure");
+        store
+            .import_x_json_value(&json!([
+                {
+                    "id": "resolved-sync-failure",
+                    "author": "arcwell",
+                    "text": "Resolved failed sync proof.",
+                    "url": "https://x.com/arcwell/status/resolved-sync-failure",
+                    "source_kind": "json_import"
+                }
+            ]))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO x_sync_runs
+                  (id, account_id, stream, transport, status, started_at, completed_at,
+                   seen, inserted, updated, skipped_duplicates, rejected, cursor_key,
+                   previous_cursor, new_cursor, error, metadata_json)
+                VALUES
+                  ('old-failed-export', NULL, 'export_portable', 'local_portable',
+                   'failed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                   0, 0, 0, 0, 0, NULL, NULL, NULL, 'old failure', '{}')
+                "#,
+                [],
+            )
+            .unwrap();
+
+        store
+            .export_x_portable(&store.paths().home.join("portable-x"))
+            .unwrap();
+        let stats = store.x_stats().unwrap();
+        assert_eq!(stats.sync_runs_by_status.get("failed").copied(), Some(1));
+        assert_eq!(stats.unresolved_failed_sync_runs, 0);
+        let health = store.health().unwrap();
+        assert!(
+            !health
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("X sync failures")),
+            "{:?}",
+            health.warnings
+        );
+    }
+
+    #[test]
     fn severe_x_stats_reports_drift_status_and_redacted_sync_failures() {
         // CLAIM: X stats is a real completeness gate, not a decorative counter.
         // PRECONDITIONS: canonical import succeeds, then FTS is deliberately damaged,
@@ -85663,6 +85738,7 @@ reason = "X monitor network blocked for test"
             Some(1)
         );
         assert_eq!(damaged.sync_runs_by_status.get("failed").copied(), Some(1));
+        assert_eq!(damaged.unresolved_failed_sync_runs, 1);
         assert_eq!(
             damaged.sync_runs_by_status.get("completed").copied(),
             Some(1)

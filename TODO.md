@@ -1159,8 +1159,9 @@ PR, implementation note, or final report:
       real-home proof
       `.arcwell-dev/proofs/x-portable-export-repair-20260626T165215Z/artifacts/proof-packet.json`
       exported and validated 5,164 tweets with 15 redactions. Remaining X
-      strict-doctor blockers are current watch-source health and failed sync-run
-      accounting, not portable export freshness.
+      strict-doctor blockers are current watch-source health and 700 unresolved
+      failed watch syncs, not portable export freshness or resolved historical
+      failures.
 - [ ] Replace broad X watch-source retry storms with a quota-aware scheduler:
       bounded per-window fanout, provider-plan capacity estimates, exponential
       backoff that keeps `next_run_at` meaningful, stale-rate-limit surfacing,

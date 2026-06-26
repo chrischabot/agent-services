@@ -68,8 +68,8 @@ probe now proves the stored-token refresh path. The current proof packets are:
 - `.arcwell-dev/proofs/x-portable-export-repair-20260626T165215Z/artifacts/proof-packet.json`
   exported and validated the real local canonical X corpus as a portable bundle:
   5,164 tweets, 15 secret-like field/value redactions, fresh portable export
-  status, and strict-doctor still failing only on remaining X watch-source
-  health/sync-run debt.
+  status, resolved-failure accounting, and strict-doctor still failing only on
+  remaining X watch-source health plus unresolved watch sync debt.
 
 Use a disposable/current X credential with scopes/API tier that allow recent
 search, bookmarks, follows, user lookup, and offline refresh. Do not paste
@@ -161,8 +161,9 @@ Remaining limits:
 - These are capped copied-home live proofs, not multi-day recurrence or broad
   quota/tier coverage.
 - X portable export freshness is repaired, but broad watch-source health is
-  still blocked by current rate-limit rows and needs a quota-aware scheduler
-  proof rather than a one-shot broad retry.
+  still blocked by current rate-limit rows and 700 unresolved watch sync
+  failures. It needs a quota-aware scheduler proof rather than a one-shot broad
+  retry.
 - Provider-side revocation is classifier-tested locally, not live-tested against
   a deliberately revoked X refresh token.
 - X plan/API tier changes can still alter bookmark/follow/watch behavior.

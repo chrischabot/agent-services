@@ -10219,12 +10219,7 @@ fn ops_health_score(snapshot: &OpsSnapshot) -> OpsHealthScore {
         + snapshot.x_stats.drift.fts_without_tweets
         + snapshot.x_stats.drift.projection_failures
         + snapshot.x_stats.drift.non_healthy_sources;
-    let x_failed_sync_runs = snapshot
-        .x_stats
-        .sync_runs_by_status
-        .get("failed")
-        .copied()
-        .unwrap_or(0);
+    let x_failed_sync_runs = snapshot.x_stats.unresolved_failed_sync_runs;
     let mut issues = Vec::new();
     if !snapshot.health.ok {
         issues.push("base health report is failing".to_string());
@@ -10258,7 +10253,9 @@ fn ops_health_score(snapshot: &OpsSnapshot) -> OpsHealthScore {
         issues.push(format!("{x_drift} X drift/source-health issue(s)"));
     }
     if x_failed_sync_runs > 0 {
-        issues.push(format!("{x_failed_sync_runs} failed X sync run(s)"));
+        issues.push(format!(
+            "{x_failed_sync_runs} unresolved failed X sync run(s)"
+        ));
     }
     for warning in &snapshot.health.warnings {
         issues.push(warning.clone());
@@ -21709,6 +21706,7 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
             .x_stats
             .sync_runs_by_status
             .insert("failed".to_string(), 2);
+        snapshot.x_stats.unresolved_failed_sync_runs = 2;
         snapshot
             .x_stats
             .digest_projections_by_status
@@ -21728,7 +21726,7 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
         assert!(html.contains("failed:2"));
         assert!(html.contains("X digest queue"));
         assert!(html.contains("2 linked candidate(s); projections completed:3"));
-        assert!(html.contains("failed X sync run"));
+        assert!(html.contains("unresolved failed X sync run"));
         assert!(html.contains("X FTS drift"));
     }
 

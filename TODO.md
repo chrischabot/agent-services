@@ -191,8 +191,16 @@ PR, implementation note, or final report:
       wiki/report/digest side effects, empty evidence skips without invoking a
       provider or retry storm, provider-policy denial writes no clusters, and
       malformed enqueue input creates no poison job. This is Local Proof for
-      scheduled model proposal recurrence, not broad production-corpus semantic
-      clustering or live-provider wall-clock recurrence.
+      scheduled model proposal recurrence. Fresh proof
+      `.arcwell-dev/proofs/knowledge-model-cluster-scheduled-proof-20260626T090342Z-10737/artifacts/proof-packet.json`
+      upgrades the scheduled worker path to copied-home live-provider proof:
+      a 40-tick resident worker loop used live OpenAI `gpt-4.1-mini`, 24 copied
+      source cards, cost decision `0c5b1d76-d0b2-4664-9631-8da8bf5f3dbb`, and
+      wrote six review-only candidate clusters with source-health and browser
+      ops visibility while creating no reports, editorial decisions, digest
+      candidates, or expansion jobs. This is still not broad production-corpus
+      semantic clustering quality, promotion, model-written wiki synthesis,
+      multi-day service recurrence, or external delivery.
       This slice adds shared cluster expansion via
       `arcwell knowledge expand-cluster` and queued
       `arcwell knowledge enqueue-cluster-expansion`: a deterministic

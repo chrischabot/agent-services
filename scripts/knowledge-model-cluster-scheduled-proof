@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+if [ ! -x "$ARCWELL_BIN" ]; then
+  ARCWELL_BIN="$(command -v arcwell || true)"
+fi
+
+if [ -z "${ARCWELL_BIN:-}" ] || [ ! -x "$ARCWELL_BIN" ]; then
+  echo "BLOCKED: arcwell binary not found. Run: cargo build -p arcwell" >&2
+  exit 2
+fi
+
+for required in node rsync sqlite3 curl agent-browser; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "BLOCKED: $required is required for scheduled model-cluster proof." >&2
+    exit 2
+  fi
+done
+
+RUN_STAMP="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_SCHEDULED_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_SCHEDULED_DIR:-$REPO_ROOT/.arcwell-dev/proofs/knowledge-model-cluster-scheduled-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+SOURCE_HOME="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_SOURCE_HOME:-${ARCWELL_HOME:-$HOME/.arcwell}}"
+export ARCWELL_HOME="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_PROOF_HOME:-$PROOF_ROOT/home}"
+AUTH_TOKEN="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_HTTP_TOKEN:-knowledge-model-cluster-$RUN_STAMP}"
+SESSION="arcwell-knowledge-model-cluster-$RUN_STAMP"
+QUERY="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_QUERY:-agent}"
+PROVIDER="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_PROVIDER:-openai}"
+MODEL="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_MODEL:-gpt-4.1-mini}"
+TIMEOUT_SECONDS="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_TIMEOUT_SECONDS:-45}"
+MAX_SOURCE_CARDS="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_MAX_SOURCE_CARDS:-24}"
+MAX_CLUSTERS="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_MAX_CLUSTERS:-6}"
+MAX_TICKS="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_MAX_TICKS:-40}"
+IDLE_SLEEP_MS="${ARCWELL_KNOWLEDGE_MODEL_CLUSTER_IDLE_SLEEP_MS:-250}"
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log() {
+  printf '[knowledge-model-cluster-scheduled-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[knowledge-model-cluster-scheduled-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+query_one() {
+  sqlite3 -noheader -batch "$ARCWELL_HOME/arcwell.sqlite3" "$1" | head -n 1
+}
+
+wait_for_sql_value() {
+  local description="$1"
+  local seconds="$2"
+  local sql="$3"
+  local deadline=$((SECONDS + seconds))
+  local value=""
+  until [[ -n "$value" ]]; do
+    value="$(query_one "$sql" || true)"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      fail "timed out waiting for $description"
+    fi
+    sleep 0.2
+  done
+}
+
+cleanup() {
+  set +e
+  if [ -n "${WORKER_PID:-}" ] && kill -0 "$WORKER_PID" >/dev/null 2>&1; then
+    kill "$WORKER_PID" >/dev/null 2>&1 || true
+    wait "$WORKER_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+    wait "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
+  agent-browser --session "$SESSION" close >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+if [ ! -d "$SOURCE_HOME" ]; then
+  fail "source Arcwell home not found: $SOURCE_HOME"
+fi
+
+log "proof root: $PROOF_ROOT"
+log "copying source home into disposable proof home"
+rsync -a --exclude 'backups/' --exclude 'proofs/' "$SOURCE_HOME"/ "$ARCWELL_HOME"/ >/dev/null
+
+if [ ! -f "$ARCWELL_HOME/arcwell.sqlite3" ]; then
+  fail "copied Arcwell home has no arcwell.sqlite3"
+fi
+
+log "clearing derived knowledge/queue state while preserving source cards and secrets"
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<'SQL'
+PRAGMA foreign_keys = OFF;
+DELETE FROM wiki_jobs;
+DELETE FROM digest_alert_ticks;
+DELETE FROM digest_alert_schedules;
+DELETE FROM digest_deliveries;
+DELETE FROM digest_candidates;
+DELETE FROM knowledge_editorial_decisions;
+DELETE FROM knowledge_reports;
+DELETE FROM knowledge_relations;
+DELETE FROM knowledge_entity_resolutions;
+DELETE FROM knowledge_entities;
+DELETE FROM knowledge_event_sources;
+DELETE FROM knowledge_events;
+DELETE FROM knowledge_clusters;
+DELETE FROM policy_decisions;
+DELETE FROM cost_decisions;
+DELETE FROM watch_sources;
+DELETE FROM source_health;
+DELETE FROM worker_heartbeats;
+PRAGMA foreign_keys = ON;
+SQL
+
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<SQL >"$ARTIFACT_DIR/counts-before.tsv"
+SELECT 'source_cards', COUNT(*) FROM source_cards;
+SELECT 'query_matches', COUNT(*) FROM source_cards WHERE title LIKE '%' || replace('$QUERY', '''', '''''') || '%' OR summary LIKE '%' || replace('$QUERY', '''', '''''') || '%';
+SELECT 'knowledge_clusters', COUNT(*) FROM knowledge_clusters;
+SELECT 'knowledge_reports', COUNT(*) FROM knowledge_reports;
+SELECT 'digest_candidates', COUNT(*) FROM digest_candidates;
+SQL
+
+cat >"$ARCWELL_HOME/arcwell-policy.toml" <<POLICY
+[[rules]]
+id = "allow-scheduled-model-cluster-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "allow proof-scoped scheduled model cluster enqueue"
+priority = 20
+
+[[rules]]
+id = "allow-scheduled-model-cluster-openai"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-knowledge"
+provider = "openai"
+source = "knowledge_cluster_proposal"
+reason = "allow proof-scoped live provider model cluster proposal"
+priority = 20
+POLICY
+
+log "scheduling model-cluster proposals query=$QUERY provider=$PROVIDER model=$MODEL"
+"$ARCWELL_BIN" knowledge schedule-model-clusters "$QUERY" \
+  --provider "$PROVIDER" \
+  --model-name "$MODEL" \
+  --timeout-seconds "$TIMEOUT_SECONDS" \
+  --max-source-cards "$MAX_SOURCE_CARDS" \
+  --max-clusters "$MAX_CLUSTERS" \
+  --cadence hot \
+  --status active \
+  >"$ARTIFACT_DIR/watch-source.json"
+
+START_EPOCH="$(date +%s)"
+log "starting bounded resident worker loop"
+"$ARCWELL_BIN" worker run \
+  --max-jobs-per-tick 5 \
+  --idle-sleep-ms "$IDLE_SLEEP_MS" \
+  --max-ticks "$MAX_TICKS" \
+  >"$ARTIFACT_DIR/worker-loop.jsonl" \
+  2>"$ARTIFACT_DIR/worker-loop.err" &
+WORKER_PID=$!
+printf '%s\n' "$WORKER_PID" >"$ARTIFACT_DIR/worker.pid"
+
+JOB_ID="$(wait_for_sql_value "completed scheduled model proposal job" 75 "SELECT id FROM wiki_jobs WHERE kind = 'knowledge_cluster_model_propose' AND status = 'completed' ORDER BY updated_at DESC LIMIT 1;")"
+log "completed model proposal job: $JOB_ID"
+
+log "waiting for bounded worker loop to exit"
+if ! wait "$WORKER_PID"; then
+  WORKER_STATUS=$?
+  WORKER_PID=""
+  fail "resident worker loop exited with status $WORKER_STATUS"
+fi
+WORKER_PID=""
+END_EPOCH="$(date +%s)"
+
+"$ARCWELL_BIN" knowledge clusters --limit 50 >"$ARTIFACT_DIR/clusters.json"
+"$ARCWELL_BIN" knowledge events --limit 50 >"$ARTIFACT_DIR/events.json"
+"$ARCWELL_BIN" knowledge reports --limit 20 >"$ARTIFACT_DIR/reports.json"
+"$ARCWELL_BIN" ops >"$ARTIFACT_DIR/ops.json"
+"$ARCWELL_BIN" cost summary >"$ARTIFACT_DIR/cost-summary.json"
+"$ARCWELL_BIN" policy list --limit 50 >"$ARTIFACT_DIR/policy-decisions.json"
+sqlite3 -json "$ARCWELL_HOME/arcwell.sqlite3" "SELECT id, kind, status, input_json, result_json, error FROM wiki_jobs ORDER BY updated_at DESC;" >"$ARTIFACT_DIR/wiki-jobs.json"
+sqlite3 -json "$ARCWELL_HOME/arcwell.sqlite3" "SELECT * FROM source_health ORDER BY updated_at DESC;" >"$ARTIFACT_DIR/source-health.json"
+sqlite3 "$ARCWELL_HOME/arcwell.sqlite3" <<'SQL' >"$ARTIFACT_DIR/counts-after.tsv"
+SELECT 'knowledge_clusters', COUNT(*) FROM knowledge_clusters;
+SELECT 'knowledge_reports', COUNT(*) FROM knowledge_reports;
+SELECT 'knowledge_editorial_decisions', COUNT(*) FROM knowledge_editorial_decisions;
+SELECT 'digest_candidates', COUNT(*) FROM digest_candidates;
+SELECT 'worker_heartbeats', COUNT(*) FROM worker_heartbeats;
+SELECT 'pending_expansion_jobs', COUNT(*) FROM wiki_jobs WHERE kind = 'knowledge_cluster_expand' AND status IN ('pending', 'running', 'deferred');
+SQL
+
+log "validating scheduled model-cluster recurrence artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$QUERY" "$PROVIDER" "$MODEL" "$JOB_ID" "$MAX_TICKS" "$IDLE_SLEEP_MS" "$START_EPOCH" "$END_EPOCH" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [
+  artifactDir,
+  proofRoot,
+  query,
+  provider,
+  model,
+  jobId,
+  maxTicksRaw,
+  idleSleepMsRaw,
+  startRaw,
+  endRaw,
+] = process.argv.slice(2);
+const maxTicks = Number(maxTicksRaw);
+const idleSleepMs = Number(idleSleepMsRaw);
+const elapsedSeconds = Number(endRaw) - Number(startRaw);
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const readText = (name) => fs.readFileSync(path.join(artifactDir, name), "utf8");
+const readJsonl = (name) => {
+  const text = readText(name).trim();
+  return text ? text.split(/\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
+};
+const readCounts = (name) => Object.fromEntries(readText(name).trim().split(/\n/).filter(Boolean).map((line) => {
+  const [key, value] = line.split("|");
+  return [key, Number(value)];
+}));
+function assert(condition, message, detail) {
+  if (!condition) {
+    console.error(`FAIL: ${message}`);
+    if (detail !== undefined) console.error(JSON.stringify(detail, null, 2));
+    process.exit(1);
+  }
+}
+
+const before = readCounts("counts-before.tsv");
+const after = readCounts("counts-after.tsv");
+const workerLines = readJsonl("worker-loop.jsonl");
+const final = workerLines[workerLines.length - 1];
+const tickReports = workerLines.slice(0, -1);
+const watchSource = read("watch-source.json");
+const jobs = read("wiki-jobs.json");
+const clusters = read("clusters.json");
+const events = read("events.json");
+const reports = read("reports.json");
+const ops = read("ops.json");
+const costSummary = read("cost-summary.json");
+const policyDecisions = read("policy-decisions.json");
+const sourceHealth = read("source-health.json");
+const stderr = readText("worker-loop.err");
+const completedJob = jobs.find((job) => job.id === jobId);
+const result = completedJob?.result_json ? JSON.parse(completedJob.result_json) : null;
+
+assert(before.source_cards > 0, "proof home should preserve source cards", before);
+assert(before.query_matches > 0, "scheduled query must match real copied source cards", before);
+assert(watchSource.source_kind === "knowledge_model_clusters", "watch source kind mismatch", watchSource);
+assert(watchSource.locator === query, "watch source locator mismatch", watchSource);
+assert(final?.status === "completed", "bounded worker should finish normally", final);
+assert(final.ticks === maxTicks, "worker should run requested ticks", final);
+assert(final.idle_sleep_ms === Math.max(250, Math.min(60000, idleSleepMs)), "worker should report clamped idle sleep", final);
+assert(elapsedSeconds >= Math.floor((final.ticks * final.idle_sleep_ms) / 1000) - 1, "proof should span real wall-clock time", { elapsedSeconds, final });
+assert(tickReports.some((report) => report.watch_poll?.enqueued >= 1), "resident worker should enqueue the due model watch source", tickReports);
+assert(tickReports.some((report) => (report.jobs || []).some((job) => job.id === jobId && job.kind === "knowledge_cluster_model_propose" && job.status === "completed")), "resident worker should complete model proposal job", tickReports);
+assert(!stderr.match(/worker run-once/i), "proof must use resident worker run, not worker run-once", stderr);
+assert(completedJob?.status === "completed", "completed job row missing", completedJob);
+assert(result?.status === "completed", "job result should complete", result);
+assert(result.model_provider === provider, "provider mismatch", result);
+assert(result.model_name === model, "model mismatch", result);
+assert(result.prompt_version === "knowledge-cluster-proposal-v1", "prompt version mismatch", result);
+assert(result.cost_decision_id, "live OpenAI scheduled job should record a cost decision", result);
+assert(result.proof_level?.includes("Provider Attempt"), "live OpenAI proof level should name provider attempt", result);
+assert(result.source_card_count >= 1, "job should use source-card evidence", result);
+assert(Array.isArray(result.source_cards) && result.source_cards.length === result.source_card_count, "job should return source-card ids", result);
+assert(Array.isArray(result.cluster_ids) && result.cluster_ids.length >= 1, "job should create candidate cluster ids", result);
+for (const clusterId of result.cluster_ids) {
+  const cluster = clusters.find((row) => row.id === clusterId);
+  assert(cluster, `cluster list missing ${clusterId}`, clusters);
+  assert(cluster.status === "candidate", `scheduled model cluster must remain candidate: ${clusterId}`, cluster);
+  assert(cluster.metadata?.origin === "model_cluster_proposal_v1", `cluster origin mismatch: ${clusterId}`, cluster);
+  assert(Array.isArray(cluster.source_card_ids) && cluster.source_card_ids.length >= 1, `cluster missing source evidence: ${clusterId}`, cluster);
+  assert(Array.isArray(cluster.event_ids) && cluster.event_ids.length >= 1, `cluster missing event ids: ${clusterId}`, cluster);
+  assert((ops.knowledge_clusters || []).some((row) => row.id === clusterId), `ops missing cluster ${clusterId}`, ops.knowledge_clusters);
+}
+for (const eventId of clusters.flatMap((cluster) => cluster.event_ids || [])) {
+  assert(events.some((event) => event.id === eventId), `events list missing ${eventId}`, events);
+}
+assert(after.knowledge_clusters === result.cluster_ids.length, "only scheduled model clusters should be present", { after, result });
+assert(after.knowledge_reports === 0, "scheduled proposal must not create reports", after);
+assert(after.knowledge_editorial_decisions === 0, "scheduled proposal must not create editorial decisions", after);
+assert(after.digest_candidates === 0, "scheduled proposal must not create digest candidates", after);
+assert(after.pending_expansion_jobs === 0, "unpromoted model proposals must not queue expansion jobs", after);
+assert(reports.length === 0, "knowledge reports list should remain empty", reports);
+assert(!(ops.knowledge_reports || []).length, "ops should not expose report side effects", ops.knowledge_reports);
+assert(!(ops.digest_candidates || []).length, "ops should not expose digest side effects", ops.digest_candidates);
+assert(sourceHealth.some((row) => row.key === `knowledge:model-clusters:${query}` && row.status === "healthy" && row.next_run_at), "source health should record healthy model-cluster schedule", sourceHealth);
+assert(policyDecisions.some((decision) => decision.action === "provider.network" && decision.provider === "openai" && decision.allowed), "provider policy decision should be recorded", policyDecisions);
+assert(JSON.stringify(costSummary).includes(result.cost_decision_id), "cost summary should include scheduled model proposal cost decision", costSummary);
+
+const artifactText = fs.readdirSync(artifactDir)
+  .filter((name) => /\.(json|jsonl|md|txt|tsv|err)$/.test(name))
+  .map((name) => readText(name))
+  .join("\n");
+assert(!/(^|[^A-Za-z0-9])(bearer\s+|xoxp|xoxb|sk-|ghp_)[A-Za-z0-9_.=-]{20,}/i.test(artifactText), "proof artifacts should not contain obvious token-shaped secrets");
+
+const proof = {
+  proof_name: "knowledge-model-cluster-scheduled-proof",
+  proof_level: "Copied-home resident worker proof with live OpenAI scheduled model proposal; candidate-only and not operational",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  query,
+  provider,
+  model,
+  elapsed_seconds: elapsedSeconds,
+  worker_ticks: final.ticks,
+  worker_processed: final.processed,
+  watch_source_id: watchSource.id,
+  job_id: jobId,
+  cost_decision_id: result.cost_decision_id,
+  source_card_count: result.source_card_count,
+  source_card_ids: result.source_cards,
+  cluster_ids: result.cluster_ids,
+  artifacts: {
+    watch_source: path.join(artifactDir, "watch-source.json"),
+    worker_loop: path.join(artifactDir, "worker-loop.jsonl"),
+    worker_stderr: path.join(artifactDir, "worker-loop.err"),
+    wiki_jobs: path.join(artifactDir, "wiki-jobs.json"),
+    clusters: path.join(artifactDir, "clusters.json"),
+    events: path.join(artifactDir, "events.json"),
+    reports: path.join(artifactDir, "reports.json"),
+    ops: path.join(artifactDir, "ops.json"),
+    source_health: path.join(artifactDir, "source-health.json"),
+    cost_summary: path.join(artifactDir, "cost-summary.json"),
+    policy_decisions: path.join(artifactDir, "policy-decisions.json")
+  },
+  checked: [
+    "copied real source-card home preserved matching evidence",
+    "resident worker run enqueued due knowledge_model_clusters watch source",
+    "resident worker completed knowledge_cluster_model_propose job",
+    "live OpenAI provider path recorded cost and provider policy decisions",
+    "candidate clusters cite source-card ids and event ids",
+    "candidate clusters remained unpromoted and did not create wiki reports, editorial decisions, digest candidates, or expansion jobs",
+    "source-health recorded healthy scheduled model-cluster state after durable writes",
+    "ops snapshot exposes candidate clusters and no report/digest side effects",
+    "proof artifacts passed token-shape redaction scan"
+  ],
+  remaining_risk: [
+    "This is a copied-home bounded resident-worker proof, not multi-day launchd/systemd operation.",
+    "This proves scheduled live-provider candidate proposals, not broad production semantic clustering quality.",
+    "Unpromoted model-origin clusters still require explicit promotion before expansion.",
+    "The proof does not send external digest delivery."
+  ]
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.pre-browser.json"), `${JSON.stringify(proof, null, 2)}\n`);
+NODE
+
+PORT="$(node -e 'const net=require("net"); const s=net.createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close();});')"
+BASE_URL="http://127.0.0.1:$PORT"
+
+log "starting authenticated local HTTP server on $BASE_URL"
+"$ARCWELL_BIN" serve --addr "127.0.0.1:$PORT" --auth-token "$AUTH_TOKEN" \
+  >"$ARTIFACT_DIR/server.log" 2>&1 &
+SERVER_PID="$!"
+
+for _ in $(seq 1 100); do
+  if curl -fsS -H "x-arcwell-http-token: $AUTH_TOKEN" "$BASE_URL/health" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    fail "HTTP server exited before readiness. See $ARTIFACT_DIR/server.log"
+  fi
+  sleep 0.1
+done
+curl -fsS -H "x-arcwell-http-token: $AUTH_TOKEN" "$BASE_URL/health" >/dev/null || fail "HTTP server did not become ready"
+
+agent-browser --session "$SESSION" set headers "{\"x-arcwell-http-token\":\"$AUTH_TOKEN\"}" >/dev/null
+
+log "checking desktop ops UI"
+agent-browser --session "$SESSION" set viewport 1440 900 >/dev/null
+agent-browser --session "$SESSION" open "$BASE_URL/ops/ui" >/dev/null
+agent-browser --session "$SESSION" wait --load networkidle >/dev/null
+agent-browser --session "$SESSION" screenshot "$ARTIFACT_DIR/desktop.png" >/dev/null
+agent-browser --session "$SESSION" snapshot -i >"$ARTIFACT_DIR/desktop.snapshot.txt"
+agent-browser --session "$SESSION" eval "$(cat <<'JS'
+(() => {
+  const text = document.body.innerText;
+  for (const needle of ["Arcwell Ops", "Knowledge Clusters", "candidate", "Knowledge Controls"]) {
+    if (!text.includes(needle)) throw new Error(`missing desktop text: ${needle}`);
+  }
+  if (text.includes("Arcwell digest candidate\nTopic:")) throw new Error("old digest metadata dump appeared in ops text");
+  if (document.scripts.length !== 0) throw new Error(`unexpected script tags: ${document.scripts.length}`);
+  if (document.documentElement.scrollWidth > window.innerWidth + 4) {
+    throw new Error(`desktop horizontal overflow: ${document.documentElement.scrollWidth} > ${window.innerWidth}`);
+  }
+  return { title: document.title, width: window.innerWidth, sections: document.querySelectorAll("section").length };
+})()
+JS
+)" >"$ARTIFACT_DIR/desktop.assertion.json"
+
+log "checking mobile ops UI"
+agent-browser --session "$SESSION" set viewport 390 844 >/dev/null
+agent-browser --session "$SESSION" open "$BASE_URL/ops/ui" >/dev/null
+agent-browser --session "$SESSION" wait --load networkidle >/dev/null
+agent-browser --session "$SESSION" screenshot "$ARTIFACT_DIR/mobile.png" >/dev/null
+agent-browser --session "$SESSION" snapshot -i >"$ARTIFACT_DIR/mobile.snapshot.txt"
+agent-browser --session "$SESSION" eval "$(cat <<'JS'
+(() => {
+  const text = document.body.innerText;
+  for (const needle of ["Arcwell Ops", "Knowledge Clusters", "candidate"]) {
+    if (!text.includes(needle)) throw new Error(`missing mobile text: ${needle}`);
+  }
+  if (document.scripts.length !== 0) throw new Error(`unexpected mobile script tags: ${document.scripts.length}`);
+  if (document.documentElement.scrollWidth > window.innerWidth + 4) {
+    throw new Error(`mobile horizontal overflow: ${document.documentElement.scrollWidth} > ${window.innerWidth}`);
+  }
+  return { title: document.title, width: window.innerWidth, sections: document.querySelectorAll("section").length };
+})()
+JS
+)" >"$ARTIFACT_DIR/mobile.assertion.json"
+agent-browser --session "$SESSION" errors >"$ARTIFACT_DIR/browser-errors.txt" || true
+
+node - "$ARTIFACT_DIR" "$BASE_URL" <<'NODE' >"$ARTIFACT_DIR/proof-packet.json"
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, baseUrl] = process.argv.slice(2);
+const proof = JSON.parse(fs.readFileSync(path.join(artifactDir, "proof-packet.pre-browser.json"), "utf8"));
+proof.base_url = baseUrl;
+proof.artifacts.desktop_screenshot = path.join(artifactDir, "desktop.png");
+proof.artifacts.mobile_screenshot = path.join(artifactDir, "mobile.png");
+proof.artifacts.desktop_snapshot = path.join(artifactDir, "desktop.snapshot.txt");
+proof.artifacts.mobile_snapshot = path.join(artifactDir, "mobile.snapshot.txt");
+proof.artifacts.browser_errors = path.join(artifactDir, "browser-errors.txt");
+proof.desktop = JSON.parse(fs.readFileSync(path.join(artifactDir, "desktop.assertion.json"), "utf8"));
+proof.mobile = JSON.parse(fs.readFileSync(path.join(artifactDir, "mobile.assertion.json"), "utf8"));
+proof.checked.push("authenticated /ops/ui desktop and mobile render exposes candidate clusters without horizontal overflow");
+process.stdout.write(JSON.stringify(proof, null, 2));
+NODE
+
+cat "$ARTIFACT_DIR/proof-packet.json"
+log "scheduled model-cluster proof passed"
+log "proof packet: $ARTIFACT_DIR/proof-packet.json"

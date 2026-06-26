@@ -149,6 +149,12 @@ Current implemented bridge slice:
   schema-gated model proposal path behind policy/cost gates only when evidence
   exists, writes review-only candidate clusters, records source-health state,
   and still refuses wiki/report/digest expansion until explicit promotion.
+  Fresh proof
+  `.arcwell-dev/proofs/knowledge-model-cluster-scheduled-proof-20260626T090342Z-10737/artifacts/proof-packet.json`
+  copied the real local source-card home, ran a 40-tick resident worker loop,
+  invoked live OpenAI `gpt-4.1-mini`, wrote six review-only candidate clusters
+  from 24 source cards, recorded source health/cost/policy evidence, created no
+  report/wiki/digest/expansion side effects, and browser-checked `/ops/ui`.
 - Policy-gated promotion of model-origin cluster proposals through
   `arcwell knowledge promote-cluster`. Unpromoted model-origin candidates are
   refused by foreground expansion, direct expansion enqueue, and due expansion
@@ -213,11 +219,11 @@ What it still does not prove:
 - Model-invoked entity resolution over broad production clusters or scheduled
   recurrence; the live proof is a foreground provider attempt over proof
   fixture data.
-- Broad production-data semantic/model clustering or live-provider scheduled
-  model-cluster recurrence; local severe tests prove the scheduled worker
-  candidate-only path, while the production cluster proof is still a foreground
-  provider attempt over proof fixture data with one policy-gated promoted
-  expansion.
+- Broad production-data semantic/model clustering quality. Local severe tests
+  and the copied-home live-provider scheduled proof now prove the scheduled
+  worker candidate-only path, while the promotion/expansion proof is still a
+  foreground provider attempt over proof fixture data with one policy-gated
+  promoted expansion.
 - Accepted model-backed writer/editor synthesis; promoted model clusters still
   use deterministic source-card-backed expansion prose.
 - Autonomous approval, broad wiki page update decisions, and live external
@@ -1142,6 +1148,8 @@ Refuting tests:
 - [x] Add semantic/model cluster proposal behind schema validation.
 - [x] Add scheduled model-cluster proposal jobs that write candidate-only
       clusters and preserve the promotion boundary.
+- [x] Add copied-home live-provider scheduled model-cluster proof over a bounded
+      resident worker loop.
 - [x] Add policy-gated promotion before model-origin clusters can drive
       wiki/report/digest expansion.
 - [ ] Add cluster revisioning or metadata to avoid stale report reuse.
@@ -1160,6 +1168,8 @@ Refuting tests:
 - [x] Scheduled model-cluster proposal jobs skip empty evidence without a
       provider call, fail closed on provider-policy denial, and do not create
       wiki/report/digest side effects before promotion.
+- [x] Live OpenAI scheduled model-cluster proof over copied source-card corpus
+      creates candidate-only clusters and no expansion side effects.
 
 ### Milestone 5: Editorial Decision Worker
 

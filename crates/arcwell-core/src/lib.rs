@@ -1421,6 +1421,15 @@ pub struct KnowledgeClusterExpansionEnqueueReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeClusterInvestigationExecutionEnqueueReport {
+    pub inspected: usize,
+    pub enqueued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarScheduleTick {
     pub id: String,
     pub profile_id: String,
@@ -1493,6 +1502,8 @@ pub struct WorkerRunReport {
     pub radar_schedule: Option<RadarScheduleEnqueueReport>,
     pub digest_alert_schedule: Option<DigestAlertScheduleEnqueueReport>,
     pub knowledge_cluster_expansion: Option<KnowledgeClusterExpansionEnqueueReport>,
+    pub knowledge_cluster_investigation_execution:
+        Option<KnowledgeClusterInvestigationExecutionEnqueueReport>,
     pub telegram_retry: Option<TelegramRetryReport>,
     pub email_retry: Option<EmailRetryReport>,
     pub radar_delivery_reconcile: Option<RadarDeliveryReconcileReport>,
@@ -13730,6 +13741,109 @@ impl Store {
         Ok(report)
     }
 
+    pub fn enqueue_due_knowledge_cluster_investigation_execution_jobs(
+        &self,
+        max_clusters: usize,
+    ) -> Result<KnowledgeClusterInvestigationExecutionEnqueueReport> {
+        let mut report = KnowledgeClusterInvestigationExecutionEnqueueReport {
+            inspected: 0,
+            enqueued: 0,
+            skipped: 0,
+            jobs: Vec::new(),
+            errors: Vec::new(),
+        };
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, cluster_id, decision, status, wiki_page_id, digest_candidate_id,
+                   source_card_ids_json, reason, quality_findings_json, metadata_json,
+                   created_at, updated_at
+            FROM knowledge_editorial_decisions
+            WHERE decision = 'investigate_cluster'
+              AND status = 'completed'
+            ORDER BY updated_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let decisions = rows(stmt.query_map(
+            params![max_clusters.clamp(1, 100)],
+            knowledge_editorial_decision_from_row,
+        )?)?;
+        drop(stmt);
+        for decision in decisions {
+            report.inspected += 1;
+            let cluster = match self.get_knowledge_cluster(&decision.cluster_id)? {
+                Some(cluster) => cluster,
+                None => {
+                    report.skipped += 1;
+                    report.errors.push(format!(
+                        "{}: knowledge cluster not found",
+                        decision.cluster_id
+                    ));
+                    continue;
+                }
+            };
+            if let Some(status) =
+                self.knowledge_cluster_investigation_execution_decision_status(&cluster.id)?
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                report.skipped += 1;
+                continue;
+            }
+            if self.knowledge_cluster_investigation_execution_has_active_job(&cluster.id)? {
+                report.skipped += 1;
+                continue;
+            }
+            let Some(run_id) = decision
+                .metadata
+                .get("research_run_id")
+                .and_then(Value::as_str)
+            else {
+                report.skipped += 1;
+                report.errors.push(format!(
+                    "{}:{}: investigation decision missing research_run_id",
+                    cluster.id, cluster.topic
+                ));
+                continue;
+            };
+            let run = match self.get_research_run(run_id)? {
+                Some(run) => run,
+                None => {
+                    report.skipped += 1;
+                    report.errors.push(format!(
+                        "{}:{}: research run not found: {}",
+                        cluster.id, cluster.topic, run_id
+                    ));
+                    continue;
+                }
+            };
+            if matches!(
+                run.status.as_str(),
+                "stopped" | "completed" | "completed_no_write"
+            ) {
+                report.skipped += 1;
+                continue;
+            }
+            let tasks = self.list_research_tasks(&run.id)?;
+            if !tasks.iter().any(|task| task.status == "pending") {
+                report.skipped += 1;
+                continue;
+            }
+            match self.enqueue_knowledge_cluster_investigation_execution_job(&cluster.id) {
+                Ok(job) => {
+                    report.enqueued += 1;
+                    report.jobs.push(job.id);
+                }
+                Err(error) => {
+                    report.skipped += 1;
+                    report
+                        .errors
+                        .push(format!("{}:{}: {error}", cluster.id, cluster.topic));
+                }
+            }
+        }
+        Ok(report)
+    }
+
     fn knowledge_cluster_expansion_decision_status(
         &self,
         cluster_id: &str,
@@ -13742,6 +13856,28 @@ impl Store {
                 FROM knowledge_editorial_decisions
                 WHERE cluster_id = ?1
                   AND decision IN ('expand_wiki_and_digest', 'expand_wiki')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                "#,
+                params![cluster_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn knowledge_cluster_investigation_execution_decision_status(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<String>> {
+        validate_id(cluster_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT status
+                FROM knowledge_editorial_decisions
+                WHERE cluster_id = ?1
+                  AND decision = 'execute_investigation_tasks'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 "#,
@@ -14262,6 +14398,14 @@ impl Store {
         } else {
             None
         };
+        let knowledge_cluster_investigation_execution =
+            self.enqueue_due_knowledge_cluster_investigation_execution_jobs(max_jobs)?;
+        let knowledge_cluster_investigation_execution =
+            if knowledge_cluster_investigation_execution.inspected > 0 {
+                Some(knowledge_cluster_investigation_execution)
+            } else {
+                None
+            };
         let mut jobs = Vec::new();
         for _ in 0..max_jobs {
             let Some(job) = self.claim_next_pending_job()? else {
@@ -14303,6 +14447,7 @@ impl Store {
             radar_schedule,
             digest_alert_schedule,
             knowledge_cluster_expansion,
+            knowledge_cluster_investigation_execution,
             telegram_retry,
             email_retry,
             radar_delivery_reconcile,
@@ -57571,7 +57716,38 @@ mod tests {
                 .any(|decision| decision.decision == "expand_wiki_and_digest"
                     && decision.status == "completed")
         );
-        assert_eq!(store.run_worker_once(1).unwrap().jobs.len(), 0);
+        let execution_worker = store.run_worker_once(1).unwrap();
+        assert_eq!(execution_worker.jobs.len(), 1);
+        assert_eq!(
+            execution_worker.jobs[0].kind,
+            "knowledge_cluster_investigation_execute"
+        );
+        assert_eq!(execution_worker.jobs[0].status, "completed");
+        let execution_result = execution_worker.jobs[0]
+            .result_json
+            .as_ref()
+            .expect("completed investigation execution result");
+        assert_eq!(
+            execution_result
+                .get("executed_task_count")
+                .and_then(Value::as_u64),
+            Some(4)
+        );
+        let run_id = execution_result
+            .get("research_run_id")
+            .and_then(Value::as_str)
+            .expect("research run id");
+        assert_eq!(
+            store
+                .list_research_artifacts(run_id)
+                .unwrap()
+                .iter()
+                .filter(
+                    |artifact| artifact.artifact_type == "knowledge_cluster_investigation_artifact"
+                )
+                .count(),
+            4
+        );
     }
 
     #[test]
@@ -57830,13 +58006,15 @@ mod tests {
     #[test]
     fn severe_worker_auto_expands_due_knowledge_cluster_once() {
         // CLAIM: shared knowledge clusters participate in resident recurrence:
-        // a due source-backed cluster is automatically enqueued and expanded by
-        // run_worker_once without a manual enqueue-cluster-expansion command.
+        // a due source-backed cluster is automatically enqueued, expanded, and
+        // then has its source-linked investigation tasks executed by
+        // run_worker_once without manual enqueue commands.
         // ORACLE: the worker report shows an inspected/enqueued cluster, the
-        // processed job writes wiki/report/editorial/digest artifacts, and a
-        // second worker pass suppresses duplicates after completion.
+        // processed expansion writes wiki/report/editorial/digest artifacts, a
+        // second worker pass executes the pending investigation tasks into
+        // artifacts, and a third worker pass suppresses duplicates.
         // SEVERITY: Severe because otherwise "autonomous wiki/digest routing"
-        // could still require a hidden manual CLI step.
+        // could still require a hidden manual investigation-execution step.
         let store = test_store("knowledge-cluster-auto-expansion");
         seed_knowledge_source_card(
             &store,
@@ -57890,14 +58068,68 @@ mod tests {
         let digest_count_after_first = store.list_digest_candidates().unwrap().len();
 
         let second = store.run_worker_once(1).unwrap();
-        let second_enqueue = second
+        let second_expansion_enqueue = second
             .knowledge_cluster_expansion
             .as_ref()
-            .expect("second knowledge cluster enqueue report");
-        assert_eq!(second_enqueue.inspected, 1);
-        assert_eq!(second_enqueue.enqueued, 0);
-        assert_eq!(second_enqueue.skipped, 1);
-        assert_eq!(second.processed, 0);
+            .expect("second knowledge cluster expansion enqueue report");
+        assert_eq!(second_expansion_enqueue.inspected, 1);
+        assert_eq!(second_expansion_enqueue.enqueued, 0);
+        assert_eq!(second_expansion_enqueue.skipped, 1);
+        let investigation_execution_enqueue = second
+            .knowledge_cluster_investigation_execution
+            .as_ref()
+            .expect("knowledge cluster investigation execution enqueue report");
+        assert_eq!(investigation_execution_enqueue.inspected, 1);
+        assert_eq!(investigation_execution_enqueue.enqueued, 1);
+        assert_eq!(second.processed, 1);
+        assert_eq!(
+            second.jobs[0].kind,
+            "knowledge_cluster_investigation_execute"
+        );
+        assert_eq!(second.jobs[0].status, "completed");
+        assert_eq!(
+            second.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("executed_task_count"))
+                .and_then(Value::as_u64),
+            Some(4)
+        );
+        let investigation_run_id = second.jobs[0]
+            .result_json
+            .as_ref()
+            .and_then(|value| value.get("research_run_id"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            store
+                .list_research_artifacts(&investigation_run_id)
+                .unwrap()
+                .iter()
+                .filter(
+                    |artifact| artifact.artifact_type == "knowledge_cluster_investigation_artifact"
+                )
+                .count(),
+            4
+        );
+        assert!(
+            store
+                .list_research_tasks(&investigation_run_id)
+                .unwrap()
+                .iter()
+                .all(|task| task.status == "completed")
+        );
+
+        let third = store.run_worker_once(1).unwrap();
+        let third_execution_enqueue = third
+            .knowledge_cluster_investigation_execution
+            .as_ref()
+            .expect("third knowledge cluster investigation execution enqueue report");
+        assert_eq!(third_execution_enqueue.inspected, 1);
+        assert_eq!(third_execution_enqueue.enqueued, 0);
+        assert_eq!(third_execution_enqueue.skipped, 1);
+        assert_eq!(third.processed, 0);
         assert_eq!(
             store.list_wiki_pages().unwrap().len(),
             wiki_pages_after_first
@@ -57992,6 +58224,117 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|job| job.kind != "knowledge_cluster_expand")
+        );
+    }
+
+    #[test]
+    fn severe_due_investigation_execution_enqueue_suppresses_active_and_blocked_clusters() {
+        // CLAIM: investigation execution recurrence is durable and bounded: it
+        // finds planned source-linked investigation tasks, enqueues execution,
+        // avoids duplicate active jobs, and does not retry blocked execution
+        // decisions forever.
+        // ORACLE: a completed investigate_cluster decision with pending tasks
+        // enqueues exactly one execution job; a second enqueue sees the active
+        // job and skips; a blocked execute_investigation_tasks decision skips
+        // without creating jobs.
+        // SEVERITY: Severe because otherwise the resident worker can create
+        // retry storms or silently fail to execute pending investigation work.
+        let store = test_store("knowledge-cluster-investigation-execution-due");
+        seed_knowledge_source_card(
+            &store,
+            "due-execution-official",
+            "Due execution evidence says an official launch needs source-linked investigation execution.",
+        );
+        seed_knowledge_source_card(
+            &store,
+            "due-execution-reaction",
+            "Due execution evidence says developer reaction needs investigation execution.",
+        );
+        let projected = store
+            .project_knowledge_from_source_card_query(
+                "Due execution evidence",
+                Some("Due investigation execution trend"),
+                10,
+            )
+            .unwrap();
+        let plan = store
+            .create_knowledge_cluster_investigation(&projected.cluster.id)
+            .unwrap();
+        assert!(plan.tasks.iter().any(|task| task.status == "pending"));
+
+        let first = store
+            .enqueue_due_knowledge_cluster_investigation_execution_jobs(10)
+            .unwrap();
+        assert_eq!(first.inspected, 1);
+        assert_eq!(first.enqueued, 1);
+        let second = store
+            .enqueue_due_knowledge_cluster_investigation_execution_jobs(10)
+            .unwrap();
+        assert_eq!(second.inspected, 1);
+        assert_eq!(second.enqueued, 0);
+        assert_eq!(second.skipped, 1);
+        let pending_count = store
+            .list_wiki_jobs()
+            .unwrap()
+            .into_iter()
+            .filter(|job| {
+                job.kind == "knowledge_cluster_investigation_execute"
+                    && job.status == "pending"
+                    && job.input_json.get("cluster_id").and_then(Value::as_str)
+                        == Some(projected.cluster.id.as_str())
+            })
+            .count();
+        assert_eq!(pending_count, 1);
+
+        let blocked_store = test_store("knowledge-cluster-investigation-execution-blocked");
+        seed_knowledge_source_card(
+            &blocked_store,
+            "blocked-execution-official",
+            "Blocked execution evidence says a failed investigation execution must not retry forever.",
+        );
+        seed_knowledge_source_card(
+            &blocked_store,
+            "blocked-execution-reaction",
+            "Blocked execution evidence says active jobs and blocked decisions need separate handling.",
+        );
+        let blocked_projection = blocked_store
+            .project_knowledge_from_source_card_query(
+                "Blocked execution evidence",
+                Some("Blocked investigation execution trend"),
+                10,
+            )
+            .unwrap();
+        let blocked_plan = blocked_store
+            .create_knowledge_cluster_investigation(&blocked_projection.cluster.id)
+            .unwrap();
+        blocked_store
+            .record_knowledge_editorial_decision(KnowledgeEditorialDecisionInput {
+                cluster_id: blocked_projection.cluster.id.clone(),
+                decision: "execute_investigation_tasks".to_string(),
+                status: "blocked".to_string(),
+                wiki_page_id: None,
+                digest_candidate_id: None,
+                source_card_ids: blocked_projection.cluster.source_card_ids.clone(),
+                reason: "Blocked by investigation execution quality gate.".to_string(),
+                quality_findings: vec!["investigation_artifact_missing_citations".to_string()],
+                metadata: json!({
+                    "research_run_id": blocked_plan.research_run.id,
+                    "test": true
+                }),
+            })
+            .unwrap();
+        let blocked = blocked_store
+            .enqueue_due_knowledge_cluster_investigation_execution_jobs(10)
+            .unwrap();
+        assert_eq!(blocked.inspected, 1);
+        assert_eq!(blocked.enqueued, 0);
+        assert_eq!(blocked.skipped, 1);
+        assert!(
+            blocked_store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .all(|job| job.kind != "knowledge_cluster_investigation_execute")
         );
     }
 

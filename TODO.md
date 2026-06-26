@@ -237,6 +237,13 @@ PR, implementation note, or final report:
       instruction leakage, and replay with zero new task execution. This is
       deterministic task-artifact execution only; autonomous primary-source
       acquisition, accepted model synthesis, and recurrence proofs remain open.
+      Investigation execution recurrence proof
+      `.arcwell-dev/proofs/knowledge-investigation-execution-recurrence-proof-20260626T064500Z/artifacts/proof-packet.md`
+      then proved the resident worker discovers and executes eligible
+      source-card-linked investigation tasks in a copied production-data home
+      when `worker.enqueue` policy allows it, while also proving fail-closed
+      policy denial and replay suppression. This is still copied-home
+      foreground recurrence, not wall-clock resident-service proof.
       Remaining work is fresh primary-source acquisition, broad production-data
       semantic/model clustering, X credential-refresh live proof, wall-clock
       scheduled source recurrence, external delivery recurrence, richer

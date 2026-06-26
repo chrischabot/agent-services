@@ -266,6 +266,11 @@ arcwell secrets list-values
 ```
 
 `list-values` shows names, scopes, and timestamps only. It does not print secret values.
+For X OAuth user-context credentials, use `scripts/x-credential-probe` before
+claiming a live credential path is healthy. Forced refresh from copied homes is
+guarded because provider-side refresh-token rotation can otherwise leave the
+real local home stale; use `--write-back-rotated-tokens` when probing the real
+local credential store.
 
 ## Use With Codex
 

@@ -110,8 +110,9 @@ Missing or partial:
 - General wiki writer/editor quality gate for cross-source pages.
 - Unified "interestingness" and alert routing across all sources.
 - Multi-day/live-external wall-clock recurrence proof for real alerts.
-- Live X freshness now has capped copied-home proof; broad quota/tier and
-  long-running recurrence remain open.
+- Live X freshness now has capped copied-home proof plus a guarded credential
+  probe for stored-token refresh and bookmark/follow scope checks; broad
+  quota/tier and long-running recurrence remain open.
 - Ops controls are still narrow.
 
 Current implemented bridge slice:

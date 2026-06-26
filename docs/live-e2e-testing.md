@@ -49,22 +49,56 @@ Expected result: the backup manifest reports
 prints raw local secret values. Treat those backup directories as sensitive and
 encrypt or delete them when rotating/revoking the underlying credential.
 
-## X Live Smoke
+## X Live Smoke And Credential Probe
 
-Status: local replay/source-card smoke passes. Live X recent search runs with
-the available bearer token, but definitive watch rebuild is blocked because the
-available token is application-only and X requires OAuth 1.0a User Context or
-OAuth 2.0 User Context for the account-data endpoints used by bookmarks/follows.
+Status: capped live X user-context smoke passes, and the dedicated credential
+probe now proves the stored-token refresh path. The current proof packets are:
 
-Use a disposable/current X bearer token with scopes/API tier that allow recent
-search, bookmarks, follows, and user lookup. Do not paste tokens into chat
-transcripts or shell history.
+- `.arcwell-dev/proofs/x-credential-probe-20260626T124844Z-76945/artifacts/proof-packet.json`
+  forced copied-home `X_BEARER_TOKEN` expiry, refreshed through stored
+  `X_REFRESH_TOKEN`/`X_CLIENT_ID`, detected refresh-token rotation, wrote the
+  rotated bearer/refresh rows back to `/Users/chabotc/.arcwell` without printing
+  token values, and recorded redacted secret-health, source-health, sync-run,
+  ops, and X stats artifacts.
+- `.arcwell-dev/proofs/x-credential-probe-20260626T124924Z-78664/artifacts/proof-packet.json`
+  reused the refreshed stored credential without forcing refresh and passed both
+  live recent search and a tiny bookmark/follow watch-source rebuild.
+- `.arcwell-dev/proofs/x-live-smoke-after-auto-refresh-20260626T081624Z`
+  remains the capped live X replay/recent-search/watch-monitor proof.
+
+Use a disposable/current X credential with scopes/API tier that allow recent
+search, bookmarks, follows, user lookup, and offline refresh. Do not paste
+tokens into chat transcripts or shell history.
 
 ```sh
-X_BEARER_TOKEN=... scripts/x-live-smoke
+scripts/x-credential-probe --self-test
+scripts/x-credential-probe --exercise-refresh --write-back-rotated-tokens --no-watch
+scripts/x-credential-probe
+scripts/x-live-smoke
 ```
 
-The script uses a disposable `ARCWELL_HOME` by default and verifies:
+`scripts/x-credential-probe` copies the configured source home into a proof home
+and writes a redacted proof packet. Forced refresh is guarded because refreshing
+from a copied home can rotate the provider-side refresh token and strand the
+real home with stale credentials. Use `--write-back-rotated-tokens` when the
+source home is the real local home, or set
+`X_CREDENTIAL_PROBE_SOURCE_HOME_IS_DISPOSABLE=1` only for a genuinely disposable
+credential source.
+
+The credential probe verifies:
+
+- classifier buckets for missing refresh material, provider revocation,
+  scope mismatch, quota/tier denial, provider/network failure, and successful
+  current-provider fetch;
+- copied-home forced expiry exercises the shared `X_BEARER_TOKEN` refresh path;
+- refresh-token rotation is detected and, when explicitly requested, written
+  back without printing token values;
+- secret-health/list-values, source-health, sync-run, ops, and X stats artifacts
+  are recorded without raw token leakage;
+- live current credentials can run recent search and, when enabled, a tiny
+  bookmark/follow watch-source rebuild.
+
+`scripts/x-live-smoke` uses a disposable `ARCWELL_HOME` by default and verifies:
 
 - local replayed X JSON writes an item, source card, and wiki page with
   prompt-injection text preserved as untrusted evidence;
@@ -76,12 +110,13 @@ The script uses a disposable `ARCWELL_HOME` by default and verifies:
   per-source cursor/failure/digest audit fields;
 - cursor output does not expose token values.
 
-Current blocker:
+Remaining limits:
 
-- `x rebuild-definitive-watch-sources` fails with X `403 Unsupported
-  Authentication` when run with the available application-only bearer token.
-  Provide a user-context token/scope before claiming bookmarks/follows/watch
-  monitoring live proof.
+- These are capped copied-home live proofs, not multi-day recurrence or broad
+  quota/tier coverage.
+- Provider-side revocation is classifier-tested locally, not live-tested against
+  a deliberately revoked X refresh token.
+- X plan/API tier changes can still alter bookmark/follow/watch behavior.
 
 Telegram `getMe` should be checked with a script that reads `TELEGRAM_BOT_TOKEN` from the environment rather than putting the token in shell history.
 

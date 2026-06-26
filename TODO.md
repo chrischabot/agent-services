@@ -1119,12 +1119,23 @@ PR, implementation note, or final report:
       without leaking secret values.
 - [ ] Add provider-side revocation/rotation helpers where provider APIs make
       that safe and useful.
-- [ ] Add a live X credential probe that exercises the shared stored-token
+- [x] Add a live X credential probe that exercises the shared stored-token
       auto-refresh path, records redacted source-health/sync-run state, and
       distinguishes missing refresh material, provider revocation, scope
       mismatch, quota/tier denial, successful current-provider fetch, and
       refresh-token rotation so disposable proof runs cannot strand the real
       local home with an invalidated refresh token again.
+      Implemented as `scripts/x-credential-probe`. Self-test covers all
+      classifier buckets. Live proof
+      `.arcwell-dev/proofs/x-credential-probe-20260626T124844Z-76945/artifacts/proof-packet.json`
+      forced copied-home bearer expiry, refreshed through stored
+      `X_REFRESH_TOKEN`/`X_CLIENT_ID`, detected refresh-token rotation, wrote
+      rotated bearer/refresh rows back to `/Users/chabotc/.arcwell` without
+      printing values, and recorded redacted secret-health, sync-run,
+      source-health, and X stats state. Follow-up live proof
+      `.arcwell-dev/proofs/x-credential-probe-20260626T124924Z-78664/artifacts/proof-packet.json`
+      reused the refreshed stored credential without forcing refresh and passed
+      both recent search and a tiny bookmark/follow watch-source rebuild.
 - [ ] Add scheduled credential rotation reminders and stale-scope warnings.
 - [ ] Add ops UI burn-down and override controls for budgets only after
       idempotency, policy, and audit behavior are tested.

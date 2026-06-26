@@ -225,6 +225,12 @@ PR, implementation note, or final report:
       backlog job is active. Severe tests prove adapter completion can feed a
       source-card-backed cluster through the worker and cannot bypass
       `worker.enqueue` policy.
+      Auto-enqueued backlog, expansion, and investigation-execution jobs now
+      carry durable `input_json.lineage` with parent job ids, watch-source
+      health keys, triggering source-card ids, cluster ids/topics, and
+      investigation/report ids where available. Severe tests assert that
+      scheduled recurrence and adapter/backlog/expansion follow-ups remain
+      explainable from stored job rows.
       Completed `knowledge_cluster_backlog` jobs now visibly auto-enqueue
       `knowledge_cluster_expand` follow-ups, and completed expansion jobs
       visibly auto-enqueue `knowledge_cluster_investigation_execute` follow-ups

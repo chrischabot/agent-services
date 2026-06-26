@@ -56,6 +56,8 @@ vision.
 
 Knowledge worker chaining and deterministic backlog update: completed `knowledge_cluster_backlog` jobs now visibly record `auto_knowledge_cluster_expansion`, and completed `knowledge_cluster_expand` jobs visibly record `auto_knowledge_investigation_execution`. Local severe tests prove one eligible cluster can move backlog -> expansion -> investigation execution in a single `run_worker_once` pass when policy and worker capacity allow, and policy-denied follow-ups are recorded without hidden jobs. The backlog clusterer also records provider/source-role/repo/domain signal mix and now has severe coverage for splitting OpenAI package/MCP, Karpathy Claude-in-Slack usage, Simon Willison benchmark, NVIDIA model release, and Vercel Eve SDK signals without collapsing them into one bucket. This is still deterministic local worker proof, not semantic/model clustering, wall-clock production recurrence, or live fresh primary-source acquisition.
 
+2026-06-26 knowledge recurrence lineage note: auto-enqueued `knowledge_cluster_backlog`, `knowledge_cluster_expand`, and `knowledge_cluster_investigation_execute` jobs now carry durable `input_json.lineage` with parent job ids, watch-source health keys, source-card ids, cluster ids/topics, and investigation/report ids where available. Local severe tests assert scheduled backlog recurrence, adapter-completion chaining, backlog-to-expansion chaining, expansion-to-investigation chaining, and policy-denied follow-ups remain explainable from stored job rows. This is still Local Proof, not wall-clock production recurrence or live external delivery recurrence.
+
 ## Product Reality
 
 | Area | Exact state | Live status | Tests | Owner | Blocker / next proof |

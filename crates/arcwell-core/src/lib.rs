@@ -13616,13 +13616,25 @@ impl Store {
         cluster_id: &str,
         create_digest: bool,
     ) -> Result<WikiJob> {
+        self.enqueue_knowledge_cluster_expansion_job_with_lineage(cluster_id, create_digest, None)
+    }
+
+    fn enqueue_knowledge_cluster_expansion_job_with_lineage(
+        &self,
+        cluster_id: &str,
+        create_digest: bool,
+        lineage: Option<Value>,
+    ) -> Result<WikiJob> {
         validate_id(cluster_id)?;
         self.get_knowledge_cluster(cluster_id)?
             .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
-        self.enqueue_wiki_job(
-            "knowledge_cluster_expand",
-            json!({ "cluster_id": cluster_id, "create_digest": create_digest }),
-        )
+        let mut input = json!({ "cluster_id": cluster_id, "create_digest": create_digest });
+        if let Some(lineage) = lineage
+            && let Some(object) = input.as_object_mut()
+        {
+            object.insert("lineage".to_string(), lineage);
+        }
+        self.enqueue_wiki_job("knowledge_cluster_expand", input)
     }
 
     pub fn enqueue_knowledge_cluster_investigation_job(&self, cluster_id: &str) -> Result<WikiJob> {
@@ -13642,6 +13654,14 @@ impl Store {
         &self,
         cluster_id: &str,
     ) -> Result<WikiJob> {
+        self.enqueue_knowledge_cluster_investigation_execution_job_with_lineage(cluster_id, None)
+    }
+
+    fn enqueue_knowledge_cluster_investigation_execution_job_with_lineage(
+        &self,
+        cluster_id: &str,
+        lineage: Option<Value>,
+    ) -> Result<WikiJob> {
         validate_id(cluster_id)?;
         self.get_knowledge_cluster(cluster_id)?
             .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
@@ -13650,10 +13670,13 @@ impl Store {
                 "knowledge cluster investigation execution job already active for cluster {cluster_id}"
             );
         }
-        self.enqueue_wiki_job(
-            "knowledge_cluster_investigation_execute",
-            json!({ "cluster_id": cluster_id }),
-        )
+        let mut input = json!({ "cluster_id": cluster_id });
+        if let Some(lineage) = lineage
+            && let Some(object) = input.as_object_mut()
+        {
+            object.insert("lineage".to_string(), lineage);
+        }
+        self.enqueue_wiki_job("knowledge_cluster_investigation_execute", input)
     }
 
     pub fn enqueue_knowledge_cluster_backlog_job(
@@ -13662,14 +13685,32 @@ impl Store {
         min_group_size: usize,
         max_clusters: usize,
     ) -> Result<WikiJob> {
-        self.enqueue_wiki_job(
-            "knowledge_cluster_backlog",
-            json!({
-                "max_source_cards": max_source_cards.clamp(1, 500),
-                "min_group_size": min_group_size.clamp(1, 20),
-                "max_clusters": max_clusters.clamp(1, 50),
-            }),
+        self.enqueue_knowledge_cluster_backlog_job_with_lineage(
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+            None,
         )
+    }
+
+    fn enqueue_knowledge_cluster_backlog_job_with_lineage(
+        &self,
+        max_source_cards: usize,
+        min_group_size: usize,
+        max_clusters: usize,
+        lineage: Option<Value>,
+    ) -> Result<WikiJob> {
+        let mut input = json!({
+            "max_source_cards": max_source_cards.clamp(1, 500),
+            "min_group_size": min_group_size.clamp(1, 20),
+            "max_clusters": max_clusters.clamp(1, 50),
+        });
+        if let Some(lineage) = lineage
+            && let Some(object) = input.as_object_mut()
+        {
+            object.insert("lineage".to_string(), lineage);
+        }
+        self.enqueue_wiki_job("knowledge_cluster_backlog", input)
     }
 
     pub fn schedule_knowledge_cluster_backlog(
@@ -14339,10 +14380,19 @@ impl Store {
                         .get("max_clusters")
                         .and_then(Value::as_u64)
                         .unwrap_or(12) as usize;
-                    self.enqueue_knowledge_cluster_backlog_job(
+                    self.enqueue_knowledge_cluster_backlog_job_with_lineage(
                         max_source_cards,
                         min_group_size,
                         max_clusters,
+                        Some(json!({
+                            "trigger": "watch_source_due",
+                            "watch_source_id": source.id,
+                            "watch_source_key": source_key,
+                            "source_kind": source.source_kind,
+                            "locator": source.locator,
+                            "cadence": source.cadence,
+                            "metadata": source.metadata,
+                        })),
                     )
                 }
                 other => Err(anyhow::anyhow!("unsupported watch source kind: {other}")),
@@ -32586,10 +32636,22 @@ impl Store {
             .get("max_clusters")
             .and_then(Value::as_u64)
             .unwrap_or(12) as usize;
-        match self.enqueue_knowledge_cluster_backlog_job(
+        match self.enqueue_knowledge_cluster_backlog_job_with_lineage(
             max_source_cards,
             min_group_size,
             max_clusters,
+            Some(json!({
+                "trigger": "adapter_completion",
+                "parent_job_id": job.id,
+                "parent_kind": job.kind,
+                "source_card_count": source_card_ids.len(),
+                "source_card_ids": source_card_ids,
+                "watch_source_id": source.id,
+                "watch_source_key": watch_source_health_key(&source)?,
+                "source_kind": source.source_kind,
+                "locator": source.locator,
+                "cadence": source.cadence,
+            })),
         ) {
             Ok(backlog_job) => Ok(Some(json!({
                 "status": "enqueued",
@@ -32641,7 +32703,22 @@ impl Store {
                 }));
                 continue;
             }
-            match self.enqueue_knowledge_cluster_expansion_job(cluster_id, true) {
+            let cluster = self
+                .get_knowledge_cluster(cluster_id)?
+                .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
+            match self.enqueue_knowledge_cluster_expansion_job_with_lineage(
+                cluster_id,
+                true,
+                Some(json!({
+                    "trigger": "backlog_completion",
+                    "parent_job_id": job.id,
+                    "parent_kind": job.kind,
+                    "cluster_id": cluster.id,
+                    "topic": cluster.topic,
+                    "source_card_count": cluster.source_card_ids.len(),
+                    "source_card_ids": cluster.source_card_ids,
+                })),
+            ) {
                 Ok(expansion_job) => enqueued.push(json!({
                     "cluster_id": cluster_id,
                     "job_id": expansion_job.id,
@@ -32708,7 +32785,30 @@ impl Store {
                 "reason": "knowledge_cluster_investigation_execute_job_already_active",
             })));
         }
-        match self.enqueue_knowledge_cluster_investigation_execution_job(cluster_id) {
+        match self.enqueue_knowledge_cluster_investigation_execution_job_with_lineage(
+            cluster_id,
+            Some(json!({
+                "trigger": "expansion_completion",
+                "parent_job_id": job.id,
+                "parent_kind": job.kind,
+                "cluster_id": cluster_id,
+                "wiki_page_id": result_json.get("wiki_page_id").cloned().unwrap_or(Value::Null),
+                "report_id": result_json.get("report_id").cloned().unwrap_or(Value::Null),
+                "editorial_decision_id": result_json
+                    .get("editorial_decision_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "digest_candidate_id": result_json
+                    .get("digest_candidate_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "investigation_research_run_id": result_json
+                    .get("investigation_research_run_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "investigation_task_count": task_count,
+            })),
+        ) {
             Ok(execution_job) => Ok(Some(json!({
                 "status": "enqueued",
                 "cluster_id": cluster_id,
@@ -59251,7 +59351,7 @@ mod tests {
         // SEVERITY: Severe because autonomous recurrence can otherwise be a
         // schedule row that never drives durable wiki/digest work.
         let store = test_store("knowledge-backlog-worker-recurrence");
-        store
+        let watch_source = store
             .schedule_knowledge_cluster_backlog(25, 2, 5, "warm", "active")
             .unwrap();
         seed_knowledge_source_card(
@@ -59272,6 +59372,26 @@ mod tests {
         assert_eq!(first.processed, 1);
         assert_eq!(first.jobs[0].kind, "knowledge_cluster_backlog");
         assert_eq!(first.jobs[0].status, "completed");
+        let backlog_lineage = first.jobs[0]
+            .input_json
+            .get("lineage")
+            .expect("scheduled backlog job should carry watch-source lineage");
+        assert_eq!(
+            backlog_lineage.get("trigger").and_then(Value::as_str),
+            Some("watch_source_due")
+        );
+        assert_eq!(
+            backlog_lineage
+                .get("watch_source_id")
+                .and_then(Value::as_str),
+            Some(watch_source.id.as_str())
+        );
+        assert_eq!(
+            backlog_lineage
+                .get("watch_source_key")
+                .and_then(Value::as_str),
+            Some("knowledge:source-card-backlog")
+        );
         assert_eq!(
             first.jobs[0]
                 .result_json
@@ -59316,6 +59436,26 @@ mod tests {
         assert_eq!(second.processed, 1);
         assert_eq!(second.jobs[0].kind, "knowledge_cluster_expand");
         assert_eq!(second.jobs[0].status, "completed");
+        let expansion_lineage = second.jobs[0]
+            .input_json
+            .get("lineage")
+            .expect("auto expansion job should carry parent backlog lineage");
+        assert_eq!(
+            expansion_lineage.get("trigger").and_then(Value::as_str),
+            Some("backlog_completion")
+        );
+        assert_eq!(
+            expansion_lineage
+                .get("parent_job_id")
+                .and_then(Value::as_str),
+            Some(first.jobs[0].id.as_str())
+        );
+        assert_eq!(
+            expansion_lineage
+                .get("source_card_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
         assert_eq!(
             second.jobs[0]
                 .result_json
@@ -59671,11 +59811,33 @@ mod tests {
             .and_then(Value::as_str)
             .expect("auto backlog job id");
         let jobs = store.list_wiki_jobs().unwrap();
-        assert!(jobs.iter().any(|job| {
-            job.id == backlog_job_id
-                && job.kind == "knowledge_cluster_backlog"
-                && job.status == "pending"
-        }));
+        let backlog_job = jobs
+            .iter()
+            .find(|job| {
+                job.id == backlog_job_id
+                    && job.kind == "knowledge_cluster_backlog"
+                    && job.status == "pending"
+            })
+            .expect("auto backlog job");
+        let backlog_lineage = backlog_job
+            .input_json
+            .get("lineage")
+            .expect("adapter-triggered backlog job should carry lineage");
+        assert_eq!(
+            backlog_lineage.get("trigger").and_then(Value::as_str),
+            Some("adapter_completion")
+        );
+        assert_eq!(
+            backlog_lineage.get("parent_job_id").and_then(Value::as_str),
+            Some(adapter_job.id.as_str())
+        );
+        assert_eq!(
+            backlog_lineage
+                .get("source_card_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
 
         let second_adapter_job = store
             .insert_wiki_job_with_status(
@@ -59859,6 +60021,47 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
             .and_then(|value| value.get("auto_knowledge_investigation_execution"))
             .expect("expansion job should record auto investigation execution enqueue");
         assert_eq!(expansion_auto["status"], "enqueued");
+        let expansion_lineage = worker.jobs[1]
+            .input_json
+            .get("lineage")
+            .expect("auto expansion job should carry backlog parent lineage");
+        assert_eq!(
+            expansion_lineage.get("trigger").and_then(Value::as_str),
+            Some("backlog_completion")
+        );
+        assert_eq!(
+            expansion_lineage
+                .get("parent_job_id")
+                .and_then(Value::as_str),
+            Some(worker.jobs[0].id.as_str())
+        );
+        assert_eq!(
+            expansion_lineage
+                .get("source_card_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        let execution_lineage = worker.jobs[2]
+            .input_json
+            .get("lineage")
+            .expect("auto investigation execution job should carry expansion lineage");
+        assert_eq!(
+            execution_lineage.get("trigger").and_then(Value::as_str),
+            Some("expansion_completion")
+        );
+        assert_eq!(
+            execution_lineage
+                .get("parent_job_id")
+                .and_then(Value::as_str),
+            Some(worker.jobs[1].id.as_str())
+        );
+        assert_eq!(
+            execution_lineage
+                .get("investigation_task_count")
+                .and_then(Value::as_u64),
+            Some(4)
+        );
         assert_eq!(
             worker.jobs[2]
                 .result_json

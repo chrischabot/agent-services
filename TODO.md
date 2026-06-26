@@ -207,12 +207,12 @@ PR, implementation note, or final report:
       source-card-backed editor writes a stable wiki page, quality-gated
       knowledge report, durable editorial decision, and optional deduped digest
       candidate through the resident `knowledge_cluster_expand` worker job.
-      The worker now also auto-enqueues due `candidate`/`active` shared clusters
-      without a manual enqueue command, skips completed or blocked expansion
-      decisions, and suppresses duplicate pending expansion jobs. Severe tests
-      cover idempotent replay, manual and automatic worker execution, prompt
-      injection as labeled evidence, blocked-cluster non-retry, active-job
-      dedupe, and rejection of the empty metadata/link-dump shape.
+      The explicit expansion queue remains available, but autonomous worker
+      recurrence now routes due `candidate`/`active` shared clusters through a
+      durable editorial decision before expansion. Severe tests cover
+      idempotent replay, manual expansion execution, prompt injection as
+      labeled evidence, blocked-cluster non-retry, active-job dedupe, and
+      rejection of the empty metadata/link-dump shape.
       This slice adds the first durable shared editorial-decision worker via
       `arcwell knowledge decide-cluster-editorial`,
       `arcwell knowledge enqueue-cluster-editorial-decision`, and the resident
@@ -226,10 +226,13 @@ PR, implementation note, or final report:
       pages, matching wiki pages avoid duplicate cluster-authored pages,
       unpromoted model-origin clusters remain blocked, and worker execution
       chains editorial decision into wiki/report/digest-candidate expansion
-      without authorizing external delivery. Remaining work is model-assisted
-      editorial explanation, robust semantic duplicate-page detection, broad
-      corpus quality review, live recurring service proof, and external digest
-      delivery proof.
+      without authorizing external delivery. The resident worker now also
+      enqueues due shared clusters and backlog-completion follow-ups into
+      `knowledge_cluster_editorial_decide` first; severe tests prove active,
+      completed, and blocked editorial decisions suppress duplicate recurrence.
+      Remaining work is model-assisted editorial explanation, robust semantic
+      duplicate-page detection, broad corpus quality review, live recurring
+      service proof, and external digest delivery proof.
       This slice adds deterministic broad source-card backlog clustering via
       `arcwell knowledge cluster-backlog`,
       `arcwell knowledge enqueue-backlog-clustering`,
@@ -238,8 +241,8 @@ PR, implementation note, or final report:
       `knowledge_cluster_backlog` worker job. Severe tests prove multi-cluster
       entity/theme splitting, generated-only evidence skipping, replay
       suppression for already clustered source cards, source-health advancement
-      only after durable clustering, and the two-pass worker path from
-      scheduled backlog clustering to automatic wiki/report/digest expansion.
+      only after durable clustering, and the worker path from scheduled backlog
+      clustering to editorial decision to wiki/report/digest expansion.
       The deterministic backlog clusterer now keeps richer signal metadata
       for each cluster: provider families, source types, backlog presentation
       roles, GitHub repos, external domains, and primary-vs-reaction counts.
@@ -260,24 +263,28 @@ PR, implementation note, or final report:
       backlog job is active. Severe tests prove adapter completion can feed a
       source-card-backed cluster through the worker and cannot bypass
       `worker.enqueue` policy.
-      Auto-enqueued backlog, expansion, and investigation-execution jobs now
-      carry durable `input_json.lineage` with parent job ids, watch-source
-      health keys, triggering source-card ids, cluster ids/topics, and
-      investigation/report ids where available. Severe tests assert that
-      scheduled recurrence and adapter/backlog/expansion follow-ups remain
-      explainable from stored job rows.
+      Auto-enqueued backlog, editorial-decision, expansion, and
+      investigation-execution jobs now carry durable `input_json.lineage` with
+      parent job ids, watch-source health keys, triggering source-card ids,
+      cluster ids/topics, and investigation/report ids where available. Severe
+      tests assert that scheduled recurrence and
+      adapter/backlog/editorial/expansion follow-ups remain explainable from
+      stored job rows.
       `/ops/ui` now renders a compact lineage column in the Jobs table and
       lets operators filter by lineage summaries; severe UI coverage proves
-      scheduled knowledge backlog -> expansion lineage appears without raw HTML
-      rendering from hostile lineage text.
+      scheduled knowledge backlog -> editorial -> expansion lineage appears
+      without raw HTML rendering from hostile lineage text.
       Completed `knowledge_cluster_backlog` jobs now visibly auto-enqueue
-      `knowledge_cluster_expand` follow-ups, and completed expansion jobs
+      `knowledge_cluster_editorial_decide` follow-ups, completed editorial
+      decisions can visibly auto-enqueue `knowledge_cluster_expand` follow-ups,
+      and completed expansion jobs
       visibly auto-enqueue `knowledge_cluster_investigation_execute` follow-ups
       when they create source-linked investigation tasks. Severe tests prove a
-      single-cluster local worker pass can process backlog -> expansion ->
-      investigation execution without a hidden manual step, and that policy
-      denial is recorded without creating a hidden follow-up job. This does not
-      promote multi-cluster fanout capacity, wall-clock recurrence, or live
+      single-cluster local worker pass can process backlog -> editorial ->
+      expansion -> investigation execution without a hidden manual step, and
+      that policy denial is recorded without creating a hidden follow-up job.
+      This does not promote multi-cluster fanout capacity, wall-clock
+      recurrence, or live
       primary-source acquisition.
       Copied-home production-corpus proof
       `.arcwell-dev/proofs/knowledge-backlog-production-proof-20260626T051406Z/artifacts/proof-packet.md`

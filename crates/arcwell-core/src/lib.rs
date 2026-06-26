@@ -1464,6 +1464,15 @@ pub struct KnowledgeClusterExpansionEnqueueReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeClusterEditorialDecisionEnqueueReport {
+    pub inspected: usize,
+    pub enqueued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeClusterInvestigationExecutionEnqueueReport {
     pub inspected: usize,
     pub enqueued: usize,
@@ -1544,6 +1553,8 @@ pub struct WorkerRunReport {
     pub watch_poll: Option<WatchSourcePollEnqueueReport>,
     pub radar_schedule: Option<RadarScheduleEnqueueReport>,
     pub digest_alert_schedule: Option<DigestAlertScheduleEnqueueReport>,
+    pub knowledge_cluster_editorial_decision:
+        Option<KnowledgeClusterEditorialDecisionEnqueueReport>,
     pub knowledge_cluster_expansion: Option<KnowledgeClusterExpansionEnqueueReport>,
     pub knowledge_cluster_investigation_execution:
         Option<KnowledgeClusterInvestigationExecutionEnqueueReport>,
@@ -14162,6 +14173,90 @@ impl Store {
         Ok(report)
     }
 
+    pub fn enqueue_due_knowledge_cluster_editorial_decision_jobs(
+        &self,
+        max_clusters: usize,
+    ) -> Result<KnowledgeClusterEditorialDecisionEnqueueReport> {
+        let mut report = KnowledgeClusterEditorialDecisionEnqueueReport {
+            inspected: 0,
+            enqueued: 0,
+            skipped: 0,
+            jobs: Vec::new(),
+            errors: Vec::new(),
+        };
+        for cluster in self
+            .list_knowledge_clusters(max_clusters.clamp(1, 100))?
+            .into_iter()
+        {
+            report.inspected += 1;
+            if !matches!(cluster.status.as_str(), "candidate" | "active") {
+                report.skipped += 1;
+                continue;
+            }
+            if knowledge_cluster_requires_model_promotion(&cluster) {
+                report.skipped += 1;
+                continue;
+            }
+            if let Some(status) = self
+                .get_knowledge_editorial_decision_for_cluster(&cluster.id, "editorial_decide")?
+                .map(|decision| decision.status)
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                report.skipped += 1;
+                continue;
+            }
+            if let Some(status) =
+                self.knowledge_cluster_model_writer_decision_status(&cluster.id)?
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                report.skipped += 1;
+                continue;
+            }
+            if let Some(status) = self.knowledge_cluster_expansion_decision_status(&cluster.id)?
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                report.skipped += 1;
+                continue;
+            }
+            if self.knowledge_cluster_editorial_decision_has_active_job(&cluster.id)? {
+                report.skipped += 1;
+                continue;
+            }
+            if self.knowledge_cluster_expansion_has_active_job(&cluster.id)? {
+                report.skipped += 1;
+                continue;
+            }
+            if self.knowledge_cluster_model_writer_has_active_job(&cluster.id)? {
+                report.skipped += 1;
+                continue;
+            }
+            match self.enqueue_knowledge_cluster_editorial_decision_job_with_lineage(
+                &cluster.id,
+                true,
+                Some(json!({
+                    "trigger": "due_cluster_recurrence",
+                    "cluster_id": cluster.id.clone(),
+                    "topic": cluster.topic.clone(),
+                    "source_card_count": cluster.source_card_ids.len(),
+                    "source_card_ids": cluster.source_card_ids.clone(),
+                    "boundary": "Due recurrence records a durable editorial decision before any wiki/report/digest follow-up."
+                })),
+            ) {
+                Ok(job) => {
+                    report.enqueued += 1;
+                    report.jobs.push(job.id);
+                }
+                Err(error) => {
+                    report.skipped += 1;
+                    report
+                        .errors
+                        .push(format!("{}:{}: {error}", cluster.id, cluster.topic));
+                }
+            }
+        }
+        Ok(report)
+    }
+
     pub fn enqueue_due_knowledge_cluster_investigation_execution_jobs(
         &self,
         max_clusters: usize,
@@ -14989,6 +15084,14 @@ impl Store {
         } else {
             None
         };
+        let knowledge_cluster_editorial_decision =
+            self.enqueue_due_knowledge_cluster_editorial_decision_jobs(max_jobs)?;
+        let knowledge_cluster_editorial_decision =
+            if knowledge_cluster_editorial_decision.inspected > 0 {
+                Some(knowledge_cluster_editorial_decision)
+            } else {
+                None
+            };
         let knowledge_cluster_expansion =
             self.enqueue_due_knowledge_cluster_expansion_jobs(max_jobs)?;
         let knowledge_cluster_expansion = if knowledge_cluster_expansion.inspected > 0 {
@@ -15044,6 +15147,7 @@ impl Store {
             watch_poll,
             radar_schedule,
             digest_alert_schedule,
+            knowledge_cluster_editorial_decision,
             knowledge_cluster_expansion,
             knowledge_cluster_investigation_execution,
             telegram_retry,
@@ -17753,9 +17857,8 @@ impl Store {
                     )
                 }
             } else if source_card_count < 2
-                || cluster.novelty_score < 0.35
-                || cluster.momentum_score < 0.20
                 || cluster.stale_score >= 0.85
+                || (cluster.novelty_score < 0.35 && cluster.momentum_score < 0.20)
             {
                 quality_findings.push("insufficient_editorial_signal".to_string());
                 (
@@ -17871,7 +17974,7 @@ impl Store {
         Ok(self
             .search_wiki_pages_for_research(&cluster.topic)?
             .into_iter()
-            .find(|page| page.source != own_source))
+            .find(|page| page.source != own_source && !page.source.starts_with("source-card:")))
     }
 
     pub fn expand_knowledge_cluster(
@@ -34165,13 +34268,13 @@ impl Store {
         {
             object.insert("auto_knowledge_backlog".to_string(), auto_knowledge_backlog);
         }
-        if let Some(auto_expansion) =
-            self.auto_enqueue_knowledge_expansion_after_backlog_job(&existing, &result_json)?
+        if let Some(auto_editorial_decision) = self
+            .auto_enqueue_knowledge_editorial_decision_after_backlog_job(&existing, &result_json)?
             && let Some(object) = result_json.as_object_mut()
         {
             object.insert(
-                "auto_knowledge_cluster_expansion".to_string(),
-                auto_expansion,
+                "auto_knowledge_cluster_editorial_decision".to_string(),
+                auto_editorial_decision,
             );
         }
         if let Some(auto_execution) = self
@@ -34285,7 +34388,7 @@ impl Store {
         }
     }
 
-    fn auto_enqueue_knowledge_expansion_after_backlog_job(
+    fn auto_enqueue_knowledge_editorial_decision_after_backlog_job(
         &self,
         job: &WikiJob,
         result_json: &Value,
@@ -34301,12 +34404,30 @@ impl Store {
         let mut skipped = Vec::new();
         let mut errors = Vec::new();
         for cluster_id in &cluster_ids {
+            if let Some(status) = self
+                .get_knowledge_editorial_decision_for_cluster(cluster_id, "editorial_decide")?
+                .map(|decision| decision.status)
+                && matches!(status.as_str(), "completed" | "blocked")
+            {
+                skipped.push(json!({
+                    "cluster_id": cluster_id,
+                    "reason": format!("editorial_decision_{status}")
+                }));
+                continue;
+            }
             if let Some(status) = self.knowledge_cluster_expansion_decision_status(cluster_id)?
                 && matches!(status.as_str(), "completed" | "blocked")
             {
                 skipped.push(json!({
                     "cluster_id": cluster_id,
                     "reason": format!("expansion_decision_{status}")
+                }));
+                continue;
+            }
+            if self.knowledge_cluster_editorial_decision_has_active_job(cluster_id)? {
+                skipped.push(json!({
+                    "cluster_id": cluster_id,
+                    "reason": "knowledge_cluster_editorial_decide_job_already_active"
                 }));
                 continue;
             }
@@ -34320,22 +34441,23 @@ impl Store {
             let cluster = self
                 .get_knowledge_cluster(cluster_id)?
                 .with_context(|| format!("knowledge cluster not found: {cluster_id}"))?;
-            match self.enqueue_knowledge_cluster_expansion_job_with_lineage(
+            match self.enqueue_knowledge_cluster_editorial_decision_job_with_lineage(
                 cluster_id,
                 true,
                 Some(json!({
                     "trigger": "backlog_completion",
-                    "parent_job_id": job.id,
-                    "parent_kind": job.kind,
-                    "cluster_id": cluster.id,
-                    "topic": cluster.topic,
+                    "parent_job_id": job.id.clone(),
+                    "parent_kind": job.kind.clone(),
+                    "cluster_id": cluster.id.clone(),
+                    "topic": cluster.topic.clone(),
                     "source_card_count": cluster.source_card_ids.len(),
-                    "source_card_ids": cluster.source_card_ids,
+                    "source_card_ids": cluster.source_card_ids.clone(),
+                    "boundary": "Backlog completion queues an editorial decision first; expansion is only a decider follow-up."
                 })),
             ) {
-                Ok(expansion_job) => enqueued.push(json!({
+                Ok(editorial_job) => enqueued.push(json!({
                     "cluster_id": cluster_id,
-                    "job_id": expansion_job.id,
+                    "job_id": editorial_job.id,
                 })),
                 Err(error) => errors.push(json!({
                     "cluster_id": cluster_id,
@@ -60407,6 +60529,140 @@ mod tests {
     }
 
     #[test]
+    fn severe_due_knowledge_editorial_enqueue_suppresses_active_and_terminal_clusters() {
+        // CLAIM: due shared-cluster recurrence enters the editorial decision
+        // queue first and remains idempotent across active, completed, and
+        // blocked editorial states.
+        // ORACLE: first due pass writes exactly one editorial_decide job; a
+        // second due pass sees the active job and skips; after the worker records
+        // a completed editorial decision, due recurrence skips instead of
+        // enqueueing another editor; a blocked terminal editorial decision is
+        // also skipped without wiki/report/digest rows.
+        // SEVERITY: Severe because otherwise autonomous recurrence can create
+        // duplicate decisions, retry storms, or bypass the editorial loop.
+        let store = test_store("knowledge-editorial-due-enqueue");
+        let release = seed_knowledge_source_card(
+            &store,
+            "due-editorial-release",
+            "Due editorial evidence says OpenAI shipped a source-backed agent package release.",
+        );
+        let reaction = seed_knowledge_source_card(
+            &store,
+            "due-editorial-reaction",
+            "Due editorial evidence says independent developers connected that release to MCP workflows.",
+        );
+        let cluster = store
+            .create_knowledge_cluster(KnowledgeClusterInput {
+                topic: "Due editorial agent package trend".to_string(),
+                status: "candidate".to_string(),
+                event_ids: Vec::new(),
+                source_card_ids: vec![release.id.clone(), reaction.id.clone()],
+                first_seen_at: None,
+                last_seen_at: None,
+                novelty_score: 0.48,
+                momentum_score: 0.20,
+                stale_score: 0.0,
+                reason: "Two source-card-backed signals should enter the editorial loop."
+                    .to_string(),
+                duplicate_groups: json!({}),
+                metadata: json!({ "fixture": "due_editorial" }),
+            })
+            .unwrap();
+
+        let first = store
+            .enqueue_due_knowledge_cluster_editorial_decision_jobs(10)
+            .unwrap();
+        assert_eq!(first.inspected, 1);
+        assert_eq!(first.enqueued, 1);
+        let second = store
+            .enqueue_due_knowledge_cluster_editorial_decision_jobs(10)
+            .unwrap();
+        assert_eq!(second.enqueued, 0);
+        assert_eq!(second.skipped, 1);
+        assert_eq!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_cluster_editorial_decide"
+                    && job.status == "pending"
+                    && job.input_json.get("cluster_id").and_then(Value::as_str)
+                        == Some(cluster.id.as_str()))
+                .count(),
+            1
+        );
+
+        let worker = store.run_worker_once(1).unwrap();
+        assert_eq!(worker.processed, 1, "{worker:#?}");
+        assert_eq!(worker.jobs[0].kind, "knowledge_cluster_editorial_decide");
+        assert_eq!(worker.jobs[0].status, "completed");
+        assert_eq!(
+            worker.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("enqueued_job_kind"))
+                .and_then(Value::as_str),
+            Some("knowledge_cluster_expand")
+        );
+        let third = store
+            .enqueue_due_knowledge_cluster_editorial_decision_jobs(10)
+            .unwrap();
+        assert_eq!(third.enqueued, 0);
+        assert_eq!(third.skipped, 1);
+
+        let blocked_store = test_store("knowledge-editorial-due-blocked");
+        let blocked_card = seed_knowledge_source_card(
+            &blocked_store,
+            "blocked-due-editorial",
+            "Blocked due editorial evidence should not retry after a terminal decision.",
+        );
+        let blocked_cluster = blocked_store
+            .create_knowledge_cluster(KnowledgeClusterInput {
+                topic: "Blocked due editorial trend".to_string(),
+                status: "candidate".to_string(),
+                event_ids: Vec::new(),
+                source_card_ids: vec![blocked_card.id.clone()],
+                first_seen_at: None,
+                last_seen_at: None,
+                novelty_score: 0.1,
+                momentum_score: 0.1,
+                stale_score: 0.0,
+                reason: "Blocked fixture.".to_string(),
+                duplicate_groups: json!({}),
+                metadata: json!({ "fixture": "blocked_due_editorial" }),
+            })
+            .unwrap();
+        blocked_store
+            .record_knowledge_editorial_decision(KnowledgeEditorialDecisionInput {
+                cluster_id: blocked_cluster.id.clone(),
+                decision: "editorial_decide".to_string(),
+                status: "blocked".to_string(),
+                wiki_page_id: None,
+                digest_candidate_id: None,
+                source_card_ids: vec![blocked_card.id],
+                reason: "Blocked editorial decision must suppress due recurrence.".to_string(),
+                quality_findings: vec!["insufficient_editorial_signal".to_string()],
+                metadata: json!({ "recommended_action": "block_for_review" }),
+            })
+            .unwrap();
+        let blocked = blocked_store
+            .enqueue_due_knowledge_cluster_editorial_decision_jobs(10)
+            .unwrap();
+        assert_eq!(blocked.inspected, 1);
+        assert_eq!(blocked.enqueued, 0);
+        assert_eq!(blocked.skipped, 1);
+        assert!(blocked_store.list_digest_candidates().unwrap().is_empty());
+        assert!(
+            blocked_store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .all(|job| job.kind != "knowledge_cluster_editorial_decide"
+                    && job.kind != "knowledge_cluster_expand")
+        );
+    }
+
+    #[test]
     fn severe_large_knowledge_cluster_expansion_bounds_prose_without_losing_citations() {
         // CLAIM: A production-sized shared cluster should expand into a bounded
         // human-readable wiki/report artifact instead of failing with an
@@ -60912,14 +61168,21 @@ mod tests {
             .unwrap();
 
         let first = store.run_worker_once(1).unwrap();
-        let enqueue = first
+        let editorial_enqueue = first
+            .knowledge_cluster_editorial_decision
+            .as_ref()
+            .expect("knowledge cluster editorial enqueue report");
+        assert_eq!(editorial_enqueue.inspected, 1);
+        assert_eq!(editorial_enqueue.enqueued, 1);
+        let first_expansion_enqueue = first
             .knowledge_cluster_expansion
             .as_ref()
-            .expect("knowledge cluster enqueue report");
-        assert_eq!(enqueue.inspected, 1);
-        assert_eq!(enqueue.enqueued, 1);
+            .expect("first knowledge cluster expansion enqueue report");
+        assert_eq!(first_expansion_enqueue.inspected, 1);
+        assert_eq!(first_expansion_enqueue.enqueued, 0);
+        assert_eq!(first_expansion_enqueue.skipped, 1);
         assert_eq!(first.processed, 1);
-        assert_eq!(first.jobs[0].kind, "knowledge_cluster_expand");
+        assert_eq!(first.jobs[0].kind, "knowledge_cluster_editorial_decide");
         assert_eq!(first.jobs[0].status, "completed");
         assert_eq!(
             first.jobs[0]
@@ -60931,6 +61194,51 @@ mod tests {
         );
         assert_eq!(
             first.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("recommended_action"))
+                .and_then(Value::as_str),
+            Some("expand_wiki_and_digest")
+        );
+        assert_eq!(
+            first.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("enqueued_job_kind"))
+                .and_then(Value::as_str),
+            Some("knowledge_cluster_expand")
+        );
+        assert!(
+            store
+                .list_knowledge_editorial_decisions(10)
+                .unwrap()
+                .iter()
+                .any(|decision| decision.cluster_id == projected.cluster.id
+                    && decision.decision == "editorial_decide"
+                    && decision.status == "completed"
+                    && decision.wiki_page_id.is_none()
+                    && decision.digest_candidate_id.is_none()
+                    && decision
+                        .metadata
+                        .get("recommended_action")
+                        .and_then(Value::as_str)
+                        == Some("expand_wiki_and_digest"))
+        );
+        assert_eq!(store.list_digest_candidates().unwrap().len(), 0);
+
+        let second = store.run_worker_once(1).unwrap();
+        let second_expansion_enqueue = second
+            .knowledge_cluster_expansion
+            .as_ref()
+            .expect("second knowledge cluster expansion enqueue report");
+        assert_eq!(second_expansion_enqueue.inspected, 1);
+        assert_eq!(second_expansion_enqueue.enqueued, 0);
+        assert_eq!(second_expansion_enqueue.skipped, 1);
+        assert_eq!(second.processed, 1);
+        assert_eq!(second.jobs[0].kind, "knowledge_cluster_expand");
+        assert_eq!(second.jobs[0].status, "completed");
+        assert_eq!(
+            second.jobs[0]
                 .result_json
                 .as_ref()
                 .and_then(|value| value.get("auto_knowledge_investigation_execution"))
@@ -60950,39 +61258,32 @@ mod tests {
                     && decision.wiki_page_id.is_some()
                     && decision.digest_candidate_id.is_some())
         );
-        let wiki_pages_after_first = store.list_wiki_pages().unwrap().len();
-        let digest_count_after_first = store.list_digest_candidates().unwrap().len();
+        let wiki_pages_after_expansion = store.list_wiki_pages().unwrap().len();
+        let digest_count_after_expansion = store.list_digest_candidates().unwrap().len();
 
-        let second = store.run_worker_once(1).unwrap();
-        let second_expansion_enqueue = second
-            .knowledge_cluster_expansion
-            .as_ref()
-            .expect("second knowledge cluster expansion enqueue report");
-        assert_eq!(second_expansion_enqueue.inspected, 1);
-        assert_eq!(second_expansion_enqueue.enqueued, 0);
-        assert_eq!(second_expansion_enqueue.skipped, 1);
-        let investigation_execution_enqueue = second
+        let third = store.run_worker_once(1).unwrap();
+        let investigation_execution_enqueue = third
             .knowledge_cluster_investigation_execution
             .as_ref()
             .expect("knowledge cluster investigation execution enqueue report");
         assert_eq!(investigation_execution_enqueue.inspected, 1);
         assert_eq!(investigation_execution_enqueue.enqueued, 0);
         assert_eq!(investigation_execution_enqueue.skipped, 1);
-        assert_eq!(second.processed, 1);
+        assert_eq!(third.processed, 1);
         assert_eq!(
-            second.jobs[0].kind,
+            third.jobs[0].kind,
             "knowledge_cluster_investigation_execute"
         );
-        assert_eq!(second.jobs[0].status, "completed");
+        assert_eq!(third.jobs[0].status, "completed");
         assert_eq!(
-            second.jobs[0]
+            third.jobs[0]
                 .result_json
                 .as_ref()
                 .and_then(|value| value.get("executed_task_count"))
                 .and_then(Value::as_u64),
             Some(4)
         );
-        let investigation_run_id = second.jobs[0]
+        let investigation_run_id = third.jobs[0]
             .result_json
             .as_ref()
             .and_then(|value| value.get("research_run_id"))
@@ -61008,22 +61309,22 @@ mod tests {
                 .all(|task| task.status == "completed")
         );
 
-        let third = store.run_worker_once(1).unwrap();
-        let third_execution_enqueue = third
+        let fourth = store.run_worker_once(1).unwrap();
+        let fourth_execution_enqueue = fourth
             .knowledge_cluster_investigation_execution
             .as_ref()
-            .expect("third knowledge cluster investigation execution enqueue report");
-        assert_eq!(third_execution_enqueue.inspected, 1);
-        assert_eq!(third_execution_enqueue.enqueued, 0);
-        assert_eq!(third_execution_enqueue.skipped, 1);
-        assert_eq!(third.processed, 0);
+            .expect("fourth knowledge cluster investigation execution enqueue report");
+        assert_eq!(fourth_execution_enqueue.inspected, 1);
+        assert_eq!(fourth_execution_enqueue.enqueued, 0);
+        assert_eq!(fourth_execution_enqueue.skipped, 1);
+        assert_eq!(fourth.processed, 0);
         assert_eq!(
             store.list_wiki_pages().unwrap().len(),
-            wiki_pages_after_first
+            wiki_pages_after_expansion
         );
         assert_eq!(
             store.list_digest_candidates().unwrap().len(),
-            digest_count_after_first
+            digest_count_after_expansion
         );
     }
 
@@ -61654,13 +61955,14 @@ mod tests {
     fn severe_resident_worker_runs_scheduled_backlog_then_expands_cluster() {
         // CLAIM: scheduled knowledge recurrence is not CLI-only: a due
         // knowledge_backlog watch source enqueues and executes backlog
-        // clustering, records the queued expansion follow-up, then the next
-        // worker pass expands the newly created cluster through the existing
-        // wiki/report/digest route and queues source-linked investigation.
+        // clustering, records the queued editorial-decision follow-up, then
+        // later worker passes record the editorial decision, expand the cluster
+        // through the wiki/report/digest route, and queue source-linked
+        // investigation.
         // ORACLE: first pass completes a knowledge_cluster_backlog job and
-        // advances source health while recording an expansion enqueue; second
-        // pass skips duplicate expansion enqueue but processes the already
-        // queued knowledge_cluster_expand job for the created cluster.
+        // advances source health while recording an editorial-decision enqueue;
+        // second pass processes the editorial decision; third pass expands the
+        // created cluster and queues investigation execution.
         // SEVERITY: Severe because autonomous recurrence can otherwise be a
         // schedule row that never drives durable wiki/digest work.
         let store = test_store("knowledge-backlog-worker-recurrence");
@@ -61717,7 +62019,7 @@ mod tests {
             first.jobs[0]
                 .result_json
                 .as_ref()
-                .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
+                .and_then(|value| value.get("auto_knowledge_cluster_editorial_decision"))
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str),
             Some("enqueued")
@@ -61740,6 +62042,12 @@ mod tests {
         assert_eq!(second_watch.inspected, 1);
         assert_eq!(second_watch.enqueued, 0);
         assert_eq!(second_watch.skipped, 1);
+        let editorial = second
+            .knowledge_cluster_editorial_decision
+            .expect("knowledge editorial enqueue report");
+        assert_eq!(editorial.inspected, 1);
+        assert_eq!(editorial.enqueued, 0);
+        assert_eq!(editorial.skipped, 1);
         let expansion = second
             .knowledge_cluster_expansion
             .expect("knowledge expansion enqueue report");
@@ -61747,21 +62055,62 @@ mod tests {
         assert_eq!(expansion.enqueued, 0);
         assert_eq!(expansion.skipped, 1);
         assert_eq!(second.processed, 1);
-        assert_eq!(second.jobs[0].kind, "knowledge_cluster_expand");
+        assert_eq!(second.jobs[0].kind, "knowledge_cluster_editorial_decide");
         assert_eq!(second.jobs[0].status, "completed");
-        let expansion_lineage = second.jobs[0]
+        assert_eq!(
+            second.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("recommended_action"))
+                .and_then(Value::as_str),
+            Some("expand_wiki_and_digest")
+        );
+        assert_eq!(
+            second.jobs[0]
+                .result_json
+                .as_ref()
+                .and_then(|value| value.get("enqueued_job_kind"))
+                .and_then(Value::as_str),
+            Some("knowledge_cluster_expand")
+        );
+        let editorial_lineage = second.jobs[0]
             .input_json
             .get("lineage")
-            .expect("auto expansion job should carry parent backlog lineage");
+            .expect("auto editorial job should carry parent backlog lineage");
         assert_eq!(
-            expansion_lineage.get("trigger").and_then(Value::as_str),
+            editorial_lineage.get("trigger").and_then(Value::as_str),
             Some("backlog_completion")
         );
         assert_eq!(
-            expansion_lineage
+            editorial_lineage
                 .get("parent_job_id")
                 .and_then(Value::as_str),
             Some(first.jobs[0].id.as_str())
+        );
+        assert_eq!(
+            editorial_lineage
+                .get("source_card_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+
+        let third = store.run_worker_once(1).unwrap();
+        let third_expansion = third
+            .knowledge_cluster_expansion
+            .expect("third knowledge expansion enqueue report");
+        assert_eq!(third_expansion.inspected, 1);
+        assert_eq!(third_expansion.enqueued, 0);
+        assert_eq!(third_expansion.skipped, 1);
+        assert_eq!(third.processed, 1);
+        assert_eq!(third.jobs[0].kind, "knowledge_cluster_expand");
+        assert_eq!(third.jobs[0].status, "completed");
+        let expansion_lineage = third.jobs[0]
+            .input_json
+            .get("lineage")
+            .expect("auto expansion job should carry editorial lineage");
+        assert_eq!(
+            expansion_lineage.get("trigger").and_then(Value::as_str),
+            Some("editorial_decide")
         );
         assert_eq!(
             expansion_lineage
@@ -61770,7 +62119,7 @@ mod tests {
             Some(2)
         );
         assert_eq!(
-            second.jobs[0]
+            third.jobs[0]
                 .result_json
                 .as_ref()
                 .and_then(|value| value.get("cluster_id"))
@@ -61778,7 +62127,7 @@ mod tests {
             Some(cluster.id.as_str())
         );
         assert_eq!(
-            second.jobs[0]
+            third.jobs[0]
                 .result_json
                 .as_ref()
                 .and_then(|value| value.get("auto_knowledge_investigation_execution"))
@@ -62282,12 +62631,12 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
     #[test]
     fn severe_worker_chains_backlog_expansion_and_investigation_in_one_pass() {
         // CLAIM: Once source cards reach the shared backlog, the resident worker
-        // can continue through clustering, wiki/digest expansion, and source-
-        // linked investigation execution in the same bounded pass when capacity
-        // and policy allow it.
-        // ORACLE: one worker run processes backlog -> expansion -> execution,
-        // each prior job result names the auto-enqueued follow-up, and durable
-        // wiki/report/digest/research artifacts exist.
+        // can continue through clustering, editorial decision, wiki/digest
+        // expansion, and source-linked investigation execution in the same
+        // bounded pass when capacity and policy allow it.
+        // ORACLE: one worker run processes backlog -> editorial -> expansion
+        // -> execution, each prior job result names the auto-enqueued follow-up,
+        // and durable wiki/report/digest/research artifacts exist.
         // SEVERITY: Severe because a pipeline that requires hidden extra manual
         // ticks after each phase can look autonomous while still being brittle.
         let store = test_store("worker-same-pass-knowledge-chain");
@@ -62305,21 +62654,22 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
             .enqueue_knowledge_cluster_backlog_job(50, 2, 1)
             .unwrap();
 
-        let worker = store.run_worker_once(3).unwrap();
-        assert_eq!(worker.processed, 3);
-        assert_eq!(worker.completed, 3);
+        let worker = store.run_worker_once(4).unwrap();
+        assert_eq!(worker.processed, 4);
+        assert_eq!(worker.completed, 4);
         assert_eq!(worker.jobs[0].kind, "knowledge_cluster_backlog");
-        assert_eq!(worker.jobs[1].kind, "knowledge_cluster_expand");
+        assert_eq!(worker.jobs[1].kind, "knowledge_cluster_editorial_decide");
+        assert_eq!(worker.jobs[2].kind, "knowledge_cluster_expand");
         assert_eq!(
-            worker.jobs[2].kind,
+            worker.jobs[3].kind,
             "knowledge_cluster_investigation_execute"
         );
 
         let backlog_auto = worker.jobs[0]
             .result_json
             .as_ref()
-            .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
-            .expect("backlog job should record auto expansion enqueue");
+            .and_then(|value| value.get("auto_knowledge_cluster_editorial_decision"))
+            .expect("backlog job should record auto editorial-decision enqueue");
         assert_eq!(backlog_auto["status"], "enqueued");
         assert_eq!(
             backlog_auto
@@ -62328,25 +62678,56 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
                 .map(Vec::len),
             Some(1)
         );
-        let expansion_auto = worker.jobs[1]
+        let editorial_result = worker.jobs[1]
+            .result_json
+            .as_ref()
+            .expect("editorial decision result");
+        assert_eq!(
+            editorial_result
+                .get("recommended_action")
+                .and_then(Value::as_str),
+            Some("expand_wiki_and_digest")
+        );
+        assert_eq!(
+            editorial_result
+                .get("enqueued_job_kind")
+                .and_then(Value::as_str),
+            Some("knowledge_cluster_expand")
+        );
+        let editorial_lineage = worker.jobs[1]
+            .input_json
+            .get("lineage")
+            .expect("auto editorial job should carry backlog parent lineage");
+        assert_eq!(
+            editorial_lineage.get("trigger").and_then(Value::as_str),
+            Some("backlog_completion")
+        );
+        assert_eq!(
+            editorial_lineage
+                .get("parent_job_id")
+                .and_then(Value::as_str),
+            Some(worker.jobs[0].id.as_str())
+        );
+        assert_eq!(
+            editorial_lineage
+                .get("source_card_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        let expansion_auto = worker.jobs[2]
             .result_json
             .as_ref()
             .and_then(|value| value.get("auto_knowledge_investigation_execution"))
             .expect("expansion job should record auto investigation execution enqueue");
         assert_eq!(expansion_auto["status"], "enqueued");
-        let expansion_lineage = worker.jobs[1]
+        let expansion_lineage = worker.jobs[2]
             .input_json
             .get("lineage")
-            .expect("auto expansion job should carry backlog parent lineage");
+            .expect("auto expansion job should carry editorial lineage");
         assert_eq!(
             expansion_lineage.get("trigger").and_then(Value::as_str),
-            Some("backlog_completion")
-        );
-        assert_eq!(
-            expansion_lineage
-                .get("parent_job_id")
-                .and_then(Value::as_str),
-            Some(worker.jobs[0].id.as_str())
+            Some("editorial_decide")
         );
         assert_eq!(
             expansion_lineage
@@ -62355,7 +62736,7 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
                 .map(Vec::len),
             Some(2)
         );
-        let execution_lineage = worker.jobs[2]
+        let execution_lineage = worker.jobs[3]
             .input_json
             .get("lineage")
             .expect("auto investigation execution job should carry expansion lineage");
@@ -62367,7 +62748,7 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
             execution_lineage
                 .get("parent_job_id")
                 .and_then(Value::as_str),
-            Some(worker.jobs[1].id.as_str())
+            Some(worker.jobs[2].id.as_str())
         );
         assert_eq!(
             execution_lineage
@@ -62376,7 +62757,7 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
             Some(4)
         );
         assert_eq!(
-            worker.jobs[2]
+            worker.jobs[3]
                 .result_json
                 .as_ref()
                 .and_then(|value| value.get("executed_task_count"))
@@ -62391,7 +62772,7 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
                 .iter()
                 .any(|report| report.status == "draft")
         );
-        let execution_result = worker.jobs[2].result_json.as_ref().unwrap();
+        let execution_result = worker.jobs[3].result_json.as_ref().unwrap();
         let run_id = execution_result
             .get("research_run_id")
             .and_then(Value::as_str)
@@ -62410,18 +62791,19 @@ reason = "block automatic backlog enqueue token=sk-test-secret"
     }
 
     #[test]
-    fn severe_backlog_auto_expansion_is_policy_visible_and_no_hidden_followup() {
-        // CLAIM: Backlog completion may enqueue expansion, but only through the
-        // normal worker.enqueue policy boundary.
-        // ORACLE: with expansion enqueue denied, the backlog job completes with a
-        // redacted blocked auto-expansion result and no expansion job is written.
+    fn severe_backlog_auto_editorial_decision_is_policy_visible_and_no_hidden_followup() {
+        // CLAIM: Backlog completion may enqueue an editorial decision, but only
+        // through the normal worker.enqueue policy boundary.
+        // ORACLE: with editorial-decision enqueue denied, the backlog job
+        // completes with a redacted blocked auto-editorial result and neither
+        // editorial nor expansion jobs are written.
         // SEVERITY: Severe because automatic chaining must not turn into an
         // implicit policy bypass.
         let store = test_store("worker-chain-expansion-policy-deny");
         seed_knowledge_source_card(
             &store,
             "chain-policy-openai",
-            "Chain policy evidence says OpenAI package release clustering should be blocked before expansion enqueue.",
+            "Chain policy evidence says OpenAI package release clustering should be blocked before editorial enqueue.",
         );
         write_policy(
             &store,
@@ -62434,11 +62816,11 @@ source = "knowledge_cluster_backlog"
 reason = "allow backlog job for policy-denial proof"
 
 [[rules]]
-id = "deny-expansion-job"
-effect = "deny"
-action = "worker.enqueue"
-source = "knowledge_cluster_expand"
-reason = "block expansion enqueue token=sk-chain-secret"
+	id = "deny-editorial-job"
+	effect = "deny"
+	action = "worker.enqueue"
+	source = "knowledge_cluster_editorial_decide"
+	reason = "block editorial enqueue token=sk-chain-secret"
 "#,
         );
         store
@@ -62452,8 +62834,8 @@ reason = "block expansion enqueue token=sk-chain-secret"
         let auto = worker.jobs[0]
             .result_json
             .as_ref()
-            .and_then(|value| value.get("auto_knowledge_cluster_expansion"))
-            .expect("blocked auto expansion status");
+            .and_then(|value| value.get("auto_knowledge_cluster_editorial_decision"))
+            .expect("blocked auto editorial status");
         assert_eq!(auto["status"], "blocked");
         let errors = auto
             .get("errors")
@@ -62467,7 +62849,8 @@ reason = "block expansion enqueue token=sk-chain-secret"
                 .list_wiki_jobs()
                 .unwrap()
                 .iter()
-                .all(|job| job.kind != "knowledge_cluster_expand")
+                .all(|job| job.kind != "knowledge_cluster_editorial_decide"
+                    && job.kind != "knowledge_cluster_expand")
         );
     }
 

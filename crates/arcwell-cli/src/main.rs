@@ -20299,7 +20299,7 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
     fn severe_ops_ui_surfaces_knowledge_job_lineage_without_raw_html() {
         // CLAIM: Knowledge recurrence lineage is operator-visible from the ops
         // job list, not only buried in raw job detail JSON.
-        // ORACLE: A scheduled backlog -> expansion chain renders compact
+        // ORACLE: A scheduled backlog -> editorial-decision chain renders compact
         // lineage summaries, query filtering can find lineage fields, and a
         // hostile lineage trigger is escaped instead of rendered as HTML.
         // SEVERITY: Severe because opaque autonomous jobs recreate the
@@ -20338,7 +20338,7 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
             .unwrap();
         let worker = store.run_worker_once(2).unwrap();
         assert_eq!(worker.jobs[0].kind, "knowledge_cluster_backlog");
-        assert_eq!(worker.jobs[1].kind, "knowledge_cluster_expand");
+        assert_eq!(worker.jobs[1].kind, "knowledge_cluster_editorial_decide");
 
         store
             .enqueue_wiki_job(
@@ -20375,7 +20375,7 @@ reason = "<script data-x=\"policy\">alert('policy')</script>"
             None,
             false,
         );
-        assert!(filtered.contains("knowledge_cluster_expand"));
+        assert!(filtered.contains("knowledge_cluster_editorial_decide"));
         assert!(filtered.contains("trigger:backlog_completion"));
     }
 

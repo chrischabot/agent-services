@@ -1233,6 +1233,8 @@ Refuting tests:
 
 - [x] Add first deterministic `editorial_decide` worker job for shared
       knowledge clusters.
+- [x] Route due shared-cluster recurrence and backlog-completion follow-ups
+      through `editorial_decide` before expansion.
 - [x] Add first foreground deterministic decision rule for source-card/radar
       projection reports.
 - [ ] Add model-assisted decision explanation behind policy/cost.
@@ -1252,6 +1254,8 @@ Refuting tests:
       follow-up path.
 - [x] Unsupported model-origin cluster cannot authorize delivery or write
       wiki/report/digest rows before promotion.
+- [x] Due recurrence suppresses active/completed/blocked editorial decisions
+      and does not create duplicate editor jobs.
 
 Current local proof boundary:
 
@@ -1260,8 +1264,10 @@ Current local proof boundary:
   `expand_wiki_and_digest`, `digest_only`, `update_existing_wiki`,
   `monitor_only`, or `block_for_review`.
 - A completed `editorial_decide` decision can enqueue exactly one local
-  `knowledge_cluster_expand` follow-up for eligible clusters, while due
-  expansion skips clusters that already have an active editorial-decision job.
+  `knowledge_cluster_expand` follow-up for eligible clusters. The resident
+  worker now queues due shared clusters and backlog-completion follow-ups into
+  `knowledge_cluster_editorial_decide` first; direct due expansion remains an
+  explicit operator/repair API, not the autonomous default path.
 - The worker never authorizes external delivery. Digest delivery remains behind
   recipient, quiet-hours, dedupe, idempotency, retry/dead-letter, and provider
   proof gates.

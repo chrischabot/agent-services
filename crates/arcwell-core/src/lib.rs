@@ -35,6 +35,7 @@ const PROJECT_SYNC_MAX_STALE_AFTER_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SECRET_EXPIRY_WARNING_WINDOW_SECONDS: i64 = 72 * 60 * 60;
 const WORKER_HEARTBEAT_EVENT_RETENTION_DAYS: i64 = 14;
 const X_MONITOR_MAX_SOURCES: usize = 1_000;
+const X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN: usize = 3;
 const X_ARCHIVE_MAX_FILE_BYTES: u64 = 25_000_000;
 const X_ARCHIVE_MAX_TOTAL_BYTES: u64 = 100_000_000;
 const X_ARCHIVE_MAX_ENTRIES: usize = 5_000;
@@ -3079,11 +3080,15 @@ pub struct XMonitorSourceReport {
 pub struct XMonitorReport {
     pub watched_sources: usize,
     pub polled_sources: usize,
+    pub attempted_sources: usize,
+    pub deferred_sources: usize,
     pub imported: usize,
     pub skipped_duplicates: usize,
     pub rejected: usize,
     pub failed_sources: usize,
+    pub rate_limited_sources: usize,
     pub digest_candidates: usize,
+    pub stopped_reason: Option<String>,
     pub sources: Vec<XMonitorSourceReport>,
 }
 
@@ -21268,11 +21273,15 @@ impl Store {
             return Ok(XMonitorReport {
                 watched_sources: 0,
                 polled_sources: 0,
+                attempted_sources: 0,
+                deferred_sources: 0,
                 imported: 0,
                 skipped_duplicates: 0,
                 rejected: 0,
                 failed_sources: 0,
+                rate_limited_sources: 0,
                 digest_candidates: 0,
+                stopped_reason: None,
                 sources: Vec::new(),
             });
         };
@@ -21280,11 +21289,15 @@ impl Store {
             return Ok(XMonitorReport {
                 watched_sources: 0,
                 polled_sources: 0,
+                attempted_sources: 0,
+                deferred_sources: 0,
                 imported: 0,
                 skipped_duplicates: 0,
                 rejected: 0,
                 failed_sources: 0,
+                rate_limited_sources: 0,
                 digest_candidates: 0,
+                stopped_reason: None,
                 sources: Vec::new(),
             });
         }
@@ -21305,11 +21318,15 @@ impl Store {
             return Ok(XMonitorReport {
                 watched_sources: 0,
                 polled_sources: 0,
+                attempted_sources: 0,
+                deferred_sources: 0,
                 imported: 0,
                 skipped_duplicates: 0,
                 rejected: 0,
                 failed_sources: 0,
+                rate_limited_sources: 0,
                 digest_candidates: 0,
+                stopped_reason: None,
                 sources: Vec::new(),
             });
         }
@@ -21422,7 +21439,9 @@ impl Store {
         let mut skipped_duplicates = 0;
         let mut rejected = 0;
         let mut failed_sources = 0;
+        let mut rate_limited_sources = 0;
         let mut digest_candidates = 0;
+        let mut stopped_reason = None;
 
         for source in &watch_sources {
             let handle = source.locator.clone();
@@ -21481,6 +21500,10 @@ impl Store {
                     }
                     failed_sources += 1;
                     let error_text = redact_secret_like_text(&error.to_string());
+                    let failure_classification = classify_provider_failure(&error_text);
+                    if failure_classification.status == "rate_limited" {
+                        rate_limited_sources += 1;
+                    }
                     let completed_at = now();
                     let _ = self.record_source_failure(
                         &cursor_key,
@@ -21507,7 +21530,10 @@ impl Store {
                         error: Some(&error_text),
                         metadata: json!({
                             "handle": handle,
-                            "max_results": max_results_per_source
+                            "max_results": max_results_per_source,
+                            "failure_kind": failure_classification.status,
+                            "rate_limit_failures_so_far": rate_limited_sources,
+                            "rate_limit_abort_threshold": X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
                         }),
                     });
                     source_reports.push(XMonitorSourceReport {
@@ -21524,18 +21550,32 @@ impl Store {
                         status: "failed".to_string(),
                         error: Some(excerpt(&error_text, 2000)),
                     });
+                    if rate_limited_sources >= X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+                        && source_reports.len() < watch_sources.len()
+                    {
+                        stopped_reason = Some(format!(
+                            "rate_limit_abort_after_{}_failures",
+                            X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+                        ));
+                        break;
+                    }
                 }
             }
         }
+        let deferred_sources = watch_sources.len().saturating_sub(source_reports.len());
 
         Ok(XMonitorReport {
             watched_sources: watch_sources.len(),
             polled_sources: source_reports.len(),
+            attempted_sources: source_reports.len(),
+            deferred_sources,
             imported,
             skipped_duplicates,
             rejected,
             failed_sources,
+            rate_limited_sources,
             digest_candidates,
+            stopped_reason,
             sources: source_reports,
         })
     }
@@ -88357,6 +88397,158 @@ reason = "test denies X link expansion"
         );
         let sync_error = stats.latest_sync_runs[0].error.as_deref().unwrap();
         assert!(!sync_error.contains("SHOULD_NOT_LEAK"), "{sync_error}");
+    }
+
+    #[test]
+    fn severe_x_monitor_rate_limit_abort_defers_unattempted_sources() {
+        // CLAIM: A broad X watch monitor run stops after a small number of
+        // provider quota failures instead of turning one quota wall into a
+        // retry storm across the whole watch list.
+        // PRECONDITIONS: Five watched handles are due and the provider returns
+        // repeated HTTP 429 responses.
+        // POSTCONDITIONS: Only the capped attempted sources get failed sync and
+        // rate-limited source-health rows; unattempted sources are reported as
+        // deferred and keep their prior cursor/health state untouched.
+        // ORACLE: monitor report, recorded mock request count, x_sync_runs,
+        // source_health, cursors, and secret-redacted errors agree.
+        // SEVERITY: Severe because rate limits are normal in production and a
+        // broad retry storm can make ops health look much worse than reality.
+        let store = test_store("x-monitor-rate-limit-abort");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "test-token", "x")
+            .unwrap();
+        for handle in ["openai", "anthropic", "googledeepmind", "nvidia", "vercel"] {
+            store
+                .upsert_watch_source(WatchSourceInput {
+                    source_kind: "x_handle".to_string(),
+                    locator: handle.to_string(),
+                    label: format!("@{handle}"),
+                    cadence: "warm".to_string(),
+                    status: "active".to_string(),
+                    metadata: json!({ "origin": "test" }),
+                })
+                .unwrap();
+            store
+                .set_cursor(&format!("x:watch:{handle}"), &format!("cursor-{handle}"))
+                .unwrap();
+        }
+        let (base, requests) = mock_recording_sequence_server(vec![
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"detail":"quota exceeded token=SHOULD_NOT_LEAK"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"detail":"quota exceeded token=SHOULD_NOT_LEAK"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"detail":"quota exceeded token=SHOULD_NOT_LEAK"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"detail":"quota exceeded token=SHOULD_NOT_LEAK"}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"detail":"quota exceeded token=SHOULD_NOT_LEAK"}"#,
+                "application/json",
+            ),
+        ]);
+
+        let report = store
+            .x_monitor_watch_sources_with_base(10, 10, &base)
+            .unwrap();
+
+        assert_eq!(report.watched_sources, 5);
+        assert_eq!(
+            report.attempted_sources,
+            X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+        );
+        assert_eq!(
+            report.polled_sources,
+            X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+        );
+        assert_eq!(
+            report.failed_sources,
+            X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+        );
+        assert_eq!(
+            report.rate_limited_sources,
+            X_MONITOR_MAX_RATE_LIMIT_FAILURES_PER_RUN
+        );
+        assert_eq!(report.deferred_sources, 2);
+        assert_eq!(
+            report.stopped_reason.as_deref(),
+            Some("rate_limit_abort_after_3_failures")
+        );
+        assert_eq!(requests.lock().unwrap().len(), 3);
+
+        let failed_syncs: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'watch_monitor' AND status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_syncs, 3);
+        let rate_limited_health: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_health WHERE provider = 'x' AND source_kind = 'x_monitor' AND status = 'rate_limited'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rate_limited_health, 3);
+        let attempted_handles = report
+            .sources
+            .iter()
+            .map(|source| source.handle.as_str())
+            .collect::<BTreeSet<_>>();
+        let deferred_handles = ["openai", "anthropic", "googledeepmind", "nvidia", "vercel"]
+            .into_iter()
+            .filter(|handle| !attempted_handles.contains(handle))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deferred_handles.len(),
+            2,
+            "exactly two handles should remain untouched after quota abort"
+        );
+        for handle in deferred_handles {
+            assert!(
+                store
+                    .get_source_health(&format!("x:watch:{handle}"))
+                    .unwrap()
+                    .is_none(),
+                "{handle} was not attempted and must not be marked failed"
+            );
+            assert_eq!(
+                store
+                    .get_cursor(&format!("x:watch:{handle}"))
+                    .unwrap()
+                    .unwrap()
+                    .value,
+                format!("cursor-{handle}")
+            );
+        }
+        let serialized = serde_json::to_string(&json!({
+            "report": report,
+            "stats": store.x_stats().unwrap(),
+            "health": store.list_source_health().unwrap()
+        }))
+        .unwrap();
+        assert!(!serialized.contains("SHOULD_NOT_LEAK"), "{serialized}");
     }
 
     #[test]

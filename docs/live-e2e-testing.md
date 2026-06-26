@@ -162,8 +162,10 @@ Remaining limits:
   quota/tier coverage.
 - X portable export freshness is repaired, but broad watch-source health is
   still blocked by current rate-limit rows and 700 unresolved watch sync
-  failures. It needs a quota-aware scheduler proof rather than a one-shot broad
-  retry.
+  failures. Broad monitor runs now stop after three classified quota/rate-limit
+  failures and report deferred sources without marking them failed, but the
+  current real rows still need provider-plan capacity handling plus a
+  policy-allowed repair/retry proof before strict health can be promoted.
 - Provider-side revocation is classifier-tested locally, not live-tested against
   a deliberately revoked X refresh token.
 - X plan/API tier changes can still alter bookmark/follow/watch behavior.

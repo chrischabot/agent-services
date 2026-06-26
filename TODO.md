@@ -1163,10 +1163,13 @@ PR, implementation note, or final report:
       failed watch syncs, not portable export freshness or resolved historical
       failures.
 - [ ] Replace broad X watch-source retry storms with a quota-aware scheduler:
-      bounded per-window fanout, provider-plan capacity estimates, exponential
-      backoff that keeps `next_run_at` meaningful, stale-rate-limit surfacing,
-      and a repair/retry proof that clears or downgrades current
-      `rate_limited` rows only after successful durable provider reads.
+      the monitor now aborts a broad run after three classified quota/rate-limit
+      failures, reports attempted/deferred/rate-limited source counts, and
+      leaves unattempted source health/cursors untouched. Remaining work:
+      provider-plan capacity estimates, adaptive per-window fanout, stale
+      rate-limit surfacing, and a policy-allowed repair/retry proof that clears
+      or downgrades current `rate_limited` rows only after successful durable
+      provider reads.
 - [x] Add scheduled credential rotation reminders and stale-scope warnings.
       `secret_health`, `health`, `doctor`, and `ops_snapshot` warn when
       local/ref credentials expire within 72 hours, and active scheduled X

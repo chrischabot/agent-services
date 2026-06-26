@@ -1562,6 +1562,7 @@ pub struct WorkerRunReport {
     pub watch_poll: Option<WatchSourcePollEnqueueReport>,
     pub radar_schedule: Option<RadarScheduleEnqueueReport>,
     pub digest_alert_schedule: Option<DigestAlertScheduleEnqueueReport>,
+    pub knowledge_cluster_model_writer: Option<KnowledgeClusterModelWriterEnqueueReport>,
     pub knowledge_cluster_editorial_decision:
         Option<KnowledgeClusterEditorialDecisionEnqueueReport>,
     pub knowledge_cluster_expansion: Option<KnowledgeClusterExpansionEnqueueReport>,
@@ -15197,6 +15198,14 @@ impl Store {
         } else {
             None
         };
+        let knowledge_cluster_model_writer = self.enqueue_due_knowledge_cluster_model_writer_jobs(
+            max_jobs, "mock", None, None, None, true,
+        )?;
+        let knowledge_cluster_model_writer = if knowledge_cluster_model_writer.inspected > 0 {
+            Some(knowledge_cluster_model_writer)
+        } else {
+            None
+        };
         let knowledge_cluster_editorial_decision =
             self.enqueue_due_knowledge_cluster_editorial_decision_jobs(max_jobs)?;
         let knowledge_cluster_editorial_decision =
@@ -15260,6 +15269,7 @@ impl Store {
             watch_poll,
             radar_schedule,
             digest_alert_schedule,
+            knowledge_cluster_model_writer,
             knowledge_cluster_editorial_decision,
             knowledge_cluster_expansion,
             knowledge_cluster_investigation_execution,
@@ -63695,6 +63705,171 @@ priority = 20
             .unwrap();
         assert_eq!(terminal.enqueued, 0, "{terminal:?}");
         assert!(store.list_digest_deliveries(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn severe_resident_worker_enqueues_due_promoted_model_writers_without_manual_job() {
+        // CLAIM: resident worker recurrence includes the promoted model-origin
+        // writer sweep itself, not only explicit operator-created writer jobs
+        // or cluster-scoped watch sources.
+        // ORACLE: with no watch source and no pre-existing writer job, one
+        // promoted model-origin cluster gets a writer job and completes through
+        // run_worker_once; an unpromoted model proposal and a deterministic
+        // shared cluster are skipped; no external delivery is authorized.
+        // SEVERITY: Severe because a manual-only due enqueue control can look
+        // scheduled while the resident service never advances promoted model
+        // clusters on its own.
+        let store = test_store("resident-worker-due-model-writer");
+        let sdk = seed_knowledge_source_card(
+            &store,
+            "resident-due-writer-sdk",
+            "Resident due writer evidence says OpenAI published an agent SDK package with MCP support.",
+        );
+        let benchmark = seed_knowledge_source_card(
+            &store,
+            "resident-due-writer-benchmark",
+            "Resident due writer evidence says Simon Willison published a benchmark for agent-generated SVGs.",
+        );
+        let invocation = store
+            .invoke_knowledge_cluster_model(KnowledgeClusterProposalModelInput {
+                source_card_ids: vec![sdk.id.clone(), benchmark.id.clone()],
+                model_provider: "mock".to_string(),
+                model_name: None,
+                endpoint: None,
+                timeout_seconds: None,
+                max_clusters: 6,
+            })
+            .unwrap();
+        assert!(
+            invocation.clusters.len() >= 2,
+            "fixture should create both promoted and unpromoted candidates: {invocation:?}"
+        );
+        let promoted_cluster_id = invocation.clusters[0].id.clone();
+        let unpromoted_cluster_id = invocation.clusters[1].id.clone();
+        seed_knowledge_source_card(
+            &store,
+            "resident-due-writer-deterministic-a",
+            "Resident deterministic evidence says a non-model shared cluster exists.",
+        );
+        seed_knowledge_source_card(
+            &store,
+            "resident-due-writer-deterministic-b",
+            "Resident deterministic evidence says another source supports that shared cluster.",
+        );
+        let deterministic = store
+            .project_knowledge_from_source_card_query(
+                "Resident deterministic evidence",
+                Some("Resident deterministic shared cluster"),
+                10,
+            )
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-resident-due-model-writer-promotion"
+effect = "allow"
+action = "knowledge_cluster.promote"
+package = "arcwell-librarian"
+source = "knowledge_cluster_model_review"
+reason = "allow reviewed resident due model writer test"
+priority = 20
+
+[[rules]]
+id = "allow-resident-due-model-writer-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+source = "knowledge_cluster_model_write"
+reason = "allow resident due model writer worker enqueue in severe test"
+priority = 20
+"#,
+        );
+        store
+            .promote_knowledge_cluster(
+                &promoted_cluster_id,
+                Some("resident-due-model-writer-test"),
+                Some("Promote only one model-origin cluster for resident due writer recurrence."),
+            )
+            .unwrap();
+
+        assert!(store.list_watch_sources().unwrap().is_empty());
+        assert!(store.list_wiki_jobs().unwrap().is_empty());
+
+        let worker = store.run_worker_once(10).unwrap();
+        let model_writer = worker
+            .knowledge_cluster_model_writer
+            .as_ref()
+            .expect("resident worker should report due model-writer sweep");
+        assert_eq!(model_writer.inspected, 3, "{worker:#?}");
+        assert_eq!(model_writer.enqueued, 1, "{worker:#?}");
+        assert_eq!(model_writer.skipped, 2, "{worker:#?}");
+        assert_eq!(worker.processed, 1, "{worker:#?}");
+        assert_eq!(worker.jobs[0].kind, "knowledge_cluster_model_write");
+        assert_eq!(worker.jobs[0].status, "completed", "{worker:#?}");
+        assert_eq!(
+            worker.jobs[0]
+                .input_json
+                .get("cluster_id")
+                .and_then(Value::as_str),
+            Some(promoted_cluster_id.as_str())
+        );
+        assert_eq!(
+            worker.jobs[0]
+                .input_json
+                .get("lineage")
+                .and_then(|value| value.get("trigger"))
+                .and_then(Value::as_str),
+            Some("due_promoted_model_cluster_recurrence")
+        );
+        let jobs = store.list_wiki_jobs().unwrap();
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job.kind == "knowledge_cluster_model_write")
+                .count(),
+            1,
+            "{jobs:#?}"
+        );
+        assert!(
+            jobs.iter().all(|job| {
+                job.input_json.get("cluster_id").and_then(Value::as_str)
+                    != Some(unpromoted_cluster_id.as_str())
+                    && job.input_json.get("cluster_id").and_then(Value::as_str)
+                        != Some(deterministic.cluster.id.as_str())
+            }),
+            "{jobs:#?}"
+        );
+        let decisions = store.list_knowledge_editorial_decisions(20).unwrap();
+        assert!(decisions.iter().any(|decision| {
+            decision.cluster_id == promoted_cluster_id
+                && decision.decision == "model_write_wiki_and_digest"
+                && decision.status == "completed"
+        }));
+        assert!(
+            decisions.iter().all(|decision| {
+                !(decision.cluster_id == promoted_cluster_id
+                    && decision.decision == "editorial_decide")
+            }),
+            "{decisions:#?}"
+        );
+        assert!(store.list_digest_deliveries(None).unwrap().is_empty());
+
+        let second = store.run_worker_once(10).unwrap();
+        assert!(
+            second
+                .knowledge_cluster_model_writer
+                .as_ref()
+                .is_some_and(|report| report.enqueued == 0),
+            "{second:#?}"
+        );
+        assert_eq!(
+            store
+                .list_wiki_jobs()
+                .unwrap()
+                .iter()
+                .filter(|job| job.kind == "knowledge_cluster_model_write")
+                .count(),
+            1
+        );
     }
 
     #[test]

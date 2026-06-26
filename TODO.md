@@ -418,6 +418,13 @@ PR, implementation note, or final report:
       clusters, suppresses active and terminal duplicate writer jobs, writes no
       external delivery rows, and keeps the HTTP control policy-gated,
       CSRF-protected, idempotent, and rendered.
+      Resident `worker run-once` now also invokes that due promoted
+      model-writer sweep before shared editorial/expansion recurrence. Severe
+      tests prove a promoted model-origin cluster can be written without a
+      pre-created operator job or cluster-scoped watch source, while duplicate
+      terminal runs do not create another writer job or external delivery. This
+      is Local Proof for resident recurrence, not broad production-corpus
+      writer quality or multi-day service proof.
       The authenticated `/ops/ui` Knowledge Controls now also expose a
       CSRF/idempotency-protected model-cluster promotion action, double-gated by
       `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`

@@ -194,6 +194,12 @@ Current implemented bridge slice:
   deterministic/shared clusters, active writer/editorial/expansion jobs, and
   terminal writer/expansion decisions; external digest delivery remains behind
   separate delivery policy and recipient gates.
+- Resident `worker run-once` now invokes the same due promoted model-writer
+  sweep before shared editorial/expansion recurrence, so promoted model-origin
+  clusters can advance without an operator pre-creating a writer job or
+  cluster-scoped watch source. Local severe tests prove idempotency and no
+  external delivery; live/broad production writer quality still needs a separate
+  proof.
 - Source-card-gated model cluster writing through
   `arcwell knowledge write-cluster-model`,
   `arcwell knowledge enqueue-cluster-model-write`, and the resident
@@ -292,9 +298,10 @@ What it still does not prove:
   foreground provider attempt over proof fixture data with one policy-gated
   promoted expansion.
 - Broad production-corpus model-backed writer/editor synthesis and broad
-  automatic model-writing sweeps. The live foreground and scheduled writer
-  proofs are source-card-gated and accepted over proof-scoped promoted
-  clusters, not broad autonomous production analyst quality.
+  automatic model-writing quality. The resident due sweep is locally proven and
+  the live foreground/scheduled writer proofs are source-card-gated and accepted
+  over proof-scoped promoted clusters, not broad autonomous production analyst
+  quality.
 - Autonomous approval, broad wiki page update decisions, and live external
   delivery from shared knowledge reports.
 - Broad ops repair controls.
@@ -1417,6 +1424,13 @@ Add preserved proof scripts:
       visibility. This is not broad production-corpus writer quality,
       multi-day service recurrence, external delivery, or broad automatic
       model-writing sweeps.
+- [x] Local resident-worker due model-writer recurrence severe test:
+      `severe_resident_worker_enqueues_due_promoted_model_writers_without_manual_job`
+      proves `run_worker_once` itself invokes the due promoted model-origin
+      writer sweep before shared editorial/expansion recurrence, completes one
+      promoted model-writer job without a pre-created operator job or watch
+      source, suppresses duplicate terminal reruns, and creates no external
+      delivery. This is local proof, not live provider or multi-day proof.
 - [x] `scripts/knowledge-digest-recurrence-proof`
       passed at
       `.arcwell-dev/proofs/knowledge-digest-recurrence-proof-20260626T075355Z-75160/proof-packet.json`:

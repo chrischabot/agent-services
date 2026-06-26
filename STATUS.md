@@ -64,6 +64,8 @@ Knowledge worker chaining and deterministic backlog update: completed `knowledge
 
 2026-06-26 ops lineage visibility note: `/ops/ui` Jobs now includes a compact lineage column for jobs with `input_json.lineage`, and the Jobs filter searches those lineage summaries. A severe UI test proves scheduled knowledge backlog -> editorial -> expansion lineage is visible and hostile lineage text is escaped. This is local ops visibility only; it does not prove a resident service ran over wall-clock time.
 
+2026-06-26 resident model-writer recurrence note: `run_worker_once` now invokes the due promoted model-origin writer sweep before shared editorial/expansion recurrence, and `WorkerRunReport` exposes the `knowledge_cluster_model_writer` enqueue report. A severe local test proves a promoted model-origin cluster can be written without a pre-created operator job or cluster-scoped watch source, while unpromoted/model-proposal and deterministic/shared clusters are not written by that sweep, terminal reruns suppress duplicate writer jobs, and external delivery remains untouched. This is Local Proof for resident recurrence, not broad production-corpus writer quality, live external delivery, or multi-day service proof.
+
 ## Product Reality
 
 | Area | Exact state | Live status | Tests | Owner | Blocker / next proof |

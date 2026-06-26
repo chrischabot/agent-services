@@ -442,7 +442,10 @@ PR, implementation note, or final report:
       approve an initial stale candidate, create a pending delivery row, merge
       new evidence, rerun autonomous shared/editorial and promoted model-writer
       recurrence, and prove the stale candidate is no longer routable while the
-      delivery ledger remains inspectable.
+      delivery ledger remains inspectable. Generic Telegram/email channel
+      retries now skip channel messages linked to non-approved digest
+      candidates, and digest-delivery reconciliation refuses to mark a stale
+      candidate sent even if a late channel attempt succeeds.
       The authenticated `/ops/ui` Knowledge Controls now also expose a
       CSRF/idempotency-protected model-cluster promotion action, double-gated by
       `ops.knowledge_clusters.promote` and core `knowledge_cluster.promote`

@@ -25354,6 +25354,13 @@ impl Store {
                 FROM channel_delivery_attempts d2
                 WHERE d2.message_id = m.id
               )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM digest_deliveries dd
+                JOIN digest_candidates dc ON dc.id = dd.candidate_id
+                WHERE dd.channel_message_id = m.id
+                  AND (dc.status != 'approved' OR dc.review_status != 'approved')
+              )
             ORDER BY d.retry_at ASC, d.created_at ASC
             LIMIT ?2
             "#,
@@ -25453,6 +25460,13 @@ impl Store {
                     SELECT max(d2.attempt)
                     FROM channel_delivery_attempts d2
                     WHERE d2.message_id = m.id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM digest_deliveries dd
+                    JOIN digest_candidates dc ON dc.id = dd.candidate_id
+                    WHERE dd.channel_message_id = m.id
+                      AND (dc.status != 'approved' OR dc.review_status != 'approved')
                   )
                 "#,
                 params![now()],
@@ -25607,6 +25621,13 @@ impl Store {
                 FROM channel_delivery_attempts d2
                 WHERE d2.message_id = m.id
               )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM digest_deliveries dd
+                JOIN digest_candidates dc ON dc.id = dd.candidate_id
+                WHERE dd.channel_message_id = m.id
+                  AND (dc.status != 'approved' OR dc.review_status != 'approved')
+              )
             ORDER BY d.retry_at ASC, d.created_at ASC
             LIMIT ?2
             "#,
@@ -25685,6 +25706,13 @@ impl Store {
                     SELECT max(d2.attempt)
                     FROM channel_delivery_attempts d2
                     WHERE d2.message_id = m.id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM digest_deliveries dd
+                    JOIN digest_candidates dc ON dc.id = dd.candidate_id
+                    WHERE dd.channel_message_id = m.id
+                      AND (dc.status != 'approved' OR dc.review_status != 'approved')
                   )
                 "#,
                 params![now()],
@@ -27000,8 +27028,12 @@ impl Store {
                        latest.attempt,
                        latest.provider_status,
                        latest.error,
-                       latest.retry_at
+                       latest.retry_at,
+                       candidate.status,
+                       candidate.review_status
                 FROM digest_deliveries dd
+                JOIN digest_candidates candidate
+                  ON candidate.id = dd.candidate_id
                 JOIN channel_delivery_attempts linked
                   ON linked.id = dd.channel_delivery_attempt_id
                 JOIN channel_delivery_attempts latest
@@ -27030,6 +27062,8 @@ impl Store {
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })?)?
         };
@@ -27050,9 +27084,22 @@ impl Store {
             provider_status,
             error,
             retry_at,
+            candidate_status,
+            candidate_review_status,
         ) in due
         {
-            let (status, error_text, retry_at) = if ok {
+            let (status, error_text, retry_at) = if candidate_status != "approved"
+                || candidate_review_status != "approved"
+            {
+                report.failed += 1;
+                (
+                    "blocked",
+                    Some(sanitize_radar_delivery_error(&format!(
+                        "digest candidate no longer approved; status={candidate_status}, review_status={candidate_review_status}"
+                    ))?),
+                    None,
+                )
+            } else if ok {
                 report.sent += 1;
                 ("sent", None, None)
             } else if attempt >= max_attempts_per_message {
@@ -61137,6 +61184,29 @@ mod tests {
             .unwrap();
         assert_eq!(approved_stale.status, "approved");
         assert_eq!(approved_stale.review_status, "approved");
+        let stale_message = store
+            .record_channel_message_with_status(
+                "telegram",
+                "outgoing",
+                "telegram:chat:old",
+                "Stale cluster digest should not retry after evidence refresh.",
+                "failed",
+                None,
+                None,
+            )
+            .unwrap();
+        let stale_attempt = store
+            .record_channel_delivery_attempt(
+                &stale_message.id,
+                "telegram",
+                "telegram:chat:old",
+                false,
+                429,
+                &json!({ "ok": false, "description": "stale delivery before refresh" }),
+                Some("rate limited before cluster evidence refresh"),
+                Some("2000-01-01T00:00:00.000000000+00:00"),
+            )
+            .unwrap();
         let stale_delivery_id = Uuid::new_v4().to_string();
         let stale_delivery_key = format!("stale-route-{stale_delivery_id}");
         let stale_delivery_created_at = now();
@@ -61145,13 +61215,17 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO digest_deliveries
-                  (id, candidate_id, channel, subject, target, idempotency_key, status, created_at, updated_at)
-                VALUES (?1, ?2, 'email', 'email:old@example.com', 'email:old@example.com', ?3, 'pending', ?4, ?4)
+                  (id, candidate_id, channel, subject, target, idempotency_key, status, policy_decision_id,
+                   channel_message_id, channel_delivery_attempt_id, error, retry_at, created_at, updated_at)
+                VALUES (?1, ?2, 'telegram', 'telegram:chat:old', 'telegram:chat:old', ?3, 'failed', NULL,
+                        ?4, ?5, 'rate limited before cluster evidence refresh', '2000-01-01T00:00:00.000000000+00:00', ?6, ?6)
                 "#,
                 params![
                     stale_delivery_id,
                     first_digest_id,
                     stale_delivery_key,
+                    stale_message.id,
+                    stale_attempt.id,
                     stale_delivery_created_at,
                 ],
             )
@@ -61238,8 +61312,52 @@ mod tests {
             .unwrap();
         assert_eq!(stale_deliveries.len(), 1);
         assert_eq!(stale_deliveries[0].id, stale_delivery_id);
-        assert_eq!(stale_deliveries[0].status, "pending");
+        assert_eq!(stale_deliveries[0].status, "failed");
         assert_eq!(stale_deliveries[0].idempotency_key, stale_delivery_key);
+        let retry_api = mock_status_server("200 OK", "", r#"{"ok":true}"#, "application/json");
+        let stale_retry = store
+            .retry_due_telegram_deliveries("TOKEN", Some(&retry_api), 10)
+            .unwrap();
+        assert_eq!(stale_retry.attempted, 0);
+        assert_eq!(
+            store
+                .list_channel_delivery_attempts(Some(&stale_message.id))
+                .unwrap()
+                .len(),
+            1
+        );
+        let stale_late_success = store
+            .record_channel_delivery_attempt(
+                &stale_message.id,
+                "telegram",
+                "telegram:chat:old",
+                true,
+                200,
+                &json!({ "ok": true }),
+                None,
+                None,
+            )
+            .unwrap();
+        let reconcile = store.reconcile_digest_delivery_attempts(3).unwrap();
+        assert_eq!(reconcile.inspected, 1);
+        assert_eq!(reconcile.sent, 0);
+        assert_eq!(reconcile.failed, 1);
+        let blocked_delivery = store
+            .get_digest_delivery(&stale_delivery_id)
+            .unwrap()
+            .expect("blocked stale delivery");
+        assert_eq!(blocked_delivery.status, "blocked");
+        assert_eq!(
+            blocked_delivery.channel_delivery_attempt_id.as_deref(),
+            Some(stale_late_success.id.as_str())
+        );
+        assert!(
+            blocked_delivery
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no longer approved")
+        );
         let refreshed_digest = store
             .get_digest_candidate(&refreshed_digest_id)
             .unwrap()

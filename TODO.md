@@ -216,6 +216,13 @@ PR, implementation note, or final report:
       promotes the deterministic backlog bridge only; it does not promote
       semantic/model clustering, live X freshness, wall-clock recurrence, or
       external digest recurrence.
+      Report-quality proof
+      `.arcwell-dev/proofs/knowledge-report-quality-production-proof-20260626T052350Z/artifacts/proof-packet.md`
+      reran the copied-home corpus after rebuilding the dev binary and proved
+      all 12 projected reports include `## Next Investigation`, `## Evidence`,
+      and confidence/uncertainty sections. The gate now rejects readable prose
+      that cites source cards but does not name follow-up verification,
+      corroboration, comparison, or wiki-expansion work.
       Remaining work is investigation jobs, broad production-data
       semantic/model clustering, X credential-refresh live proof, wall-clock
       scheduled source recurrence, external delivery recurrence, richer

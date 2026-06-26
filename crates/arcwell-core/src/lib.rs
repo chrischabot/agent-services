@@ -33634,6 +33634,34 @@ fn audit_knowledge_report(body: &str, source_card_ids: &[String]) -> Vec<String>
     {
         findings.push("report_does_not_name_uncertainty_or_confidence".to_string());
     }
+    let has_next_investigation_section = [
+        "## next investigation",
+        "## editorial next steps",
+        "## follow-up research",
+        "## follow up research",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !has_next_investigation_section {
+        findings.push("report_missing_next_investigation_section".to_string());
+    }
+    let follow_up_signals = [
+        "primary source",
+        "official",
+        "corroborat",
+        "compare",
+        "existing wiki",
+        "wiki page",
+        "verify",
+        "follow-up",
+        "follow up",
+    ]
+    .iter()
+    .filter(|needle| lower.contains(**needle))
+    .count();
+    if follow_up_signals < 2 {
+        findings.push("report_missing_follow_up_actions".to_string());
+    }
     for source_card_id in source_card_ids {
         if !trimmed.contains(source_card_id) {
             findings.push(format!("missing_source_card_citation:{source_card_id}"));
@@ -34247,6 +34275,11 @@ This is the first bridge between the existing live/captured ingestion machinery 
 
 ## Evidence
 {highlights}
+
+## Next Investigation
+- Verify official primary sources before promoting release, benchmark, pricing, availability, or adoption claims.
+- Corroborate the cluster with independent developer, maintainer, customer, benchmark, or documentation evidence before treating it as a trend.
+- Compare the cluster against existing wiki pages, related entities, and prior launches before creating a duplicate page or sending stronger competitive-analysis claims.
 
 ## Confidence and uncertainty
 Confidence is bounded by `{proof_level}` and source family `{source_family}`. The main uncertainty is interpretive: these source cards prove that evidence exists and was coalesced, but they do not by themselves prove adoption, long-term importance, competitive positioning, or correctness of every external claim. Follow-up research should fetch deeper primary documentation, compare against existing wiki pages, and only then promote stronger claims or outbound digests.
@@ -56199,8 +56232,29 @@ mod tests {
                 .contains("missing_source_card_citation")
         );
 
+        let no_next_investigation_body = format!(
+            "## What happened\nOpenAI appears to have published a new package while developer conversation framed it as part of the agent-infrastructure tooling wave. The useful point is not merely that a repository exists; it is that repository activity and outside interpretation are now linked into one cluster that can be followed over time. Source-card evidence: {card_a_id}, {card_b_id}.\n\n## Why it matters\nThis is the shape the unified pipeline needs to preserve for every source family: an upstream release event, a public explanation or launch message, and third-party reaction that changes the practical meaning of the release. The cluster should therefore drive a wiki expansion that compares the release with earlier agent SDK and MCP-adjacent launches, rather than a notification that asks the reader to click through raw URLs.\n\n## Confidence and uncertainty\nConfidence is medium-high because two independent source-card rows support the event and reaction, but uncertainty remains around adoption, package maturity, and whether later GitHub or blog evidence will change the interpretation.",
+            card_a_id = card_a.id,
+            card_b_id = card_b.id
+        );
+        let no_next_investigation_error = store
+            .record_knowledge_report(KnowledgeReportInput {
+                cluster_id: cluster.id.clone(),
+                title: "No next investigation report".to_string(),
+                body_markdown: no_next_investigation_body,
+                status: "draft".to_string(),
+                source_card_ids: cluster.source_card_ids.clone(),
+                metadata: json!({}),
+            })
+            .unwrap_err();
+        assert!(
+            no_next_investigation_error
+                .to_string()
+                .contains("report_missing_next_investigation_section")
+        );
+
         let good_body = format!(
-            "## What happened\nOpenAI appears to have published a new package while developer conversation framed it as part of the agent-infrastructure tooling wave. The useful point is not merely that a repository exists; it is that repository activity and outside interpretation are now linked into one cluster that can be followed over time. Source-card evidence: {card_a_id}, {card_b_id}.\n\n## Why it matters\nThis is the shape the unified pipeline needs to preserve for every source family: an upstream release event, a public explanation or launch message, and third-party reaction that changes the practical meaning of the release. The cluster should therefore drive a wiki expansion that compares the release with earlier agent SDK and MCP-adjacent launches, rather than a notification that asks the reader to click through raw URLs.\n\n## Confidence and uncertainty\nConfidence is medium-high because two independent source-card rows support the event and reaction, but uncertainty remains around adoption, package maturity, and whether later GitHub or blog evidence will change the interpretation. The next writer pass should look for official documentation, repository activity, and credible third-party commentary before promoting stronger competitive-analysis claims.",
+            "## What happened\nOpenAI appears to have published a new package while developer conversation framed it as part of the agent-infrastructure tooling wave. The useful point is not merely that a repository exists; it is that repository activity and outside interpretation are now linked into one cluster that can be followed over time. Source-card evidence: {card_a_id}, {card_b_id}.\n\n## Why it matters\nThis is the shape the unified pipeline needs to preserve for every source family: an upstream release event, a public explanation or launch message, and third-party reaction that changes the practical meaning of the release. The cluster should therefore drive a wiki expansion that compares the release with earlier agent SDK and MCP-adjacent launches, rather than a notification that asks the reader to click through raw URLs.\n\n## Next Investigation\n- Verify official package documentation and release notes before promoting exact capability claims.\n- Corroborate developer reaction with independent maintainers or credible third-party commentary before calling this a trend.\n- Compare against existing wiki pages for prior agent SDK and MCP-adjacent launches before creating duplicate competitive-analysis pages.\n\n## Confidence and uncertainty\nConfidence is medium-high because two independent source-card rows support the event and reaction, but uncertainty remains around adoption, package maturity, and whether later GitHub or blog evidence will change the interpretation. The next writer pass should look for official documentation, repository activity, and credible third-party commentary before promoting stronger competitive-analysis claims.",
             card_a_id = card_a.id,
             card_b_id = card_b.id
         );
@@ -56275,7 +56329,7 @@ mod tests {
             })
             .unwrap();
         let body = format!(
-            "## What happened\nThe ops fixture created a source-backed knowledge event and cluster. This paragraph is intentionally long enough to prove the report is explanatory prose rather than a metadata dump, and it cites the source-card identifier {source_id} directly.\n\n## Why it matters\nOperators need this state in the dashboard because background ingestion and writing can fail silently if durable rows are hidden. Seeing the cluster and report in ops makes stale cursors, blocked writers, and pending digest work observable instead of relying on a one-off terminal command.\n\n## Confidence and uncertainty\nConfidence is moderate because this is a deterministic local fixture, not live provider evidence. The remaining uncertainty is whether every future adapter writes through this shared substrate and updates source-health and worker ledgers consistently.",
+            "## What happened\nThe ops fixture created a source-backed knowledge event and cluster. This paragraph is intentionally long enough to prove the report is explanatory prose rather than a metadata dump, and it cites the source-card identifier {source_id} directly.\n\n## Why it matters\nOperators need this state in the dashboard because background ingestion and writing can fail silently if durable rows are hidden. Seeing the cluster and report in ops makes stale cursors, blocked writers, and pending digest work observable instead of relying on a one-off terminal command.\n\n## Next Investigation\n- Verify official adapter documentation and source-health rows before promoting operational claims.\n- Compare the cluster against existing wiki pages and prior adapter runs before creating duplicate incident or trend pages.\n\n## Confidence and uncertainty\nConfidence is moderate because this is a deterministic local fixture, not live provider evidence. The remaining uncertainty is whether every future adapter writes through this shared substrate and updates source-health and worker ledgers consistently.",
             source_id = card.id
         );
         store

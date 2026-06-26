@@ -18699,7 +18699,7 @@ impl Store {
             if candidate_id == replacement_candidate_id {
                 continue;
             }
-            if self.supersede_digest_candidate_if_undelivered(
+            if self.supersede_digest_candidate_preserving_delivery_ledger(
                 candidate_id,
                 replacement_candidate_id,
                 &format!(
@@ -18717,7 +18717,7 @@ impl Store {
         Ok(superseded)
     }
 
-    fn supersede_digest_candidate_if_undelivered(
+    fn supersede_digest_candidate_preserving_delivery_ledger(
         &self,
         candidate_id: &str,
         replacement_candidate_id: &str,
@@ -18739,12 +18739,6 @@ impl Store {
             WHERE id = ?3
               AND id <> ?4
               AND status IN ('ready', 'approved')
-              AND NOT EXISTS (
-                SELECT 1
-                FROM digest_deliveries delivery
-                WHERE delivery.candidate_id = ?3
-                  AND delivery.status IN ('pending', 'sent')
-              )
             "#,
             params![timestamp, note, candidate_id, replacement_candidate_id],
         )?;
@@ -61143,6 +61137,25 @@ mod tests {
             .unwrap();
         assert_eq!(approved_stale.status, "approved");
         assert_eq!(approved_stale.review_status, "approved");
+        let stale_delivery_id = Uuid::new_v4().to_string();
+        let stale_delivery_key = format!("stale-route-{stale_delivery_id}");
+        let stale_delivery_created_at = now();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO digest_deliveries
+                  (id, candidate_id, channel, subject, target, idempotency_key, status, created_at, updated_at)
+                VALUES (?1, ?2, 'email', 'email:old@example.com', 'email:old@example.com', ?3, 'pending', ?4, ?4)
+                "#,
+                params![
+                    stale_delivery_id,
+                    first_digest_id,
+                    stale_delivery_key,
+                    stale_delivery_created_at,
+                ],
+            )
+            .unwrap();
         let fresh = seed_knowledge_source_card(
             &store,
             "revision-shared-fresh",
@@ -61220,6 +61233,13 @@ mod tests {
             stale_digest.reviewed_by.as_deref(),
             Some("arcwell-digest-supersession")
         );
+        let stale_deliveries = store
+            .list_digest_deliveries(Some(&first_digest_id))
+            .unwrap();
+        assert_eq!(stale_deliveries.len(), 1);
+        assert_eq!(stale_deliveries[0].id, stale_delivery_id);
+        assert_eq!(stale_deliveries[0].status, "pending");
+        assert_eq!(stale_deliveries[0].idempotency_key, stale_delivery_key);
         let refreshed_digest = store
             .get_digest_candidate(&refreshed_digest_id)
             .unwrap()

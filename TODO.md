@@ -190,8 +190,13 @@ PR, implementation note, or final report:
       schedule writes source-card-backed model-origin candidate clusters without
       wiki/report/digest side effects, empty evidence skips without invoking a
       provider or retry storm, provider-policy denial writes no clusters, and
-      malformed enqueue input creates no poison job. This is Local Proof for
-      scheduled model proposal recurrence. Fresh proof
+      malformed enqueue input creates no poison job. Broad `source-cards`/`*`
+      model-cluster jobs now canonicalize to a review-only unclustered
+      source-card sweep and severe tests prove they skip already clustered
+      source cards plus generated-only evidence, record skip counts, and do not
+      reuse clustered evidence on replay. This is Local Proof for scheduled
+      model proposal recurrence and broad-sweep safety, not broad production
+      semantic quality. Fresh proof
       `.arcwell-dev/proofs/knowledge-model-cluster-scheduled-proof-20260626T090342Z-10737/artifacts/proof-packet.json`
       upgrades the scheduled worker path to copied-home live-provider proof:
       a 40-tick resident worker loop used live OpenAI `gpt-4.1-mini`, 24 copied

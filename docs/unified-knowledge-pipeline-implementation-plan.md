@@ -156,6 +156,12 @@ Current implemented bridge slice:
   invoked live OpenAI `gpt-4.1-mini`, wrote six review-only candidate clusters
   from 24 source cards, recorded source health/cost/policy evidence, created no
   report/wiki/digest/expansion side effects, and browser-checked `/ops/ui`.
+- Broad model-cluster scheduling can use `source-cards` or `*` as the query to
+  sweep the local source-card corpus instead of a narrow text search. The
+  worker canonicalizes that scope to `source-cards`, skips already-clustered
+  source cards and generated-only evidence before invoking a provider, records
+  skip counts in the job result, and remains review-only; local severe tests
+  prove replay does not reuse clustered source-card evidence.
 - Policy-gated promotion of model-origin cluster proposals through
   `arcwell knowledge promote-cluster`. Unpromoted model-origin candidates are
   refused by foreground expansion, direct expansion enqueue, and due expansion

@@ -9876,9 +9876,9 @@ fn render_knowledge_ops_control_panel(csrf_token: Option<&str>, controls_enabled
         r#"<form method="post" action="/ops/actions/knowledge/model-clusters/schedule">
 <input type="hidden" name="csrf_token" value="{}">
 <input type="hidden" name="idempotency_key" value="{}">
-<div><b>Schedule model clustering</b><p class="muted">Create or update a review-only model-cluster proposal watch source.</p></div>
+<div><b>Schedule model clustering</b><p class="muted">Create or update a review-only model-cluster proposal watch source; source-cards runs a broad unclustered corpus sweep.</p></div>
 <div class="fields">
-<label>Query<input name="query" maxlength="200" value="agent infrastructure MCP"></label>
+<label>Query<input name="query" maxlength="200" value="source-cards"></label>
 <label>Provider<select name="model_provider"><option value="mock">mock</option><option value="openai">openai</option></select></label>
 <label>Model<input name="model_name" maxlength="80" placeholder="gpt-4.1-mini"></label>
 <label>Endpoint<input name="endpoint" maxlength="300" placeholder="optional"></label>
@@ -9899,9 +9899,9 @@ fn render_knowledge_ops_control_panel(csrf_token: Option<&str>, controls_enabled
         r#"<form method="post" action="/ops/actions/knowledge/model-clusters/enqueue">
 <input type="hidden" name="csrf_token" value="{}">
 <input type="hidden" name="idempotency_key" value="{}">
-<div><b>Queue model clustering</b><p class="muted">Enqueue one review-only model-cluster proposal job.</p></div>
+<div><b>Queue model clustering</b><p class="muted">Enqueue one review-only model-cluster proposal job; source-cards uses fresh unclustered evidence.</p></div>
 <div class="fields">
-<label>Query<input name="query" maxlength="200" value="agent infrastructure MCP"></label>
+<label>Query<input name="query" maxlength="200" value="source-cards"></label>
 <label>Provider<select name="model_provider"><option value="mock">mock</option><option value="openai">openai</option></select></label>
 <label>Model<input name="model_name" maxlength="80" placeholder="gpt-4.1-mini"></label>
 <label>Endpoint<input name="endpoint" maxlength="300" placeholder="optional"></label>

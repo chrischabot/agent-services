@@ -14006,7 +14006,7 @@ impl Store {
         max_clusters: usize,
         lineage: Option<Value>,
     ) -> Result<WikiJob> {
-        validate_query(query)?;
+        let query = normalize_knowledge_model_cluster_query(query)?;
         let provider = model_provider.trim().to_ascii_lowercase();
         if !matches!(provider.as_str(), "mock" | "openai") {
             bail!("unsupported knowledge cluster proposal model provider: {provider}");
@@ -14073,7 +14073,7 @@ impl Store {
         cadence: &str,
         status: &str,
     ) -> Result<WatchSource> {
-        validate_query(query)?;
+        let query = normalize_knowledge_model_cluster_query(query)?;
         let provider = model_provider.trim().to_ascii_lowercase();
         if !matches!(provider.as_str(), "mock" | "openai") {
             bail!("unsupported knowledge cluster proposal model provider: {provider}");
@@ -14088,9 +14088,10 @@ impl Store {
         if let Some(endpoint) = endpoint {
             validated_endpoint(Some(endpoint), "https://api.openai.com/v1/responses")?;
         }
+        let broad_source_card_sweep = knowledge_model_cluster_query_is_broad(&query);
         self.upsert_watch_source(WatchSourceInput {
             source_kind: "knowledge_model_clusters".to_string(),
-            locator: query.to_string(),
+            locator: query.clone(),
             label: format!("Knowledge model clusters: {query}"),
             cadence: cadence.to_string(),
             status: status.to_string(),
@@ -14102,6 +14103,7 @@ impl Store {
                 "timeout_seconds": timeout_seconds,
                 "max_source_cards": max_source_cards.clamp(1, 80),
                 "max_clusters": max_clusters.clamp(1, 12),
+                "broad_source_card_sweep": broad_source_card_sweep,
                 "origin": "knowledge_model_cluster_schedule",
                 "boundary": "Scheduled model clustering writes review-only candidate clusters; wiki/report/digest expansion still requires promotion."
             }),
@@ -14961,7 +14963,8 @@ impl Store {
                         .get("query")
                         .and_then(Value::as_str)
                         .unwrap_or(source.locator.as_str());
-                    if self.knowledge_cluster_model_proposal_has_active_job(query)? {
+                    let query = normalize_knowledge_model_cluster_query(query)?;
+                    if self.knowledge_cluster_model_proposal_has_active_job(&query)? {
                         report.skipped += 1;
                         continue;
                     }
@@ -14987,7 +14990,7 @@ impl Store {
                         .and_then(Value::as_u64)
                         .unwrap_or(6) as usize;
                     self.enqueue_knowledge_cluster_model_proposal_job_with_lineage(
-                        query,
+                        &query,
                         model_provider,
                         model_name,
                         endpoint,
@@ -34050,7 +34053,7 @@ impl Store {
             .get("query")
             .and_then(Value::as_str)
             .context("knowledge_cluster_model_propose missing query")?;
-        validate_query(query)?;
+        let query = normalize_knowledge_model_cluster_query(query)?;
         let model_provider = input
             .get("model_provider")
             .and_then(Value::as_str)
@@ -34072,11 +34075,30 @@ impl Store {
             .get("max_clusters")
             .and_then(Value::as_u64)
             .unwrap_or(6) as usize;
-        let source_cards = self
-            .search_source_cards(query)?
-            .into_iter()
-            .take(max_source_cards.clamp(1, 80))
-            .collect::<Vec<_>>();
+        let broad_source_card_sweep = knowledge_model_cluster_query_is_broad(&query);
+        let clustered_source_card_ids = self.knowledge_clustered_source_card_ids()?;
+        let candidates = if broad_source_card_sweep {
+            self.list_source_cards()?
+        } else {
+            self.search_source_cards(&query)?
+        };
+        let mut skipped_clustered = 0usize;
+        let mut skipped_generated_only = 0usize;
+        let mut source_cards = Vec::new();
+        for card in candidates {
+            if clustered_source_card_ids.contains(&card.id) {
+                skipped_clustered += 1;
+                continue;
+            }
+            if source_card_is_generated_only_evidence(&card) {
+                skipped_generated_only += 1;
+                continue;
+            }
+            source_cards.push(card);
+            if source_cards.len() >= max_source_cards.clamp(1, 80) {
+                break;
+            }
+        }
         let source_card_ids = source_cards
             .iter()
             .map(|card| card.id.clone())
@@ -34086,7 +34108,7 @@ impl Store {
                 key: &format!("knowledge:model-clusters:{query}"),
                 provider: "arcwell",
                 source_kind: "knowledge_model_clusters",
-                locator: query,
+                locator: &query,
                 last_item_id: None,
                 last_item_date: None,
                 cursor_key: None,
@@ -34097,6 +34119,9 @@ impl Store {
                 "status": "skipped_no_source_cards",
                 "query": query,
                 "source_card_count": 0,
+                "broad_source_card_sweep": broad_source_card_sweep,
+                "skipped_clustered_source_cards": skipped_clustered,
+                "skipped_generated_only_source_cards": skipped_generated_only,
                 "cluster_ids": [],
                 "boundary": "No model provider was invoked because no source-card evidence matched the query."
             }));
@@ -34124,7 +34149,7 @@ impl Store {
             key: &format!("knowledge:model-clusters:{query}"),
             provider: "arcwell",
             source_kind: "knowledge_model_clusters",
-            locator: query,
+            locator: &query,
             last_item_id,
             last_item_date,
             cursor_key: None,
@@ -34141,6 +34166,9 @@ impl Store {
             "cost_decision_id": invocation.cost_decision_id,
             "source_card_count": source_card_ids.len(),
             "source_cards": source_card_ids,
+            "broad_source_card_sweep": broad_source_card_sweep,
+            "skipped_clustered_source_cards": skipped_clustered,
+            "skipped_generated_only_source_cards": skipped_generated_only,
             "clusters_created": cluster_ids.len(),
             "cluster_ids": cluster_ids,
             "boundary": "Scheduled model clustering writes review-only candidate clusters; promotion is required before wiki/report/digest expansion."
@@ -46602,6 +46630,22 @@ fn validate_query(query: &str) -> Result<()> {
         bail!("query is too long");
     }
     Ok(())
+}
+
+fn normalize_knowledge_model_cluster_query(query: &str) -> Result<String> {
+    validate_query(query)?;
+    if knowledge_model_cluster_query_is_broad(query) {
+        Ok("source-cards".to_string())
+    } else {
+        Ok(query.trim().to_string())
+    }
+}
+
+fn knowledge_model_cluster_query_is_broad(query: &str) -> bool {
+    matches!(
+        query.trim().to_ascii_lowercase().as_str(),
+        "*" | "source-cards" | "all-source-cards"
+    )
 }
 
 fn wiki_fts_query(query: &str) -> Option<String> {
@@ -63956,6 +64000,225 @@ priority = 20
         assert_eq!(
             store.list_knowledge_reports(10).unwrap().len(),
             report_count_before
+        );
+        assert_eq!(
+            store.list_digest_candidates().unwrap().len(),
+            digest_count_before
+        );
+    }
+
+    #[test]
+    fn severe_model_cluster_broad_sweep_uses_only_fresh_real_source_cards() {
+        // CLAIM: broad scheduled/queued model clustering can sweep the
+        // source-card corpus without reusing already-clustered evidence,
+        // accepting generated-only source cards, or writing wiki/digest output.
+        // ORACLE: a source-cards job canonicalizes broad scope, sends only
+        // fresh real source-card ids to the proposal model, records skip
+        // counts, and a replay over the same corpus does not reuse clustered
+        // evidence.
+        // SEVERITY: Severe because broad autonomous clustering would otherwise
+        // look like production trend detection while duplicating stale rows or
+        // promoting generated summaries as primary evidence.
+        let store = test_store("knowledge-model-cluster-broad-sweep");
+        let already_clustered = seed_knowledge_source_card(
+            &store,
+            "already-clustered-openai",
+            "OpenAI already clustered source card mentions agent infrastructure and MCP.",
+        );
+        let event = seed_knowledge_event(&store, "already-clustered-openai-event");
+        store
+            .add_knowledge_event_source(KnowledgeEventSourceInput {
+                event_id: event.id.clone(),
+                source_card_id: already_clustered.id.clone(),
+                role: "primary_evidence".to_string(),
+                confidence: 0.9,
+                claim_summary: "Already clustered OpenAI evidence.".to_string(),
+                metadata: json!({ "test": "broad-model-sweep" }),
+            })
+            .unwrap();
+        store.confirm_knowledge_event(&event.id).unwrap();
+        store
+            .create_knowledge_cluster(KnowledgeClusterInput {
+                topic: "Already clustered OpenAI agent infrastructure".to_string(),
+                status: "candidate".to_string(),
+                event_ids: vec![event.id.clone()],
+                source_card_ids: vec![already_clustered.id.clone()],
+                first_seen_at: None,
+                last_seen_at: None,
+                novelty_score: 0.3,
+                momentum_score: 0.2,
+                stale_score: 0.1,
+                reason: "Fixture cluster proves broad model sweeps skip clustered source cards."
+                    .to_string(),
+                duplicate_groups: json!({}),
+                metadata: json!({ "origin": "test_preexisting_cluster" }),
+            })
+            .unwrap();
+        let fresh_mcp = seed_knowledge_source_card(
+            &store,
+            "fresh-mcp-agent-sdk",
+            "Fresh broad model sweep source card says an MCP agent SDK shipped with workflow tooling.",
+        );
+        let fresh_model = seed_knowledge_source_card(
+            &store,
+            "fresh-open-model-release",
+            "Fresh broad model sweep source card says an open source model release included benchmark details.",
+        );
+        let generated_only = store
+            .add_source_card(SourceCardInput {
+                title: "Generated broad sweep digest shell".to_string(),
+                url: "https://example.com/generated-broad-sweep-digest-shell".to_string(),
+                source_type: "generated_report".to_string(),
+                provider: "arcwell".to_string(),
+                summary:
+                    "Generated-only agent workflow text must not become model clustering evidence."
+                        .to_string(),
+                claims: Vec::new(),
+                retrieved_at: None,
+                metadata: json!({ "generated_only": true }),
+            })
+            .unwrap();
+
+        store
+            .enqueue_knowledge_cluster_model_proposal_job("*", "mock", None, None, None, 10, 6)
+            .unwrap();
+        let wiki_count_before = store.list_wiki_pages().unwrap().len();
+        let report_count_before = store.list_knowledge_reports(20).unwrap().len();
+        let digest_count_before = store.list_digest_candidates().unwrap().len();
+        let first = store.run_worker_once(1).unwrap();
+        assert_eq!(first.processed, 1, "{first:#?}");
+        assert_eq!(first.jobs[0].kind, "knowledge_cluster_model_propose");
+        assert_eq!(first.jobs[0].status, "completed");
+        let result = first.jobs[0].result_json.as_ref().unwrap();
+        assert_eq!(
+            result.get("query").and_then(Value::as_str),
+            Some("source-cards")
+        );
+        assert_eq!(
+            result
+                .get("broad_source_card_sweep")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .get("skipped_clustered_source_cards")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            result
+                .get("skipped_generated_only_source_cards")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        let selected = result
+            .get("source_cards")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        assert!(selected.contains(fresh_mcp.id.as_str()), "{selected:?}");
+        assert!(selected.contains(fresh_model.id.as_str()), "{selected:?}");
+        assert!(
+            !selected.contains(already_clustered.id.as_str()),
+            "{selected:?}"
+        );
+        assert!(
+            !selected.contains(generated_only.id.as_str()),
+            "{selected:?}"
+        );
+        assert_eq!(
+            store.list_knowledge_reports(20).unwrap().len(),
+            report_count_before
+        );
+        assert_eq!(store.list_wiki_pages().unwrap().len(), wiki_count_before);
+        assert_eq!(
+            store.list_digest_candidates().unwrap().len(),
+            digest_count_before
+        );
+        let health = store
+            .get_source_health("knowledge:model-clusters:source-cards")
+            .unwrap()
+            .expect("source health");
+        assert_eq!(health.status, "healthy");
+        assert_eq!(health.locator, "source-cards");
+
+        store
+            .enqueue_knowledge_cluster_model_proposal_job(
+                "source-cards",
+                "mock",
+                None,
+                None,
+                Some(5),
+                10,
+                6,
+            )
+            .unwrap();
+        let mut replay_result = None;
+        for _ in 0..5 {
+            let replay = store.run_worker_once(1).unwrap();
+            if replay.processed == 0 {
+                break;
+            }
+            if let Some(job) = replay
+                .jobs
+                .iter()
+                .find(|job| job.kind == "knowledge_cluster_model_propose")
+            {
+                assert_eq!(job.status, "completed");
+                replay_result = job.result_json.clone();
+                break;
+            }
+        }
+        let replay_result = replay_result.expect("replay model-cluster job result");
+        assert_eq!(
+            replay_result
+                .get("broad_source_card_sweep")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let replay_selected = replay_result
+            .get("source_cards")
+            .and_then(Value::as_array)
+            .map(|cards| {
+                cards
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        assert!(
+            selected.is_disjoint(&replay_selected),
+            "replay reused already clustered source-card evidence: first={selected:?} replay={replay_selected:?}"
+        );
+        assert!(
+            !replay_selected.contains(already_clustered.id.as_str()),
+            "{replay_selected:?}"
+        );
+        assert!(
+            !replay_selected.contains(generated_only.id.as_str()),
+            "{replay_selected:?}"
+        );
+        assert!(
+            replay_result
+                .get("skipped_clustered_source_cards")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                >= selected.len() as u64 + 1,
+            "{replay_result:#?}"
+        );
+        assert_eq!(
+            replay_result
+                .get("skipped_generated_only_source_cards")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            store.list_cost_decisions(10).unwrap().len(),
+            0,
+            "mock broad replay should not create provider cost decisions"
         );
         assert_eq!(
             store.list_digest_candidates().unwrap().len(),

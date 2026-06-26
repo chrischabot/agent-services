@@ -84,11 +84,28 @@ reason = "allow explicit disposable X live-smoke provider calls"
 priority = 20
 
 [[rules]]
-id = "allow-x-live-smoke-token-refresh"
+id = "allow-x-live-smoke-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+provider = "x"
+reason = "allow disposable X live-smoke OAuth token refresh"
+priority = 20
+
+[[rules]]
+id = "allow-x-live-smoke-secret-write"
 effect = "allow"
 action = "secret.write"
 provider = "x"
-reason = "allow disposable X live-smoke OAuth token refresh"
+reason = "allow disposable X live-smoke bearer installation"
+priority = 20
+
+[[rules]]
+id = "allow-x-live-smoke-source-card-write"
+effect = "allow"
+action = "source.write"
+provider = "x-import"
+source = "source_card_add"
+reason = "allow disposable X live-smoke source-card projections"
 priority = 20
 POLICY
 

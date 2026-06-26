@@ -153,7 +153,7 @@ are not treated as live.
 
 The librarian package turns source cards into expanded topic pages and creates digest candidates for interesting launches, releases, papers, repos, and social/news signals.
 
-Current scoring is intentionally transparent and simple. Rich clustering and model-backed synthesis come later.
+Current scoring and backlog clustering are intentionally transparent and simple. `arcwell knowledge cluster-backlog` can split unclustered source cards into deterministic entity/theme clusters, and `arcwell knowledge schedule-backlog-clustering` can let the resident worker run that local clustering before the existing wiki/report/digest expansion path. Production-data semantic clustering and model-backed synthesis remain later proof gates.
 
 ### Radar
 

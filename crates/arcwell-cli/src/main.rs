@@ -1742,6 +1742,14 @@ enum KnowledgeSubcommand {
         #[arg(long, default_value_t = 12)]
         max_source_cards: usize,
     },
+    ClusterBacklog {
+        #[arg(long, default_value_t = 100)]
+        max_source_cards: usize,
+        #[arg(long, default_value_t = 2)]
+        min_group_size: usize,
+        #[arg(long, default_value_t = 12)]
+        max_clusters: usize,
+    },
     Events {
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1759,6 +1767,26 @@ enum KnowledgeSubcommand {
         cluster_id: String,
         #[arg(long)]
         skip_digest: bool,
+    },
+    EnqueueBacklogClustering {
+        #[arg(long, default_value_t = 100)]
+        max_source_cards: usize,
+        #[arg(long, default_value_t = 2)]
+        min_group_size: usize,
+        #[arg(long, default_value_t = 12)]
+        max_clusters: usize,
+    },
+    ScheduleBacklogClustering {
+        #[arg(long, default_value_t = 100)]
+        max_source_cards: usize,
+        #[arg(long, default_value_t = 2)]
+        min_group_size: usize,
+        #[arg(long, default_value_t = 12)]
+        max_clusters: usize,
+        #[arg(long, default_value = "warm")]
+        cadence: String,
+        #[arg(long, default_value = "active")]
+        status: String,
     },
     ProposeClusters {
         query: String,
@@ -3748,6 +3776,15 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
             topic.as_deref(),
             max_source_cards,
         )?),
+        KnowledgeSubcommand::ClusterBacklog {
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+        } => print_json(&store.cluster_source_card_backlog(
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+        )?),
         KnowledgeSubcommand::Events { limit } => print_json(&store.list_knowledge_events(limit)?),
         KnowledgeSubcommand::Clusters { limit } => {
             print_json(&store.list_knowledge_clusters(limit)?)
@@ -3760,6 +3797,28 @@ fn knowledge(store: Store, args: KnowledgeCommand) -> Result<()> {
             cluster_id,
             skip_digest,
         } => print_json(&store.enqueue_knowledge_cluster_expansion_job(&cluster_id, !skip_digest)?),
+        KnowledgeSubcommand::EnqueueBacklogClustering {
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+        } => print_json(&store.enqueue_knowledge_cluster_backlog_job(
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+        )?),
+        KnowledgeSubcommand::ScheduleBacklogClustering {
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+            cadence,
+            status,
+        } => print_json(&store.schedule_knowledge_cluster_backlog(
+            max_source_cards,
+            min_group_size,
+            max_clusters,
+            &cadence,
+            &status,
+        )?),
         KnowledgeSubcommand::ProposeClusters {
             query,
             provider,

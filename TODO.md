@@ -195,10 +195,20 @@ PR, implementation note, or final report:
       cover idempotent replay, manual and automatic worker execution, prompt
       injection as labeled evidence, blocked-cluster non-retry, active-job
       dedupe, and rejection of the empty metadata/link-dump shape.
-      Remaining work is investigation jobs, broad production-data clustering,
-      X credential-refresh live proof, wall-clock scheduled source recurrence,
-      external delivery recurrence, richer model-backed writer/editor
-      synthesis, and broader ops UI controls.
+      This slice adds deterministic broad source-card backlog clustering via
+      `arcwell knowledge cluster-backlog`,
+      `arcwell knowledge enqueue-backlog-clustering`,
+      `arcwell knowledge schedule-backlog-clustering`, a first-class
+      `knowledge_backlog` watch source, and the resident
+      `knowledge_cluster_backlog` worker job. Severe tests prove multi-cluster
+      entity/theme splitting, generated-only evidence skipping, replay
+      suppression for already clustered source cards, source-health advancement
+      only after durable clustering, and the two-pass worker path from
+      scheduled backlog clustering to automatic wiki/report/digest expansion.
+      Remaining work is investigation jobs, broad production-data
+      semantic/model clustering, X credential-refresh live proof, wall-clock
+      scheduled source recurrence, external delivery recurrence, richer
+      model-backed writer/editor synthesis, and broader ops UI controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.

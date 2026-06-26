@@ -108,6 +108,12 @@ enum ServiceSubcommand {
         no_load: bool,
     },
     Status,
+    RecurrenceAudit {
+        #[arg(long, default_value_t = 48)]
+        min_span_hours: i64,
+        #[arg(long, default_value_t = 15 * 60)]
+        max_gap_seconds: i64,
+    },
     Restart,
     Logs,
     Uninstall {
@@ -1424,6 +1430,7 @@ fn service(store: Store, args: ServiceCommand) -> Result<()> {
         ServiceSubcommand::Status => {
             let plist_path = service_plist_path()?;
             let heartbeat = store.latest_worker_heartbeat()?;
+            let heartbeat_events = store.list_worker_heartbeat_events(50)?;
             let launchctl = run_launchctl(&[
                 "print",
                 &format!("gui/{}/{}", current_uid()?, SERVICE_LABEL),
@@ -1433,8 +1440,23 @@ fn service(store: Store, args: ServiceCommand) -> Result<()> {
                 "installed": plist_path.exists(),
                 "plist": plist_path,
                 "heartbeat": heartbeat,
+                "heartbeat_events": heartbeat_events,
                 "launchctl": launchctl
             }))
+        }
+        ServiceSubcommand::RecurrenceAudit {
+            min_span_hours,
+            max_gap_seconds,
+        } => {
+            let min_span_seconds = min_span_hours
+                .checked_mul(60 * 60)
+                .context("min-span-hours is too large")?;
+            let audit = store.audit_worker_recurrence(min_span_seconds, max_gap_seconds)?;
+            print_json(&audit)?;
+            if !audit.ok {
+                bail!("worker recurrence audit failed");
+            }
+            Ok(())
         }
         ServiceSubcommand::Restart => {
             let restart = run_launchctl(&[
@@ -9313,6 +9335,14 @@ code,pre{white-space:pre-wrap;word-break:break-word}
     } else {
         html.push_str("<p class=\"bad\">No worker heartbeat recorded.</p>");
     }
+    if !snapshot.health.latest_worker_heartbeat_events.is_empty() {
+        html.push_str("<h3>Recent heartbeat events</h3><pre>");
+        html.push_str(&html_escape(
+            &serde_json::to_string_pretty(&snapshot.health.latest_worker_heartbeat_events)
+                .unwrap_or_default(),
+        ));
+        html.push_str("</pre>");
+    }
     html.push_str("</section>");
     html.push_str(&ops_table(
         "Health And Backups",
@@ -11517,7 +11547,7 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let value = call_mcp_tool(paths, name, arguments)?;
+            let value = mcp_tool_response_value(name, call_mcp_tool(paths, name, arguments)?);
             Ok(json!({
                 "content": [
                     {
@@ -11525,7 +11555,7 @@ fn dispatch_mcp(paths: &AppPaths, method: &str, params: Value) -> Result<Value> 
                         "text": serde_json::to_string_pretty(&value)?
                     }
                 ],
-                "structuredContent": value
+                "structuredContent": mcp_structured_content(value)
             }))
         }
         "resources/list" => Ok(json!({
@@ -13960,6 +13990,43 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
         }
         _ => bail!("unknown tool: {name}"),
     }
+}
+
+fn mcp_structured_content(value: Value) -> Value {
+    match value {
+        Value::Object(_) => value,
+        other => json!({ "result": other }),
+    }
+}
+
+fn mcp_tool_response_value(name: &str, value: Value) -> Value {
+    if name == "ops_snapshot" {
+        mcp_compact_ops_snapshot(value)
+    } else {
+        value
+    }
+}
+
+fn mcp_compact_ops_snapshot(value: Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value;
+    };
+    let counts = object
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .as_array()
+                .map(|items| (key.clone(), json!(items.len())))
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    json!({
+        "summary": "Compact MCP ops snapshot. Use `arcwell ops` for the full local JSON payload.",
+        "health": object.get("health").cloned().unwrap_or_else(|| json!({})),
+        "secret_health": object.get("secret_health").cloned().unwrap_or_else(|| json!({})),
+        "x_stats": object.get("x_stats").cloned().unwrap_or_else(|| json!({})),
+        "counts": counts
+    })
 }
 
 fn mcp_tools() -> Vec<Value> {
@@ -17596,6 +17663,75 @@ mod tests {
 
         let result = call_mcp_tool(&paths, "profile_list", json!({})).unwrap();
         assert_eq!(result.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn severe_mcp_tool_call_structured_content_is_object_for_list_results() {
+        let paths = test_paths("mcp-structured-content-list");
+        call_mcp_tool(
+            &paths,
+            "profile_set",
+            json!({
+                "key": "proof.profile",
+                "value": "list-shaped results must be wrapped for Claude Code"
+            }),
+        )
+        .unwrap();
+
+        let result = dispatch_mcp(
+            &paths,
+            "tools/call",
+            json!({
+                "name": "profile_list",
+                "arguments": {}
+            }),
+        )
+        .unwrap();
+
+        assert!(result["structuredContent"].is_object());
+        assert!(result["structuredContent"]["result"].is_array());
+        assert_eq!(
+            result["structuredContent"]["result"][0]["key"].as_str(),
+            Some("proof.profile")
+        );
+    }
+
+    #[test]
+    fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
+        let paths = test_paths("mcp-compact-ops");
+        call_mcp_tool(
+            &paths,
+            "source_card_add",
+            json!({
+                "title": "Compact ops fixture",
+                "url": "https://example.com/compact-ops",
+                "provider": "test",
+                "source_kind": "fixture",
+                "summary": "Compact ops fixture",
+                "raw_text": "This card makes ops contain a list-shaped source_cards entry."
+            }),
+        )
+        .unwrap();
+
+        let result = dispatch_mcp(
+            &paths,
+            "tools/call",
+            json!({
+                "name": "ops_snapshot",
+                "arguments": {}
+            }),
+        )
+        .unwrap();
+
+        let structured = &result["structuredContent"];
+        assert!(structured.is_object());
+        assert_eq!(
+            structured["summary"].as_str(),
+            Some("Compact MCP ops snapshot. Use `arcwell ops` for the full local JSON payload.")
+        );
+        assert!(structured["health"].is_object());
+        assert!(structured["counts"]["source_cards"].as_u64().unwrap_or(0) >= 1);
+        assert!(structured.get("source_cards").is_none());
     }
 
     #[test]

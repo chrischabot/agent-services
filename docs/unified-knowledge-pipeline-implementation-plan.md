@@ -9,6 +9,9 @@ implemented and tested; bounded scheduled recurrence exists for selected
 knowledge paths, while multi-day service recurrence, live external delivery,
 broad production-data semantic clustering, and broad provider coverage remain
 open.
+The retained service-recurrence audit substrate now exists, but it is not a
+multi-day proof until wall-clock heartbeat history actually spans the required
+window.
 
 Skill gate: `arc:anti-mirage`.
 
@@ -1501,6 +1504,13 @@ Add preserved proof scripts:
       policy-gated auto-approval while the same worker was alive -> scheduled
       controlled-provider delivery -> heartbeat and ops visibility. It is not
       multi-day service operation or live external inbox recurrence.
+- [x] `scripts/service-recurrence-proof --allow-incomplete`
+      now records the retained heartbeat-event audit packet for the real local
+      macOS LaunchAgent:
+      `.arcwell-dev/proofs/service-recurrence-proof-20260626T163731Z-57820/artifacts/proof-packet.json`.
+      The packet is intentionally incomplete: launchd is loaded and events are
+      accumulating, but the contiguous retained span is only 546 seconds against
+      the 48-hour gate. Global strict-doctor health is recorded separately.
 - [ ] `scripts/knowledge-ops-browser-smoke`
 
 Cross-source proof must show:
@@ -1691,6 +1701,7 @@ Provider and scheduling:
 - [ ] dead-letter after max attempts
 - [ ] quiet-hours deferral and resume
 - [x] bounded copied-home wall-clock recurrence proof
+- [x] retained service heartbeat audit substrate
 - [ ] live external or multi-day service recurrence proof
 
 Report quality:

@@ -83,6 +83,7 @@ Commands now provided by the CLI for the macOS worker service:
 ```sh
 arcwell service install
 arcwell service status
+arcwell service recurrence-audit --min-span-hours 48 --max-gap-seconds 900
 arcwell service restart
 arcwell service logs
 arcwell service uninstall
@@ -90,11 +91,28 @@ arcwell doctor --strict
 ```
 
 Current macOS state: this writes and loads a user LaunchAgent plist for the
-local worker, records worker heartbeat in SQLite, exposes strict doctor checks
+local worker, records current and retained worker heartbeat events in SQLite,
+exposes strict doctor checks
 for backup verification, stale backups, dead letters, stale/missing heartbeat,
 required local directories, schema drift, missing/non-file LaunchAgent plist,
 corrupt service plist metadata, and missing worker binary, and supports
 `launchctl kickstart -k` through `arcwell service restart`.
+
+`arcwell service recurrence-audit` is the anti-mirage gate for long-running
+service claims. It reads retained heartbeat events, finds the best contiguous
+window under the configured maximum gap, and refuses to pass from a single
+current heartbeat, a forged old `started_at`, or a migration backfill. The
+repeatable packet command is:
+
+```sh
+scripts/service-recurrence-proof --min-span-hours 48 --max-gap-seconds 900
+```
+
+Use `--allow-incomplete` to capture current evidence while a new service is
+still accumulating wall-clock history, and `--require-strict-doctor` when the
+gate must also fail on unrelated global health debt. Current live macOS evidence
+is incomplete because the LaunchAgent has only minutes of retained events; Linux
+systemd recurrence remains unproven.
 
 `scripts/service-live-smoke` is the repeatable severe smoke for this surface. It
 uses disposable `HOME` and `ARCWELL_HOME` paths containing spaces and hostile
@@ -530,12 +548,16 @@ Minimum service reliability:
 Implemented reliability checks:
 
 - `arcwell service status` inspects macOS launchd and recent heartbeat state.
+- `arcwell service recurrence-audit` inspects retained heartbeat events and
+  refuses multi-day recurrence claims until retained wall-clock evidence covers
+  the requested span.
 - `arcwell service logs` reports explicit per-stream read status.
 - `arcwell doctor --strict` fails nonzero on missing service plist, corrupt
   service metadata, missing binary, stale worker heartbeat, excessive dead
   letters, stale or unverifiable backups, schema drift, and missing required
   directories.
-- The worker writes a heartbeat row in SQLite.
+- The worker writes a current heartbeat row and retained heartbeat-event rows in
+  SQLite.
 
 Future reliability upgrades:
 

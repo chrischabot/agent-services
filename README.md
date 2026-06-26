@@ -33,7 +33,9 @@ The detailed package/functionality guide is in [docs/functionality-and-packages.
 The brutally honest implementation matrix is in [STATUS.md](STATUS.md), and the
 execution checklist is in [TODO.md](TODO.md).
 
-Packaging, service supervision, auto-restart, and Codex plugin install strategy are documented in [docs/packaging-and-operations.md](docs/packaging-and-operations.md).
+Packaging, service supervision, auto-restart, retained heartbeat recurrence
+audits, and Codex plugin install strategy are documented in
+[docs/packaging-and-operations.md](docs/packaging-and-operations.md).
 
 The Codex plugin slash-command and `$skill` catalog is documented in [docs/codex-plugin-commands.md](docs/codex-plugin-commands.md).
 

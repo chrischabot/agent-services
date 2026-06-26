@@ -110,6 +110,23 @@ PR, implementation note, or final report:
 - [ ] Publish signed or checksummed GitHub release artifacts.
 - [ ] Render and test a Homebrew formula/tap from real release artifact
       checksums.
+- [x] Add retained heartbeat-event recurrence auditing for the resident worker
+      service. Schema v17 adds `worker_heartbeat_events`; `arcwell service
+      status`, `health`, `doctor`, `/ops/ui`, and
+      `arcwell service recurrence-audit` now expose retained heartbeat events
+      and a contiguous-span gate. Severe tests prove forged old
+      `worker_heartbeats.started_at` values and single migration backfills
+      cannot satisfy recurrence. Latest live packet
+      `.arcwell-dev/proofs/service-recurrence-proof-20260626T163731Z-57820/artifacts/proof-packet.json`
+      shows the real macOS LaunchAgent loaded and writing heartbeat events, but
+      remains `incomplete` because the best retained span is 546 seconds against
+      the 48-hour gate. Global strict doctor health is recorded separately and
+      is currently unhealthy because of X/source-health/export debt.
+- [ ] Let the real macOS LaunchAgent accumulate at least 48 hours of retained
+      heartbeat events, then rerun
+      `scripts/service-recurrence-proof --min-span-hours 48 --max-gap-seconds 900`
+      without `--allow-incomplete`. Rerun with `--require-strict-doctor` only
+      after unrelated global doctor failures are cleared.
 - [ ] Run Linux `systemctl --user` live proof for install, status, restart,
       journal/logs, strict doctor, and uninstall.
 - [ ] Add release gating so archive traversal, checksum mismatch, interrupted

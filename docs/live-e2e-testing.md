@@ -250,6 +250,49 @@ unit shape is documented in `docs/packaging-and-operations.md`, but no Linux
 implementation is claimed until a Linux host can run and verify
 `systemctl --user` install/status/restart/recovery/logs/uninstall.
 
+## Service Recurrence Proof
+
+Status: retained-heartbeat audit substrate is implemented and live macOS
+LaunchAgent evidence is accumulating. Multi-day recurrence is not yet proven.
+
+Commands:
+
+```sh
+arcwell service status
+arcwell service recurrence-audit --min-span-hours 48 --max-gap-seconds 900
+scripts/service-recurrence-proof --allow-incomplete
+scripts/service-recurrence-proof --min-span-hours 48 --max-gap-seconds 900
+scripts/service-recurrence-proof --min-span-hours 48 --max-gap-seconds 900 --require-strict-doctor
+```
+
+Recorded result:
+
+- Schema v17 adds retained `worker_heartbeat_events`; each worker heartbeat
+  appends an event rather than overwriting only the latest row.
+- `arcwell service status`, `health`, `doctor`, `/ops/ui`, and
+  `arcwell service recurrence-audit` expose recent retained heartbeat events.
+- The recurrence audit requires a contiguous retained heartbeat-event span and
+  permits worker-id changes from service restarts. A single migrated/backfilled
+  latest heartbeat row cannot prove recurrence.
+- Latest packet:
+  `.arcwell-dev/proofs/service-recurrence-proof-20260626T163731Z-57820/artifacts/proof-packet.json`.
+  It shows `launchd_loaded`, recent heartbeat events from the real
+  `com.arcwell.worker` LaunchAgent, `status: incomplete`, and a best contiguous
+  span of 546 seconds against the 172,800-second 48-hour gate.
+- The packet records global strict-doctor health separately. Use
+  `--require-strict-doctor` when a release or operational gate must also fail
+  on unrelated global health debt such as X source-health/export failures.
+
+Proof boundary:
+
+- `--allow-incomplete` records current evidence only.
+- A strict pass requires retained wall-clock heartbeat history covering the
+  requested span plus an active launchd/systemd user service manager.
+- This proof never compresses time, trusts `worker_heartbeats.started_at` alone,
+  or treats a migration backfill as multi-day recurrence.
+- Linux systemd recurrence remains unproven until the same audit runs on a
+  Linux user-service host.
+
 ## Release/Install Readiness Smoke
 
 Status: passed on 2026-06-20 with a disposable package prefix, `HOME`, and

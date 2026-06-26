@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+PROOF_ROOT="${ARCWELL_SERVICE_RECURRENCE_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/service-recurrence-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+MIN_SPAN_HOURS=48
+MAX_GAP_SECONDS=900
+ALLOW_INCOMPLETE=0
+REQUIRE_STRICT_DOCTOR=0
+ARC_HOME_ARG=()
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/service-recurrence-proof [options]
+
+Audits retained worker heartbeat events plus OS service-manager state to prove
+or honestly fail long-running Arcwell worker recurrence.
+
+Options:
+  --home path             ARCWELL_HOME to audit.
+  --min-span-hours n      Required retained heartbeat span. Default: 48.
+  --max-gap-seconds n     Maximum allowed gap between retained events. Default: 900.
+  --require-strict-doctor Also fail the service proof when global strict doctor fails.
+  --allow-incomplete      Write an incomplete proof packet and exit 0 instead of failing.
+  --proof-root path       Override proof output directory.
+  -h, --help              Show this help.
+
+This script does not compress time or synthesize multi-day proof. If the
+database does not yet retain enough real heartbeat events, the proof status is
+incomplete until the service has actually run long enough.
+USAGE
+}
+
+log() {
+  printf '[service-recurrence-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[service-recurrence-proof] FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --home)
+      [[ $# -ge 2 ]] || fail "--home requires a path"
+      ARC_HOME_ARG=(--home "$2")
+      shift
+      ;;
+    --min-span-hours)
+      [[ $# -ge 2 ]] || fail "--min-span-hours requires a value"
+      MIN_SPAN_HOURS="$2"
+      shift
+      ;;
+    --max-gap-seconds)
+      [[ $# -ge 2 ]] || fail "--max-gap-seconds requires a value"
+      MAX_GAP_SECONDS="$2"
+      shift
+      ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      ;;
+    --require-strict-doctor)
+      REQUIRE_STRICT_DOCTOR=1
+      ;;
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+command -v node >/dev/null 2>&1 || fail "node is required"
+
+log "building target/debug/arcwell"
+(cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+
+mkdir -p "$ARTIFACT_DIR"
+
+STATUS_FILE="$ARTIFACT_DIR/service-status.json"
+DOCTOR_FILE="$ARTIFACT_DIR/doctor.json"
+AUDIT_FILE="$ARTIFACT_DIR/recurrence-audit.json"
+SERVICE_MANAGER_FILE="$ARTIFACT_DIR/service-manager.txt"
+PACKET_FILE="$ARTIFACT_DIR/proof-packet.json"
+
+log "capturing service status"
+if "$BIN" "${ARC_HOME_ARG[@]}" service status >"$STATUS_FILE" 2>"$ARTIFACT_DIR/service-status.err"; then
+  STATUS_EXIT=0
+else
+  STATUS_EXIT=$?
+fi
+
+log "capturing strict doctor state"
+if "$BIN" "${ARC_HOME_ARG[@]}" doctor --strict --max-worker-heartbeat-age-seconds "$MAX_GAP_SECONDS" >"$DOCTOR_FILE" 2>"$ARTIFACT_DIR/doctor.err"; then
+  DOCTOR_EXIT=0
+else
+  DOCTOR_EXIT=$?
+fi
+
+log "running retained heartbeat recurrence audit"
+if "$BIN" "${ARC_HOME_ARG[@]}" service recurrence-audit \
+  --min-span-hours "$MIN_SPAN_HOURS" \
+  --max-gap-seconds "$MAX_GAP_SECONDS" >"$AUDIT_FILE" 2>"$ARTIFACT_DIR/recurrence-audit.err"; then
+  AUDIT_EXIT=0
+else
+  AUDIT_EXIT=$?
+fi
+
+SYSTEM="$(uname -s)"
+SERVICE_MANAGER_STATUS="unknown"
+{
+  printf 'system=%s\n' "$SYSTEM"
+  if [[ "$SYSTEM" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    if launchctl print "gui/$(id -u)/com.arcwell.worker"; then
+      SERVICE_MANAGER_STATUS="launchd_loaded"
+    else
+      SERVICE_MANAGER_STATUS="launchd_not_loaded"
+    fi
+  elif command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user status arcwell-worker.service --no-pager; then
+      SERVICE_MANAGER_STATUS="systemd_active_or_status_ok"
+    else
+      SERVICE_MANAGER_STATUS="systemd_not_active_or_unavailable"
+    fi
+  else
+    SERVICE_MANAGER_STATUS="no_supported_service_manager"
+    printf 'no launchd/systemd user service manager command found\n'
+  fi
+} >"$SERVICE_MANAGER_FILE" 2>&1 || true
+
+node - "$STATUS_FILE" "$DOCTOR_FILE" "$AUDIT_FILE" "$SERVICE_MANAGER_FILE" "$PACKET_FILE" \
+  "$STATUS_EXIT" "$DOCTOR_EXIT" "$AUDIT_EXIT" "$MIN_SPAN_HOURS" "$MAX_GAP_SECONDS" \
+  "$SERVICE_MANAGER_STATUS" "$REQUIRE_STRICT_DOCTOR" <<'NODE'
+const fs = require("fs");
+const [
+  statusFile,
+  doctorFile,
+  auditFile,
+  managerFile,
+  packetFile,
+  statusExitRaw,
+  doctorExitRaw,
+  auditExitRaw,
+  minSpanHoursRaw,
+  maxGapSecondsRaw,
+  serviceManagerStatus,
+  requireStrictDoctorRaw,
+] = process.argv.slice(2);
+
+function readJson(path) {
+  try {
+    return JSON.parse(fs.readFileSync(path, "utf8"));
+  } catch (error) {
+    return { parse_error: String(error), raw: fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "" };
+  }
+}
+
+const status = readJson(statusFile);
+const doctor = readJson(doctorFile);
+const audit = readJson(auditFile);
+const managerText = fs.existsSync(managerFile) ? fs.readFileSync(managerFile, "utf8") : "";
+const requireStrictDoctor = requireStrictDoctorRaw === "1";
+const serviceFailures = [];
+const globalDoctorFailures = [];
+if (Number(statusExitRaw) !== 0) serviceFailures.push(`service status exited ${statusExitRaw}`);
+if (Number(doctorExitRaw) !== 0) globalDoctorFailures.push(`doctor strict exited ${doctorExitRaw}`);
+if (!doctor.ok) globalDoctorFailures.push("doctor strict did not pass");
+if (Number(auditExitRaw) !== 0) serviceFailures.push(`recurrence audit exited ${auditExitRaw}`);
+if (!audit.ok) serviceFailures.push(...(audit.failures || ["recurrence audit did not pass"]));
+if (!/loaded|active|status_ok/.test(serviceManagerStatus)) {
+  serviceFailures.push(`service manager is not proving an active worker: ${serviceManagerStatus}`);
+}
+if (requireStrictDoctor) {
+  serviceFailures.push(...globalDoctorFailures);
+}
+const packet = {
+  proof_name: "service-recurrence-proof",
+  generated_at: new Date().toISOString(),
+  status: serviceFailures.length === 0 ? "passed" : "incomplete",
+  global_doctor_status: globalDoctorFailures.length === 0 ? "passed" : "unhealthy",
+  require_strict_doctor: requireStrictDoctor,
+  min_span_hours: Number(minSpanHoursRaw),
+  max_gap_seconds: Number(maxGapSecondsRaw),
+  service_manager_status: serviceManagerStatus,
+  service_status: status,
+  doctor,
+  recurrence_audit: audit,
+  failures: serviceFailures,
+  global_doctor_failures: globalDoctorFailures,
+  artifacts: {
+    service_status: statusFile,
+    doctor: doctorFile,
+    recurrence_audit: auditFile,
+    service_manager: managerFile,
+  },
+  anti_mirage_boundary:
+    "This packet proves multi-day recurrence only when retained heartbeat events cover the requested wall-clock span and the OS service manager is active; it does not synthesize or compress time. Global strict-doctor health is recorded separately unless --require-strict-doctor is set.",
+  service_manager_excerpt: managerText.slice(0, 4000),
+};
+fs.writeFileSync(packetFile, JSON.stringify(packet, null, 2) + "\n");
+console.log(JSON.stringify(packet, null, 2));
+NODE
+
+PACKET_STATUS="$(node -e "const p=require(process.argv[1]); console.log(p.status)" "$PACKET_FILE")"
+log "wrote $PACKET_FILE"
+if [[ "$PACKET_STATUS" != "passed" && "$ALLOW_INCOMPLETE" != "1" ]]; then
+  fail "service recurrence proof is $PACKET_STATUS; rerun with --allow-incomplete to record current evidence without passing"
+fi

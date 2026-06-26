@@ -26,13 +26,14 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 pub const APP_NAME: &str = "arcwell";
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 pub const SOURCE_CARD_SCHEMA_VERSION: u64 = 1;
 const MAX_COST_USD: f64 = 1_000_000.0;
 const SOURCE_CARD_STALE_DAYS: i64 = 180;
 const PROJECT_SYNC_DEFAULT_STALE_AFTER_SECONDS: i64 = 6 * 60 * 60;
 const PROJECT_SYNC_MAX_STALE_AFTER_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SECRET_EXPIRY_WARNING_WINDOW_SECONDS: i64 = 72 * 60 * 60;
+const WORKER_HEARTBEAT_EVENT_RETENTION_DAYS: i64 = 14;
 const X_MONITOR_MAX_SOURCES: usize = 1_000;
 const X_ARCHIVE_MAX_FILE_BYTES: u64 = 25_000_000;
 const X_ARCHIVE_MAX_TOTAL_BYTES: u64 = 100_000_000;
@@ -111,6 +112,7 @@ pub struct HealthReport {
     pub dead_lettered_jobs: i64,
     pub latest_backup: Option<String>,
     pub latest_worker_heartbeat: Option<WorkerHeartbeat>,
+    pub latest_worker_heartbeat_events: Vec<WorkerHeartbeatEvent>,
     pub secret_health: Vec<SecretHealth>,
     pub warnings: Vec<String>,
 }
@@ -1593,6 +1595,32 @@ pub struct WorkerHeartbeat {
     pub last_seen_at: String,
     pub processed_jobs: i64,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHeartbeatEvent {
+    pub id: String,
+    pub worker_id: String,
+    pub seen_at: String,
+    pub processed_jobs: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRecurrenceAudit {
+    pub ok: bool,
+    pub worker_id: Option<String>,
+    pub worker_ids: Vec<String>,
+    pub event_count: usize,
+    pub retained_event_count: usize,
+    pub first_seen_at: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub observed_span_seconds: i64,
+    pub max_gap_seconds: Option<i64>,
+    pub min_required_span_seconds: i64,
+    pub max_allowed_gap_seconds: i64,
+    pub failures: Vec<String>,
+    pub sample_events: Vec<WorkerHeartbeatEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4195,6 +4223,18 @@ impl Store {
               last_error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS worker_heartbeat_events (
+              id TEXT PRIMARY KEY,
+              worker_id TEXT NOT NULL,
+              seen_at TEXT NOT NULL,
+              processed_jobs INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_worker_heartbeat_events_worker_seen
+            ON worker_heartbeat_events(worker_id, seen_at);
+
             CREATE TABLE IF NOT EXISTS wiki_pages (
               id TEXT PRIMARY KEY,
               title TEXT NOT NULL,
@@ -5461,6 +5501,9 @@ impl Store {
             None,
             |conn| ensure_knowledge_schema_on(conn),
         )?;
+        self.apply_schema_migration(17, "worker_heartbeat_events", false, None, |conn| {
+            ensure_worker_heartbeat_events_schema_on(conn)
+        })?;
         repair_radar_source_quality_run_scope_on(&self.conn)?;
         self.conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
@@ -6597,6 +6640,7 @@ impl Store {
             )
             .optional()?;
         let latest_worker_heartbeat = self.latest_worker_heartbeat()?;
+        let latest_worker_heartbeat_events = self.list_worker_heartbeat_events(20)?;
         let secret_health = self.secret_health()?;
         let mut warnings = Vec::new();
         if latest_backup.is_none() {
@@ -6648,6 +6692,7 @@ impl Store {
             dead_lettered_jobs,
             latest_backup,
             latest_worker_heartbeat,
+            latest_worker_heartbeat_events,
             secret_health,
             warnings,
         })
@@ -6782,8 +6827,51 @@ impl Store {
             "#,
             params![worker_id, now, processed_jobs, last_error],
         )?;
+        self.record_worker_heartbeat_event(worker_id, &now, processed_jobs, last_error)?;
+        self.prune_worker_heartbeat_events()?;
         self.latest_worker_heartbeat()?
             .with_context(|| format!("worker heartbeat not found after update: {worker_id}"))
+    }
+
+    fn record_worker_heartbeat_event(
+        &self,
+        worker_id: &str,
+        seen_at: &str,
+        processed_jobs: i64,
+        last_error: Option<&str>,
+    ) -> Result<WorkerHeartbeatEvent> {
+        validate_key(worker_id)?;
+        let id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            r#"
+            INSERT INTO worker_heartbeat_events
+              (id, worker_id, seen_at, processed_jobs, last_error, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?3)
+            "#,
+            params![id, worker_id, seen_at, processed_jobs, last_error],
+        )?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, worker_id, seen_at, processed_jobs, last_error
+                FROM worker_heartbeat_events
+                WHERE id = ?1
+                "#,
+                params![id],
+                worker_heartbeat_event_from_row,
+            )
+            .map_err(Into::into)
+    }
+
+    fn prune_worker_heartbeat_events(&self) -> Result<usize> {
+        let cutoff =
+            (Utc::now() - ChronoDuration::days(WORKER_HEARTBEAT_EVENT_RETENTION_DAYS)).to_rfc3339();
+        self.conn
+            .execute(
+                "DELETE FROM worker_heartbeat_events WHERE seen_at < ?1",
+                params![cutoff],
+            )
+            .map_err(Into::into)
     }
 
     pub fn latest_worker_heartbeat(&self) -> Result<Option<WorkerHeartbeat>> {
@@ -6800,6 +6888,116 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn list_worker_heartbeat_events(&self, limit: usize) -> Result<Vec<WorkerHeartbeatEvent>> {
+        let limit = limit.clamp(1, 10_000);
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, worker_id, seen_at, processed_jobs, last_error
+            FROM worker_heartbeat_events
+            ORDER BY seen_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        rows(stmt.query_map(params![limit as i64], worker_heartbeat_event_from_row)?)
+    }
+
+    pub fn audit_worker_recurrence(
+        &self,
+        min_required_span_seconds: i64,
+        max_allowed_gap_seconds: i64,
+    ) -> Result<WorkerRecurrenceAudit> {
+        if min_required_span_seconds <= 0 {
+            bail!("min_required_span_seconds must be greater than zero");
+        }
+        if max_allowed_gap_seconds <= 0 {
+            bail!("max_allowed_gap_seconds must be greater than zero");
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, worker_id, seen_at, processed_jobs, last_error
+            FROM worker_heartbeat_events
+            ORDER BY seen_at ASC, id ASC
+            "#,
+        )?;
+        let events = rows(stmt.query_map([], worker_heartbeat_event_from_row)?)?;
+        let mut failures = Vec::new();
+        if events.len() < 2 {
+            failures.push(
+                "worker recurrence requires at least two retained heartbeat events".to_string(),
+            );
+        }
+        let worker_ids = events
+            .iter()
+            .map(|event| event.worker_id.clone())
+            .collect::<BTreeSet<_>>();
+        let worker_ids = worker_ids.into_iter().collect::<Vec<_>>();
+        let mut best_segment: Vec<WorkerHeartbeatEvent> = Vec::new();
+        let mut current_segment: Vec<WorkerHeartbeatEvent> = Vec::new();
+        let mut current_max_gap = None::<i64>;
+        let mut best_max_gap = None::<i64>;
+        for event in &events {
+            if let Some(previous) = current_segment.last() {
+                let previous_at = DateTime::parse_from_rfc3339(&previous.seen_at)
+                    .with_context(|| format!("parsing heartbeat event {}", previous.seen_at))?
+                    .with_timezone(&Utc);
+                let event_at = DateTime::parse_from_rfc3339(&event.seen_at)
+                    .with_context(|| format!("parsing heartbeat event {}", event.seen_at))?
+                    .with_timezone(&Utc);
+                let gap = (event_at - previous_at).num_seconds().max(0);
+                if gap > max_allowed_gap_seconds {
+                    if worker_heartbeat_segment_span_seconds(&current_segment)?
+                        > worker_heartbeat_segment_span_seconds(&best_segment)?
+                    {
+                        best_max_gap = current_max_gap;
+                        best_segment = current_segment;
+                    }
+                    current_segment = vec![event.clone()];
+                    current_max_gap = None;
+                    continue;
+                }
+                current_max_gap = Some(current_max_gap.map_or(gap, |current| current.max(gap)));
+            }
+            current_segment.push(event.clone());
+        }
+        if worker_heartbeat_segment_span_seconds(&current_segment)?
+            > worker_heartbeat_segment_span_seconds(&best_segment)?
+        {
+            best_max_gap = current_max_gap;
+            best_segment = current_segment;
+        }
+        let first = best_segment.first();
+        let last = best_segment.last();
+        let observed_span_seconds = worker_heartbeat_segment_span_seconds(&best_segment)?;
+        if observed_span_seconds < min_required_span_seconds {
+            failures.push(format!(
+                "best contiguous worker heartbeat event span is {observed_span_seconds}s, below required {min_required_span_seconds}s"
+            ));
+        }
+        let sample_events = if best_segment.len() <= 10 {
+            best_segment.clone()
+        } else {
+            let mut sample = best_segment.iter().take(5).cloned().collect::<Vec<_>>();
+            let tail_start = best_segment.len().saturating_sub(5);
+            sample.extend(best_segment[tail_start..].iter().cloned());
+            sample
+        };
+        Ok(WorkerRecurrenceAudit {
+            ok: failures.is_empty(),
+            worker_id: best_segment.first().map(|event| event.worker_id.clone()),
+            worker_ids,
+            event_count: best_segment.len(),
+            retained_event_count: events.len(),
+            first_seen_at: first.map(|event| event.seen_at.clone()),
+            last_seen_at: last.map(|event| event.seen_at.clone()),
+            observed_span_seconds,
+            max_gap_seconds: best_max_gap,
+            min_required_span_seconds,
+            max_allowed_gap_seconds,
+            failures,
+            sample_events,
+        })
     }
 
     fn count(&self, table: &str) -> Result<i64> {
@@ -44464,6 +44662,36 @@ fn migrate_radar_source_quality_windows_on(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_worker_heartbeat_events_schema_on(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS worker_heartbeat_events (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL,
+          seen_at TEXT NOT NULL,
+          processed_jobs INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_worker_heartbeat_events_worker_seen
+        ON worker_heartbeat_events(worker_id, seen_at);
+
+        INSERT OR IGNORE INTO worker_heartbeat_events
+          (id, worker_id, seen_at, processed_jobs, last_error, created_at)
+        SELECT
+          'backfill:' || worker_id || ':' || last_seen_at,
+          worker_id,
+          last_seen_at,
+          processed_jobs,
+          last_error,
+          last_seen_at
+        FROM worker_heartbeats;
+        "#,
+    )?;
+    Ok(())
+}
+
 fn repair_radar_source_quality_run_scope_on(conn: &Connection) -> Result<()> {
     ensure_radar_schema_on(conn)?;
     let create_sql: Option<String> = conn
@@ -47645,6 +47873,34 @@ fn worker_heartbeat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Worker
         processed_jobs: row.get(3)?,
         last_error: row.get(4)?,
     })
+}
+
+fn worker_heartbeat_event_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkerHeartbeatEvent> {
+    Ok(WorkerHeartbeatEvent {
+        id: row.get(0)?,
+        worker_id: row.get(1)?,
+        seen_at: row.get(2)?,
+        processed_jobs: row.get(3)?,
+        last_error: row.get(4)?,
+    })
+}
+
+fn worker_heartbeat_segment_span_seconds(events: &[WorkerHeartbeatEvent]) -> Result<i64> {
+    let Some(first) = events.first() else {
+        return Ok(0);
+    };
+    let Some(last) = events.last() else {
+        return Ok(0);
+    };
+    let first_at = DateTime::parse_from_rfc3339(&first.seen_at)
+        .with_context(|| format!("parsing heartbeat event {}", first.seen_at))?
+        .with_timezone(&Utc);
+    let last_at = DateTime::parse_from_rfc3339(&last.seen_at)
+        .with_context(|| format!("parsing heartbeat event {}", last.seen_at))?
+        .with_timezone(&Utc);
+    Ok((last_at - first_at).num_seconds().max(0))
 }
 
 fn heartbeat_age_seconds(heartbeat: &WorkerHeartbeat) -> Result<i64> {
@@ -77105,6 +77361,83 @@ ARXIV=( "cat:cs.AI" )
     }
 
     #[test]
+    fn severe_worker_recurrence_audit_requires_retained_multi_event_span() {
+        // CLAIM: multi-day service recurrence proof must come from retained
+        // heartbeat events over the requested wall-clock span, not a single
+        // mutable latest-heartbeat row.
+        // ORACLE: one heartbeat or a forged old started_at fails; inserting
+        // source-retained events across the requested span passes only when
+        // max-gap policy also passes.
+        // SEVERITY: Severe because this is the anti-mirage gate for claiming
+        // unattended launchd/systemd recurrence across days.
+        let store = test_store("worker-recurrence-audit");
+        store
+            .record_worker_heartbeat("worker-test", 0, None)
+            .unwrap();
+        let one_event = store
+            .audit_worker_recurrence(48 * 60 * 60, 25 * 60 * 60)
+            .unwrap();
+        assert!(!one_event.ok);
+        assert!(
+            one_event
+                .failures
+                .iter()
+                .any(|failure| failure.contains("at least two retained heartbeat events"))
+        );
+        let forged_started_at = (Utc::now() - ChronoDuration::days(3)).to_rfc3339();
+        store
+            .conn
+            .execute(
+                "UPDATE worker_heartbeats SET started_at = ?1 WHERE worker_id = 'worker-test'",
+                params![forged_started_at],
+            )
+            .unwrap();
+        let forged = store
+            .audit_worker_recurrence(48 * 60 * 60, 25 * 60 * 60)
+            .unwrap();
+        assert!(
+            !forged.ok,
+            "forged started_at must not prove recurrence without events: {forged:#?}"
+        );
+
+        let first = (Utc::now() - ChronoDuration::hours(49)).to_rfc3339();
+        let middle = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
+        for (id, seen_at) in [
+            ("historical-worker-event-1", first.as_str()),
+            ("historical-worker-event-2", middle.as_str()),
+        ] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO worker_heartbeat_events
+                      (id, worker_id, seen_at, processed_jobs, last_error, created_at)
+                    VALUES (?1, 'worker-test', ?2, 1, NULL, ?2)
+                    "#,
+                    params![id, seen_at],
+                )
+                .unwrap();
+        }
+        let pass = store
+            .audit_worker_recurrence(48 * 60 * 60, 26 * 60 * 60)
+            .unwrap();
+        assert!(pass.ok, "{pass:#?}");
+        assert!(pass.observed_span_seconds >= 48 * 60 * 60);
+        assert_eq!(pass.worker_id.as_deref(), Some("worker-test"));
+
+        let gap_fail = store
+            .audit_worker_recurrence(48 * 60 * 60, 60 * 60)
+            .unwrap();
+        assert!(!gap_fail.ok);
+        assert!(
+            gap_fail
+                .failures
+                .iter()
+                .any(|failure| failure.contains("best contiguous"))
+        );
+    }
+
+    #[test]
     fn severe_strict_doctor_rejects_stale_backup_schema_drift_and_missing_dirs() {
         let store = test_store("strict-doctor-drift");
         let options = DoctorOptions {
@@ -77846,6 +78179,61 @@ ARXIV=( "cat:cs.AI" )
         assert_eq!(job.max_attempts, 3);
         assert!(job.leased_until.is_none());
         assert!(job.dead_lettered_at.is_none());
+    }
+
+    #[test]
+    fn severe_schema_migration_adds_worker_heartbeat_events_without_claiming_recurrence() {
+        // CLAIM: upgrading an older home preserves the current worker
+        // heartbeat as one retained event, but that backfill alone cannot pass
+        // a multi-event recurrence audit.
+        // ORACLE: schema_version advances, worker_heartbeat_events exists, the
+        // prior latest heartbeat is backfilled, and recurrence audit still
+        // fails for a 48-hour span.
+        // SEVERITY: Severe because backfilling history from one mutable row
+        // would create false multi-day service proof.
+        let root = std::env::temp_dir().join(format!(
+            "arcwell-test-worker-heartbeat-events-migration-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("arcwell.sqlite3");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '16');
+            CREATE TABLE worker_heartbeats (
+              worker_id TEXT PRIMARY KEY,
+              started_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              processed_jobs INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT
+            );
+            INSERT INTO worker_heartbeats
+              (worker_id, started_at, last_seen_at, processed_jobs, last_error)
+            VALUES
+              ('legacy-worker', '2026-06-24T00:00:00+00:00', '2026-06-26T00:00:00+00:00', 7, NULL);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(AppPaths::new(root)).unwrap();
+        assert_eq!(store.stored_schema_version().unwrap(), SCHEMA_VERSION);
+        let events = store.list_worker_heartbeat_events(10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].worker_id, "legacy-worker");
+        assert_eq!(events[0].seen_at, "2026-06-26T00:00:00+00:00");
+        let audit = store
+            .audit_worker_recurrence(48 * 60 * 60, 15 * 60)
+            .unwrap();
+        assert!(!audit.ok);
+        assert!(
+            audit
+                .failures
+                .iter()
+                .any(|failure| failure.contains("at least two retained heartbeat events"))
+        );
     }
 
     #[test]

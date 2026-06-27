@@ -166,6 +166,13 @@ Boundary:
   and the run writes `source_health` plus `x_sync_runs` audit state. This proves
   endpoint acceptance for the current token; it is not a destructive revoke
   proof or a separate X token-introspection endpoint.
+- Expired stored `X_BEARER_TOKEN` values are expected because X access tokens
+  are short-lived. Arcwell refreshes them through stored `X_REFRESH_TOKEN` and
+  `X_CLIENT_ID` before provider fetches when `provider.oauth` policy allows
+  `arcwell-x`/`x_oauth`. Refreshable bearer expiry is not a credential-reminder
+  problem; `secret_health` marks it `refreshable`. If a local policy file blocks
+  that self-refresh path, `secret_health` reports `X_OAUTH_REFRESH_POLICY` so the
+  system fault is visible without asking the user for token values.
 - OAuth authorization URL generation returns the PKCE `code_verifier`; keep it until the callback code has been exchanged.
 - Live recent search uses X API v2 and stores `x:recent-search:<query>` cursor state from `meta.newest_id`.
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.

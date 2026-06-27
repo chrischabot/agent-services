@@ -3350,6 +3350,28 @@ pub struct XOAuthScopeProbeReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCredentialProbeEndpoint {
+    pub provider: String,
+    pub secret_name: Option<String>,
+    pub endpoint: String,
+    pub status: String,
+    pub classification: String,
+    pub evidence: String,
+    pub error: Option<String>,
+    pub source_health_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCredentialProbeReport {
+    pub status: String,
+    pub checked_at: String,
+    pub providers_requested: Vec<String>,
+    pub endpoints: Vec<ProviderCredentialProbeEndpoint>,
+    pub source_health_keys: Vec<String>,
+    pub missing_or_failed_providers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XRateLimitDeferReport {
     pub scanned: usize,
     pub deferred: usize,
@@ -9353,14 +9375,14 @@ impl Store {
             .list_watch_sources()?
             .into_iter()
             .any(|source| source.status == "active" && source.source_kind == "x_bookmarks");
+        let refresh_ready = by_name
+            .get("X_REFRESH_TOKEN")
+            .is_some_and(|item| item.present && item.status != "expired");
+        let client_id_ready = by_name
+            .get("X_CLIENT_ID")
+            .is_some_and(|item| item.present && item.status != "expired");
         if x_bookmark_schedule_active {
             let x_scope_warning = "X bookmark ingestion is scheduled; stored X OAuth credentials must include user-context tweet.read, users.read, bookmark.read, follows.read, and offline.access scopes.";
-            let refresh_ready = by_name
-                .get("X_REFRESH_TOKEN")
-                .is_some_and(|item| item.present && item.status != "expired");
-            let client_id_ready = by_name
-                .get("X_CLIENT_ID")
-                .is_some_and(|item| item.present && item.status != "expired");
             if !refresh_ready {
                 push_secret_warning(
                     &mut by_name,
@@ -9392,7 +9414,56 @@ impl Store {
                 );
             }
         }
+        if refresh_ready && client_id_ready {
+            if let Some(warning) = self.x_oauth_refresh_policy_warning() {
+                push_secret_warning(
+                    &mut by_name,
+                    "X_OAUTH_REFRESH_POLICY",
+                    "x",
+                    Some("x"),
+                    &warning,
+                );
+                if let Some(bearer) = by_name.get_mut("X_BEARER_TOKEN") {
+                    bearer.warnings.push(warning);
+                }
+            } else if let Some(bearer) = by_name.get_mut("X_BEARER_TOKEN")
+                && matches!(bearer.status.as_str(), "expired" | "expiring_soon")
+            {
+                let secret_name = bearer.name.clone();
+                bearer.warnings.retain(|warning| {
+                    !(warning.starts_with(&format!("secret {secret_name} "))
+                        && (warning.contains(" expired at ")
+                            || warning.contains(" expires soon at ")))
+                });
+                bearer.status = "refreshable".to_string();
+            }
+        }
         Ok(by_name.into_values().collect())
+    }
+
+    fn x_oauth_refresh_policy_warning(&self) -> Option<String> {
+        match self.policy_explain(PolicyRequest {
+            action: "provider.oauth".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("x_oauth".to_string()),
+            channel: None,
+            subject: None,
+            target: Some("https://api.x.com".to_string()),
+            projected_usd: Some(estimated_network_fetch_cost(1)),
+            metadata: json!({ "operation": "refresh", "health_check": true }),
+            untrusted_excerpt: None,
+        }) {
+            Ok(explanation) if explanation.allowed => None,
+            Ok(explanation) => Some(format!(
+                "Arcwell cannot auto-refresh expired X_BEARER_TOKEN because provider.oauth policy for arcwell-x/x_oauth is {}; reason: {}",
+                explanation.effect, explanation.reason
+            )),
+            Err(error) => Some(format!(
+                "Arcwell cannot verify provider.oauth policy for X token refresh: {}",
+                redact_secret_like_text(&error.to_string())
+            )),
+        }
     }
 
     fn get_usable_secret_value(&self, name: &str) -> Result<Option<String>> {
@@ -17231,6 +17302,227 @@ impl Store {
             endpoints,
             required_scopes,
         )
+    }
+
+    pub fn provider_credential_probe(
+        &self,
+        providers: &[String],
+    ) -> Result<ProviderCredentialProbeReport> {
+        let specs = provider_credential_probe_specs(providers)?;
+        self.provider_credential_probe_with_specs(specs)
+    }
+
+    fn provider_credential_probe_with_specs(
+        &self,
+        specs: Vec<ProviderCredentialProbeSpec>,
+    ) -> Result<ProviderCredentialProbeReport> {
+        if specs.is_empty() {
+            bail!("at least one provider must be selected");
+        }
+        let checked_at = now();
+        let providers_requested = specs
+            .iter()
+            .map(|spec| spec.provider.clone())
+            .collect::<Vec<_>>();
+        let mut endpoints = Vec::new();
+        for spec in specs {
+            let source_key = format!("provider:{}:credential-probe", spec.provider);
+            let endpoint_label = provider_probe_endpoint_label(&spec.url);
+            let mut finish = |status: &str,
+                              classification: &str,
+                              evidence: String,
+                              error: Option<String>,
+                              secret_name: Option<String>|
+             -> Result<()> {
+                let error = error.map(|value| excerpt(&redact_secret_like_text(&value), 1000));
+                if status == "passed" {
+                    self.record_source_success(SourceHealthUpdate {
+                        key: &source_key,
+                        provider: &spec.provider,
+                        source_kind: "provider_credential_probe",
+                        locator: &endpoint_label,
+                        last_item_id: secret_name.as_deref(),
+                        last_item_date: None,
+                        cursor_key: None,
+                        cursor_value: None,
+                        next_run_at: Some(&now_plus_seconds(6 * 60 * 60)),
+                    })?;
+                } else {
+                    let summary = format!("{classification}: {evidence}");
+                    self.record_source_failure(
+                        &source_key,
+                        &spec.provider,
+                        "provider_credential_probe",
+                        &endpoint_label,
+                        error.as_deref().unwrap_or(&summary),
+                    )?;
+                }
+                endpoints.push(ProviderCredentialProbeEndpoint {
+                    provider: spec.provider.clone(),
+                    secret_name,
+                    endpoint: endpoint_label.clone(),
+                    status: status.to_string(),
+                    classification: classification.to_string(),
+                    evidence,
+                    error,
+                    source_health_key: source_key.clone(),
+                });
+                Ok(())
+            };
+
+            if let Err(error) = self.policy_guard(PolicyRequest {
+                action: "provider.network".to_string(),
+                package: Some("arcwell-provider-probe".to_string()),
+                provider: Some(spec.provider.clone()),
+                source: Some("provider_credential_probe".to_string()),
+                channel: None,
+                subject: None,
+                target: Some(endpoint_label.clone()),
+                projected_usd: Some(estimated_network_fetch_cost(1)),
+                metadata: json!({
+                    "operation": "credential_probe",
+                    "provider": spec.provider.clone(),
+                    "secret_names": spec.secret_names.clone(),
+                }),
+                untrusted_excerpt: None,
+            }) {
+                finish(
+                    "failed",
+                    "policy_denied",
+                    "provider-network policy denied before secret read or provider request"
+                        .to_string(),
+                    Some(error.to_string()),
+                    None,
+                )?;
+                continue;
+            }
+            if let Err(error) = self.require_cost_budget(
+                "arcwell-provider-probe",
+                "provider_credential_probe",
+                &spec.provider,
+                "credential_probe",
+                Some("provider_credential_probe"),
+                estimated_network_fetch_cost(1),
+                &format!("{} credential probe", spec.provider),
+            ) {
+                finish(
+                    "failed",
+                    "cost_denied",
+                    "cost budget denied before secret read or provider request".to_string(),
+                    Some(error.to_string()),
+                    None,
+                )?;
+                continue;
+            }
+
+            let secret = match self.first_usable_provider_probe_secret(&spec) {
+                Ok(Some(secret)) => secret,
+                Ok(None) => {
+                    finish(
+                        "failed",
+                        "missing_secret",
+                        format!(
+                            "no usable local secret found; checked {}",
+                            spec.secret_names.join(", ")
+                        ),
+                        None,
+                        None,
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    finish(
+                        "failed",
+                        "secret_unusable",
+                        "stored credential metadata is unusable before provider request"
+                            .to_string(),
+                        Some(error.to_string()),
+                        None,
+                    )?;
+                    continue;
+                }
+            };
+
+            match fetch_provider_probe_json(&spec, &secret.value) {
+                Ok(value) if provider_probe_evidence_passes(&spec, &value) => {
+                    finish(
+                        "passed",
+                        "current_provider_fetch",
+                        provider_probe_success_evidence(&spec, &value),
+                        None,
+                        Some(secret.name),
+                    )?;
+                }
+                Ok(_value) => {
+                    finish(
+                        "failed",
+                        "provider_shape_mismatch",
+                        "provider returned 200 but the response did not match the expected proof shape"
+                            .to_string(),
+                        Some(format!(
+                            "{} credential probe response did not match expected shape",
+                            spec.provider
+                        )),
+                        Some(secret.name),
+                    )?;
+                }
+                Err(error) => {
+                    let redacted = redact_secret_like_text(&error.to_string());
+                    finish(
+                        "failed",
+                        &classify_provider_probe_error(&redacted),
+                        "provider rejected or failed the credential probe".to_string(),
+                        Some(redacted),
+                        Some(secret.name),
+                    )?;
+                }
+            }
+        }
+        let missing_or_failed_providers = endpoints
+            .iter()
+            .filter(|endpoint| endpoint.status != "passed")
+            .map(|endpoint| endpoint.provider.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let passed_any = endpoints.iter().any(|endpoint| endpoint.status == "passed");
+        let status = if missing_or_failed_providers.is_empty() {
+            "passed"
+        } else if passed_any {
+            "partial"
+        } else {
+            "failed"
+        }
+        .to_string();
+        let source_health_keys = endpoints
+            .iter()
+            .map(|endpoint| endpoint.source_health_key.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(ProviderCredentialProbeReport {
+            status,
+            checked_at,
+            providers_requested,
+            endpoints,
+            source_health_keys,
+            missing_or_failed_providers,
+        })
+    }
+
+    fn first_usable_provider_probe_secret(
+        &self,
+        spec: &ProviderCredentialProbeSpec,
+    ) -> Result<Option<ProviderProbeSecret>> {
+        for name in &spec.secret_names {
+            if let Some(value) = self.get_usable_secret_value(name)? {
+                return Ok(Some(ProviderProbeSecret {
+                    name: name.clone(),
+                    value,
+                }));
+            }
+        }
+        Ok(None)
     }
 
     fn finish_x_oauth_probe_report(
@@ -37439,6 +37731,34 @@ fn now_plus_seconds(seconds: i64) -> String {
 struct ProviderFailureClassification {
     status: &'static str,
     backoff_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderCredentialProbeSpec {
+    provider: String,
+    secret_names: Vec<String>,
+    url: String,
+    auth: ProviderProbeAuth,
+    evidence: ProviderProbeEvidence,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderProbeAuth {
+    Bearer,
+    BraveSearchToken,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderProbeEvidence {
+    GithubUser,
+    OpenAiModels,
+    BraveSearch,
+    CloudflareTokenVerify,
+}
+
+struct ProviderProbeSecret {
+    name: String,
+    value: String,
 }
 
 fn classify_provider_failure(error: &str) -> ProviderFailureClassification {
@@ -58637,6 +58957,185 @@ fn provider_user_agent(provider: &str) -> String {
     }
 }
 
+fn provider_credential_probe_specs(
+    providers: &[String],
+) -> Result<Vec<ProviderCredentialProbeSpec>> {
+    let mut selected = providers
+        .iter()
+        .flat_map(|provider| provider.split(','))
+        .map(|provider| provider.trim().to_ascii_lowercase())
+        .filter(|provider| !provider.is_empty())
+        .collect::<Vec<_>>();
+    if selected.is_empty() || selected.iter().any(|provider| provider == "all") {
+        selected = vec![
+            "github".to_string(),
+            "openai".to_string(),
+            "brave".to_string(),
+            "cloudflare".to_string(),
+        ];
+    }
+    let mut deduped = BTreeSet::new();
+    let mut specs = Vec::new();
+    for provider in selected {
+        if !deduped.insert(provider.clone()) {
+            continue;
+        }
+        let spec = match provider.as_str() {
+            "github" => ProviderCredentialProbeSpec {
+                provider,
+                secret_names: vec!["GITHUB_TOKEN".to_string()],
+                url: "https://api.github.com/user".to_string(),
+                auth: ProviderProbeAuth::Bearer,
+                evidence: ProviderProbeEvidence::GithubUser,
+            },
+            "openai" => ProviderCredentialProbeSpec {
+                provider,
+                secret_names: vec!["OPENAI_API_KEY".to_string()],
+                url: "https://api.openai.com/v1/models".to_string(),
+                auth: ProviderProbeAuth::Bearer,
+                evidence: ProviderProbeEvidence::OpenAiModels,
+            },
+            "brave" => ProviderCredentialProbeSpec {
+                provider,
+                secret_names: vec![
+                    "BRAVE_SEARCH_API_KEY".to_string(),
+                    "BRAVE_API_KEY".to_string(),
+                ],
+                url: "https://api.search.brave.com/res/v1/web/search?q=arcwell&count=1".to_string(),
+                auth: ProviderProbeAuth::BraveSearchToken,
+                evidence: ProviderProbeEvidence::BraveSearch,
+            },
+            "cloudflare" => ProviderCredentialProbeSpec {
+                provider,
+                secret_names: vec!["CLOUDFLARE_API_TOKEN".to_string()],
+                url: "https://api.cloudflare.com/client/v4/user/tokens/verify".to_string(),
+                auth: ProviderProbeAuth::Bearer,
+                evidence: ProviderProbeEvidence::CloudflareTokenVerify,
+            },
+            _ => bail!("unsupported provider credential probe: {provider}"),
+        };
+        specs.push(spec);
+    }
+    Ok(specs)
+}
+
+fn provider_probe_endpoint_label(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            let host = parsed.host_str()?;
+            Some(format!("{host}{}", parsed.path()))
+        })
+        .unwrap_or_else(|| excerpt(url, 240))
+}
+
+fn fetch_provider_probe_json(spec: &ProviderCredentialProbeSpec, token: &str) -> Result<Value> {
+    let client = Client::builder().timeout(Duration::from_secs(20)).build()?;
+    let mut request = client
+        .get(&spec.url)
+        .header(ACCEPT, "application/json")
+        .header("user-agent", provider_user_agent(&spec.provider));
+    request = match spec.auth {
+        ProviderProbeAuth::Bearer => request.header(AUTHORIZATION, format!("Bearer {token}")),
+        ProviderProbeAuth::BraveSearchToken => request.header("X-Subscription-Token", token),
+    };
+    let response = request
+        .send()
+        .with_context(|| format!("{} credential probe request failed", spec.provider))?;
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let text = response
+        .text()
+        .with_context(|| format!("{} returned unreadable probe response body", spec.provider))?;
+    if !status.is_success() {
+        bail!(
+            "{}",
+            classify_provider_http_error(&spec.provider, status, retry_after.as_deref(), &text)
+        );
+    }
+    serde_json::from_str(&text)
+        .with_context(|| format!("{} credential probe returned invalid JSON", spec.provider))
+}
+
+fn provider_probe_evidence_passes(spec: &ProviderCredentialProbeSpec, value: &Value) -> bool {
+    match spec.evidence {
+        ProviderProbeEvidence::GithubUser => {
+            value.get("login").and_then(Value::as_str).is_some()
+                || value.get("id").and_then(Value::as_i64).is_some()
+        }
+        ProviderProbeEvidence::OpenAiModels => {
+            value.get("data").and_then(Value::as_array).is_some()
+        }
+        ProviderProbeEvidence::BraveSearch => {
+            value.get("web").is_some() || value.get("query").is_some()
+        }
+        ProviderProbeEvidence::CloudflareTokenVerify => value
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn provider_probe_success_evidence(spec: &ProviderCredentialProbeSpec, value: &Value) -> String {
+    match spec.evidence {
+        ProviderProbeEvidence::GithubUser => {
+            let login = value
+                .get("login")
+                .and_then(Value::as_str)
+                .map(|value| excerpt(value, 80))
+                .unwrap_or_else(|| "authenticated user".to_string());
+            format!("provider accepted credential and returned GitHub user {login}")
+        }
+        ProviderProbeEvidence::OpenAiModels => {
+            let count = value
+                .get("data")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!(
+                "provider accepted credential and returned OpenAI models list with {count} item(s)"
+            )
+        }
+        ProviderProbeEvidence::BraveSearch => {
+            "provider accepted credential and returned Brave Search response shape".to_string()
+        }
+        ProviderProbeEvidence::CloudflareTokenVerify => {
+            "provider accepted credential and verified Cloudflare API token".to_string()
+        }
+    }
+}
+
+fn classify_provider_probe_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("policy") || lower.contains("denied") {
+        "policy_denied".to_string()
+    } else if lower.contains("cost") || lower.contains("budget") {
+        "cost_denied".to_string()
+    } else if lower.contains("missing") || lower.contains("no usable") {
+        "missing_secret".to_string()
+    } else if lower.contains("token rejected")
+        || lower.contains("expired")
+        || lower.contains("unauthorized")
+        || lower.contains("http 401")
+        || lower.contains("forbidden")
+        || lower.contains("http 403")
+    {
+        "provider_revocation_or_expiry".to_string()
+    } else if lower.contains("rate limit")
+        || lower.contains("quota")
+        || lower.contains("too many requests")
+        || lower.contains("http 429")
+    {
+        "quota_or_rate_limit".to_string()
+    } else {
+        "provider_network_failure".to_string()
+    }
+}
+
 fn fetch_json(url: &str, bearer_token: Option<&str>, provider: &str) -> Result<Value> {
     let client = Client::builder().timeout(Duration::from_secs(20)).build()?;
     let mut request = client
@@ -69636,6 +70135,32 @@ reason = "entity resolution provider disabled"
             }
         });
         (format!("http://{addr}"), requests)
+    }
+
+    fn test_provider_probe_spec(
+        provider: &str,
+        secret_name: &str,
+        url: &str,
+    ) -> ProviderCredentialProbeSpec {
+        let evidence = match provider {
+            "github" => ProviderProbeEvidence::GithubUser,
+            "openai" => ProviderProbeEvidence::OpenAiModels,
+            "brave" => ProviderProbeEvidence::BraveSearch,
+            "cloudflare" => ProviderProbeEvidence::CloudflareTokenVerify,
+            _ => panic!("unsupported test provider: {provider}"),
+        };
+        let auth = if provider == "brave" {
+            ProviderProbeAuth::BraveSearchToken
+        } else {
+            ProviderProbeAuth::Bearer
+        };
+        ProviderCredentialProbeSpec {
+            provider: provider.to_string(),
+            secret_names: vec![secret_name.to_string()],
+            url: url.to_string(),
+            auth,
+            evidence,
+        }
     }
 
     fn mock_x_following_server() -> String {
@@ -88774,6 +89299,310 @@ priority = 20
     }
 
     #[test]
+    fn severe_provider_credential_probe_checks_each_provider_and_writes_health() {
+        // CLAIM: provider credential probing proves each selected provider by
+        // reaching that provider's cheap credential endpoint, not by trusting
+        // local secret presence.
+        // PRECONDITIONS: four provider secrets are present and policy allows
+        // each probe against a loopback provider fixture.
+        // POSTCONDITIONS: every provider passes, source_health has one healthy
+        // row per provider, request headers use the provider's expected auth
+        // shape, and serialized output does not leak token values.
+        // ORACLE: recorded HTTP request paths/headers plus source_health rows.
+        // SEVERITY: Severe because a fake probe that only lists secrets would
+        // miss revoked tokens and broken provider auth shapes.
+        let store = test_store("provider-credential-probe-pass");
+        let github_token = format!("ghp_{}", "g".repeat(80));
+        let openai_token = format!("sk-{}", "o".repeat(80));
+        let brave_token = format!("brave-{}", "b".repeat(80));
+        let cloudflare_token = format!("cf-{}", "c".repeat(80));
+        for (name, value, provider) in [
+            ("GITHUB_TOKEN", github_token.as_str(), "github"),
+            ("OPENAI_API_KEY", openai_token.as_str(), "openai"),
+            ("BRAVE_SEARCH_API_KEY", brave_token.as_str(), "brave"),
+            (
+                "CLOUDFLARE_API_TOKEN",
+                cloudflare_token.as_str(),
+                "cloudflare",
+            ),
+        ] {
+            store
+                .set_secret_value_with_metadata(name, value, provider, Some(provider), None)
+                .unwrap();
+        }
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-provider-probe-github"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "github"
+source = "provider_credential_probe"
+reason = "allow github credential probe fixture"
+priority = 20
+
+[[rules]]
+id = "allow-provider-probe-openai"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "openai"
+source = "provider_credential_probe"
+reason = "allow openai credential probe fixture"
+priority = 20
+
+[[rules]]
+id = "allow-provider-probe-brave"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "brave"
+source = "provider_credential_probe"
+reason = "allow brave credential probe fixture"
+priority = 20
+
+[[rules]]
+id = "allow-provider-probe-cloudflare"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "cloudflare"
+source = "provider_credential_probe"
+reason = "allow cloudflare credential probe fixture"
+priority = 20
+"#,
+        );
+        let (base, requests) = mock_recording_sequence_server(vec![
+            (
+                "200 OK",
+                "",
+                r#"{"login":"arcwell","id":42}"#,
+                "application/json",
+            ),
+            (
+                "200 OK",
+                "",
+                r#"{"object":"list","data":[]}"#,
+                "application/json",
+            ),
+            (
+                "200 OK",
+                "",
+                r#"{"query":{"original":"arcwell"},"web":{"results":[]}}"#,
+                "application/json",
+            ),
+            (
+                "200 OK",
+                "",
+                r#"{"success":true,"result":{"status":"active"}}"#,
+                "application/json",
+            ),
+        ]);
+        let specs = vec![
+            test_provider_probe_spec("github", "GITHUB_TOKEN", &format!("{base}/github")),
+            test_provider_probe_spec("openai", "OPENAI_API_KEY", &format!("{base}/openai")),
+            test_provider_probe_spec("brave", "BRAVE_SEARCH_API_KEY", &format!("{base}/brave")),
+            test_provider_probe_spec(
+                "cloudflare",
+                "CLOUDFLARE_API_TOKEN",
+                &format!("{base}/cloudflare"),
+            ),
+        ];
+
+        let report = store.provider_credential_probe_with_specs(specs).unwrap();
+        assert_eq!(report.status, "passed");
+        assert!(report.missing_or_failed_providers.is_empty(), "{report:?}");
+        assert_eq!(report.endpoints.len(), 4);
+        let captured = requests.lock().unwrap().join("\n");
+        assert!(captured.contains("GET /github"), "{captured}");
+        assert!(
+            captured.contains("authorization: Bearer ghp_"),
+            "{captured}"
+        );
+        assert!(captured.contains("GET /openai"), "{captured}");
+        assert!(captured.contains("authorization: Bearer sk-"), "{captured}");
+        assert!(captured.contains("GET /brave"), "{captured}");
+        assert!(
+            captured.contains("x-subscription-token: brave-"),
+            "{captured}"
+        );
+        assert!(captured.contains("GET /cloudflare"), "{captured}");
+        for provider in ["github", "openai", "brave", "cloudflare"] {
+            let health = store
+                .get_source_health(&format!("provider:{provider}:credential-probe"))
+                .unwrap()
+                .expect("provider health");
+            assert_eq!(health.status, "healthy", "{health:?}");
+            assert_eq!(health.source_kind, "provider_credential_probe");
+        }
+        let serialized = serde_json::to_string(&report).unwrap();
+        for token in [
+            &github_token,
+            &openai_token,
+            &brave_token,
+            &cloudflare_token,
+        ] {
+            assert!(!serialized.contains(token), "{serialized}");
+        }
+    }
+
+    #[test]
+    fn severe_provider_credential_probe_keeps_policy_missing_quota_failures_visible_and_redacted() {
+        // CLAIM: provider credential probing keeps partial failures explicit and
+        // fails closed before secret reads/network when policy denies a provider.
+        // PRECONDITIONS: GitHub is policy-denied, OpenAI succeeds, Brave is
+        // missing a secret, and Cloudflare returns a token-echoing 429.
+        // POSTCONDITIONS: the report is partial, every failed provider has a
+        // durable source_health row with a distinct classification, only two
+        // provider requests occur, and raw token text is redacted everywhere.
+        // ORACLE: report classifications, recorded request paths, source_health
+        // rows, and serialized output token scan.
+        // SEVERITY: Severe because this catches secret-leaking errors, false
+        // global success, policy-bypass network calls, and missing-secret
+        // silence in one fixture.
+        let store = test_store("provider-credential-probe-partial");
+        let github_token = format!("ghp_{}", "d".repeat(80));
+        let openai_token = format!("sk-{}", "p".repeat(80));
+        let cloudflare_token = format!("cf-{}", "q".repeat(80));
+        for (name, value, provider) in [
+            ("GITHUB_TOKEN", github_token.as_str(), "github"),
+            ("OPENAI_API_KEY", openai_token.as_str(), "openai"),
+            (
+                "CLOUDFLARE_API_TOKEN",
+                cloudflare_token.as_str(),
+                "cloudflare",
+            ),
+        ] {
+            store
+                .set_secret_value_with_metadata(name, value, provider, Some(provider), None)
+                .unwrap();
+        }
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "deny-provider-probe-github"
+effect = "deny"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "github"
+source = "provider_credential_probe"
+reason = "deny github credential probe fixture"
+priority = 50
+
+[[rules]]
+id = "allow-provider-probe-openai"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "openai"
+source = "provider_credential_probe"
+reason = "allow openai credential probe fixture"
+priority = 20
+
+[[rules]]
+id = "allow-provider-probe-brave"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "brave"
+source = "provider_credential_probe"
+reason = "allow brave credential probe fixture"
+priority = 20
+
+[[rules]]
+id = "allow-provider-probe-cloudflare"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-provider-probe"
+provider = "cloudflare"
+source = "provider_credential_probe"
+reason = "allow cloudflare credential probe fixture"
+priority = 20
+"#,
+        );
+        let (base, requests) = mock_recording_sequence_server(vec![
+            (
+                "200 OK",
+                "",
+                r#"{"object":"list","data":[]}"#,
+                "application/json",
+            ),
+            (
+                "429 Too Many Requests",
+                "retry-after: 60\r\n",
+                r#"{"error":"quota","detail":"retry later with cf-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}"#,
+                "application/json",
+            ),
+        ]);
+        let specs = vec![
+            test_provider_probe_spec("github", "GITHUB_TOKEN", &format!("{base}/github")),
+            test_provider_probe_spec("openai", "OPENAI_API_KEY", &format!("{base}/openai")),
+            test_provider_probe_spec("brave", "BRAVE_SEARCH_API_KEY", &format!("{base}/brave")),
+            test_provider_probe_spec(
+                "cloudflare",
+                "CLOUDFLARE_API_TOKEN",
+                &format!("{base}/cloudflare"),
+            ),
+        ];
+
+        let report = store.provider_credential_probe_with_specs(specs).unwrap();
+        assert_eq!(report.status, "partial");
+        assert_eq!(
+            report.missing_or_failed_providers,
+            vec![
+                "brave".to_string(),
+                "cloudflare".to_string(),
+                "github".to_string()
+            ]
+        );
+        let by_provider = report
+            .endpoints
+            .iter()
+            .map(|endpoint| (endpoint.provider.as_str(), endpoint))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_provider["github"].classification, "policy_denied");
+        assert_eq!(by_provider["openai"].status, "passed");
+        assert_eq!(by_provider["brave"].classification, "missing_secret");
+        assert_eq!(
+            by_provider["cloudflare"].classification,
+            "quota_or_rate_limit"
+        );
+        let captured = requests.lock().unwrap().join("\n");
+        assert!(!captured.contains("/github"), "{captured}");
+        assert!(captured.contains("GET /openai"), "{captured}");
+        assert!(!captured.contains("/brave"), "{captured}");
+        assert!(captured.contains("GET /cloudflare"), "{captured}");
+        for (provider, expected_status) in [
+            ("github", "failed"),
+            ("openai", "healthy"),
+            ("brave", "failed"),
+            ("cloudflare", "rate_limited"),
+        ] {
+            let health = store
+                .get_source_health(&format!("provider:{provider}:credential-probe"))
+                .unwrap()
+                .expect("provider health");
+            assert_eq!(health.status, expected_status, "{health:?}");
+            assert!(
+                !health
+                    .last_error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(&cloudflare_token),
+                "{health:?}"
+            );
+        }
+        let serialized = serde_json::to_string(&report).unwrap();
+        for token in [&github_token, &openai_token, &cloudflare_token] {
+            assert!(!serialized.contains(token), "{serialized}");
+        }
+        assert!(serialized.contains("[REDACTED]"), "{serialized}");
+    }
+
+    #[test]
     fn severe_x_oauth_public_exchange_includes_client_id_without_basic_auth() {
         // CLAIM: X public-client OAuth authorization-code exchange identifies
         // the client in the form body and does not send Basic auth.
@@ -89466,6 +90295,201 @@ reason = "X OAuth disabled during revoke policy test"
         assert!(serialized.contains("bookmark.read"));
         assert!(serialized.contains("offline.access"));
         assert!(!serialized.contains(&token));
+    }
+
+    #[test]
+    fn severe_secret_health_warns_when_x_refresh_policy_blocks_self_healing() {
+        // CLAIM: Arcwell must not ask the user for X token material when stored
+        // refresh material exists but policy blocks automatic refresh; health
+        // should identify the missing provider.oauth allowance as the system
+        // blocker.
+        // PRECONDITIONS: scheduled X bookmark ingestion is active, X bearer is
+        // expiring soon, refresh token and client id exist, and no policy rule
+        // allows arcwell-x/x_oauth provider.oauth.
+        // POSTCONDITIONS: secret health, doctor, and ops expose
+        // X_OAUTH_REFRESH_POLICY plus an actionable policy warning, with no raw
+        // token values.
+        // ORACLE: serialized health/doctor/ops surfaces.
+        // SEVERITY: Severe because otherwise Arcwell repeatedly punts token
+        // refresh work back to a human who does not have or need token values.
+        let store = test_store("x-refresh-policy-health");
+        let bearer = format!("bearer-policy-{}", "b".repeat(48));
+        let refresh = format!("refresh-policy-{}", "r".repeat(48));
+        let expires_soon = (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                &bearer,
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .set_secret_value_with_metadata("X_REFRESH_TOKEN", &refresh, "x", Some("x"), None)
+            .unwrap();
+        store
+            .set_secret_value_with_metadata("X_CLIENT_ID", "client-id", "x", Some("x"), None)
+            .unwrap();
+        store
+            .schedule_x_bookmark_import(92, 100, "warm", "active")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-unrelated-x-network"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth_probe"
+reason = "allow probe but not refresh"
+priority = 20
+"#,
+        );
+
+        let secret_health = store.secret_health().unwrap();
+        let policy = secret_health
+            .iter()
+            .find(|item| item.name == "X_OAUTH_REFRESH_POLICY")
+            .expect("refresh policy warning");
+        assert_eq!(policy.status, "missing");
+        assert!(policy.warnings.iter().any(|warning| {
+            warning.contains("provider.oauth") && warning.contains("arcwell-x/x_oauth")
+        }));
+        let bearer_health = secret_health
+            .iter()
+            .find(|item| item.name == "X_BEARER_TOKEN")
+            .expect("bearer health");
+        assert!(
+            bearer_health
+                .warnings
+                .iter()
+                .any(|warning| warning
+                    .contains("Arcwell cannot auto-refresh expired X_BEARER_TOKEN"))
+        );
+
+        let health = store.health().unwrap();
+        assert!(!health.ok);
+        let doctor = store.doctor(DoctorOptions::default()).unwrap();
+        assert!(!doctor.ok);
+        let serialized = serde_json::to_string(&json!({
+            "secret_health": secret_health,
+            "health": health,
+            "doctor": doctor,
+            "ops": store.ops_snapshot().unwrap(),
+        }))
+        .unwrap();
+        assert!(serialized.contains("X_OAUTH_REFRESH_POLICY"));
+        assert!(serialized.contains("provider.oauth"));
+        assert!(!serialized.contains(&bearer), "{serialized}");
+        assert!(!serialized.contains(&refresh), "{serialized}");
+
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-x-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow Arcwell-managed X refresh"
+priority = 20
+"#,
+        );
+        let healed_health = store.secret_health().unwrap();
+        assert!(
+            healed_health
+                .iter()
+                .all(|item| item.name != "X_OAUTH_REFRESH_POLICY"),
+            "{healed_health:?}"
+        );
+        let healed_bearer = healed_health
+            .iter()
+            .find(|item| item.name == "X_BEARER_TOKEN")
+            .expect("healed bearer health");
+        assert_eq!(healed_bearer.status, "refreshable");
+        assert!(
+            healed_bearer.warnings.is_empty(),
+            "refreshable X bearer expiry must not ask for human credential action: {healed_bearer:?}"
+        );
+        let reminder_warnings = store.credential_reminder_secret_warnings().unwrap();
+        assert!(
+            reminder_warnings.is_empty(),
+            "managed X refresh must not create credential reminders: {reminder_warnings:?}"
+        );
+    }
+
+    #[test]
+    fn severe_secret_health_suppresses_refreshable_x_bearer_without_schedule() {
+        // CLAIM: X access-token expiry is not a user-action credential problem
+        // when Arcwell has refresh material and policy to refresh it.
+        // PRECONDITIONS: no scheduled X bookmark import exists; the bearer is
+        // expiring soon; refresh token and client id exist; provider.oauth is
+        // allowed for the X refresh path.
+        // POSTCONDITIONS: secret health marks the bearer refreshable and
+        // credential reminders stay empty.
+        // ORACLE: SecretHealth status plus credential-reminder warning list.
+        // SEVERITY: Severe because otherwise generic credential reminders keep
+        // asking a human for X token material they do not have.
+        let store = test_store("x-refreshable-without-schedule");
+        let expires_soon = (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339();
+        store
+            .set_secret_value_with_metadata(
+                "X_BEARER_TOKEN",
+                "short-lived-bearer",
+                "x",
+                Some("x"),
+                Some(&expires_soon),
+            )
+            .unwrap();
+        store
+            .set_secret_value_with_metadata(
+                "X_REFRESH_TOKEN",
+                "refresh-token",
+                "x",
+                Some("x"),
+                None,
+            )
+            .unwrap();
+        store
+            .set_secret_value_with_metadata("X_CLIENT_ID", "client-id", "x", Some("x"), None)
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-x-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow Arcwell-managed X refresh"
+priority = 20
+"#,
+        );
+
+        let secret_health = store.secret_health().unwrap();
+        let bearer = secret_health
+            .iter()
+            .find(|item| item.name == "X_BEARER_TOKEN")
+            .expect("bearer health");
+        assert_eq!(bearer.status, "refreshable");
+        assert!(
+            bearer.warnings.is_empty(),
+            "refreshable X bearer must not produce reminder warnings: {bearer:?}"
+        );
+        assert!(
+            store
+                .credential_reminder_secret_warnings()
+                .unwrap()
+                .is_empty(),
+            "refreshable X bearer must not drive credential reminders"
+        );
     }
 
     #[test]

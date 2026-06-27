@@ -155,6 +155,20 @@ source home is the real local home, or set
 `X_CREDENTIAL_PROBE_SOURCE_HOME_IS_DISPOSABLE=1` only for a genuinely disposable
 credential source.
 
+`arcwell provider probe --providers github,openai,brave,cloudflare` is the
+general provider credential-acceptance probe. It is policy/cost gated with
+source `provider_credential_probe`, checks cheap provider endpoints for GitHub,
+OpenAI, Brave Search, and Cloudflare, and records redacted source-health keys
+named `provider:<provider>:credential-probe`. Local severe coverage is
+`cargo test -p arcwell-core provider_credential_probe -- --nocapture`.
+
+Live local-home result on `2026-06-26T18:21:16+00:00`: OpenAI passed against
+`/v1/models` with `126` returned model entries, Brave Search passed against its
+web-search endpoint, GitHub failed with provider-side HTTP 401 bad credentials,
+and Cloudflare failed with provider-side HTTP 401 invalid API token. The live
+result is intentionally recorded as partial; rotate/fix GitHub and Cloudflare
+credentials before claiming those live adapters are provider-accepted.
+
 The credential probe verifies:
 
 - classifier buckets for missing refresh material, provider revocation,
@@ -167,6 +181,30 @@ The credential probe verifies:
   are recorded without raw token leakage;
 - live current credentials can run recent search and, when enabled, a tiny
   bookmark/follow watch-source rebuild.
+
+Normal X bearer expiry should not require user action. On `2026-06-27`, the
+real-home `X_BEARER_TOKEN` had expired; `arcwell x oauth-probe --search-query
+from:openai` refreshed it through stored `X_REFRESH_TOKEN`/`X_CLIENT_ID`, stored
+the rotated bearer/refresh pair, and passed users/bookmarks/following/search
+endpoint probes after local policy was updated to allow:
+
+```toml
+[[rules]]
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+effect = "allow"
+```
+
+`secret_health` now reports `X_OAUTH_REFRESH_POLICY` when scheduled X ingestion
+has refresh material but a local policy file would block this self-refresh path.
+That is a system configuration fault, not a request for the user to provide X
+token values. When refresh material and policy are present, short-lived
+`X_BEARER_TOKEN` expiry is reported as `refreshable` instead of generating a
+credential reminder. If the stored refresh token itself is missing or
+provider-revoked, Arcwell still needs a browser/local-callback OAuth
+reauthorization flow before that can be considered fully self-managing.
 
 `arcwell x oauth-probe` / `x_oauth_probe` is the first-class endpoint-scope
 probe for current X credentials. It is provider-network policy/cost gated,

@@ -49,6 +49,7 @@ struct Cli {
 enum Command {
     Health,
     Ops,
+    Provider(ProviderCommand),
     Doctor(DoctorArgs),
     Service(ServiceCommand),
     Serve(ServeArgs),
@@ -89,6 +90,20 @@ struct DoctorArgs {
     max_dead_lettered_jobs: i64,
     #[arg(long, default_value_t = 7 * 24 * 60 * 60)]
     max_backup_age_seconds: i64,
+}
+
+#[derive(Args)]
+struct ProviderCommand {
+    #[command(subcommand)]
+    command: ProviderSubcommand,
+}
+
+#[derive(Subcommand)]
+enum ProviderSubcommand {
+    Probe {
+        #[arg(long, value_delimiter = ',')]
+        providers: Vec<String>,
+    },
 }
 
 #[derive(Args)]
@@ -1320,6 +1335,7 @@ fn run(store: Store, command: Command) -> Result<()> {
     match command {
         Command::Health => print_json(&store.health()?),
         Command::Ops => print_json(&store.ops_snapshot()?),
+        Command::Provider(args) => provider(store, args),
         Command::Doctor(args) => doctor(store, args),
         Command::Service(args) => service(store, args),
         Command::Serve(_) => unreachable!(),
@@ -1348,6 +1364,14 @@ fn run(store: Store, command: Command) -> Result<()> {
         Command::Policy(args) => policy(store, args),
         Command::Secrets(args) => secrets(store, args),
         Command::Cursors(args) => cursors(store, args),
+    }
+}
+
+fn provider(store: Store, args: ProviderCommand) -> Result<()> {
+    match args.command {
+        ProviderSubcommand::Probe { providers } => {
+            print_json(&store.provider_credential_probe(&providers)?)
+        }
     }
 }
 
@@ -11922,6 +11946,9 @@ fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> Result<Value
     match name {
         "research_capabilities" => Ok(research_capabilities(paths)),
         "commerce_research_capabilities" => Ok(commerce_capabilities(paths)),
+        "provider_credential_probe" => Ok(json!(
+            store.provider_credential_probe(&provider_list_from_mcp(&arguments))?
+        )),
         "commerce_run_config_set" => Ok(json!(
             store.record_commerce_run_config(commerce_run_config_input_from_mcp(&arguments)?)?
         )),
@@ -14110,6 +14137,15 @@ fn mcp_compact_ops_snapshot(value: Value) -> Value {
 fn mcp_tools() -> Vec<Value> {
     vec![
         tool("arcwell_health", "Read local arcwell health.", []),
+        tool(
+            "provider_credential_probe",
+            "Probe configured provider credentials with cheap policy/cost-gated live endpoint checks and write source-health rows.",
+            [(
+                "providers",
+                "string",
+                "Optional comma-separated providers. Defaults to github, openai, brave, cloudflare.",
+            )],
+        ),
         tool("profile_list", "List profile items.", []),
         tool(
             "profile_search",
@@ -16288,6 +16324,28 @@ fn optional_string(arguments: &Value, key: &str, default: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or(default)
         .to_string()
+}
+
+fn provider_list_from_mcp(arguments: &Value) -> Vec<String> {
+    if let Some(values) = arguments.get("providers").and_then(Value::as_array) {
+        return values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    arguments
+        .get("providers")
+        .and_then(Value::as_str)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn optional_inline_or_file(

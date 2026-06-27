@@ -148,7 +148,16 @@ PR, implementation note, or final report:
       backup freshness, source health, credential health, costs, work runs, and
       pending reviews.
 - [ ] Add live-provider probe summaries to ops only where probes are cheap,
-      safe, redacted, and policy/cost aware.
+      safe, redacted, and policy/cost aware. Core probe substrate now exists:
+      `arcwell provider probe` and MCP `provider_credential_probe` check
+      GitHub, OpenAI, Brave Search, and Cloudflare credentials through cheap
+      provider endpoints, classify policy/cost/missing-secret/quota/revocation
+      failures, and write redacted per-provider `source_health` rows. Live
+      local-home proof passed OpenAI and Brave, and surfaced rejected GitHub and
+      Cloudflare credentials as durable failed health rows. Remaining work:
+      rotate/fix rejected provider tokens if those providers are needed,
+      browser-checked ops summaries/controls, and provider-specific
+      quota/billing scope notes.
 - [ ] Keep Obsidian/Markdown as the wiki editing surface; do not duplicate wiki
       authoring unless needed.
 
@@ -1168,6 +1177,19 @@ PR, implementation note, or final report:
       `.arcwell-dev/proofs/x-credential-probe-20260626T124924Z-78664/artifacts/proof-packet.json`
       reused the refreshed stored credential without forcing refresh and passed
       both recent search and a tiny bookmark/follow watch-source rebuild.
+      On 2026-06-27 the real-home `X_BEARER_TOKEN` had expired, `arcwell x
+      oauth-probe --search-query from:openai` first failed because the local
+      policy file omitted `provider.oauth` for `arcwell-x`/`x_oauth`, then
+      passed after adding that self-refresh allowance. The run refreshed and
+      rotated stored X bearer/refresh material without exposing values and
+      recorded sync run `069043e7-541b-47dd-b3d1-1d5b691456ec`. Core
+      `secret_health` now emits `X_OAUTH_REFRESH_POLICY` when scheduled X
+      ingestion has refresh material but local policy would block Arcwell-managed
+      refresh, so this is diagnosed as system policy drift rather than a user
+      token request. When refresh material and policy are present, short-lived X
+      bearer expiry is marked `refreshable` and suppressed from credential
+      reminders. Remaining work: browser/local-callback OAuth reauthorization
+      when the stored refresh token itself is missing or provider-revoked.
 - [x] Repair X portable export freshness without packaging secret-like local
       evidence. Portable export now sanitizes token-shaped fields/values before
       writing bundle rows, validation still rejects unsanitized bundles, and

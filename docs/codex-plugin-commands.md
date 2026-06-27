@@ -69,6 +69,16 @@ Record the smoke result with the Codex app version, plugin name/version,
 `ARCWELL_HOME`, command names as displayed by the picker, and the exact
 follow-up command used to verify hook events.
 
+## Provider And Ops Probes
+
+- `arcwell provider probe --providers github,openai,brave,cloudflare` and MCP
+  `provider_credential_probe` run cheap credential-acceptance checks against
+  GitHub, OpenAI, Brave Search, and Cloudflare. The probe is policy/cost gated,
+  writes redacted `source_health` rows named
+  `provider:<provider>:credential-probe`, and reports missing secrets,
+  policy/cost denials, 401/403 revocation-style failures, 429/quota failures,
+  provider-network failures, and response-shape mismatches separately.
+
 ## Install
 
 ```sh

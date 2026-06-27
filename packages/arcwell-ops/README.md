@@ -17,6 +17,11 @@ Current first-pass implementation:
   snapshots, channels, Telegram delivery failures, source cards, digest
   candidates, work runs, procedure candidates, memory candidates, policy
   decisions/approvals, costs, and secret health.
+- `arcwell provider probe` / MCP `provider_credential_probe` can write
+  provider credential health rows into the same source-health surface for
+  GitHub, OpenAI, Brave Search, and Cloudflare. This is local/CLI/MCP substrate;
+  richer browser summaries and live-provider proof remain tracked in
+  `TODO.md`.
 - `/ops/ui` includes search/status filters, stable sorting, detail views,
   summary health scoring, queue/source/radar-run/radar-quality/credential
   summaries, one narrow authenticated edge-event dead-letter control, X

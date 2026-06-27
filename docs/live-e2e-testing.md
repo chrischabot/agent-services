@@ -202,9 +202,25 @@ has refresh material but a local policy file would block this self-refresh path.
 That is a system configuration fault, not a request for the user to provide X
 token values. When refresh material and policy are present, short-lived
 `X_BEARER_TOKEN` expiry is reported as `refreshable` instead of generating a
-credential reminder. If the stored refresh token itself is missing or
-provider-revoked, Arcwell still needs a browser/local-callback OAuth
-reauthorization flow before that can be considered fully self-managing.
+credential reminder.
+
+If the stored refresh token itself is missing or provider-revoked, run:
+
+```sh
+arcwell x oauth-reauthorize
+```
+
+That command resolves stored `X_CLIENT_ID` / `TWITTER_OAUTH2_CLIENT_ID`, stored
+client-secret aliases, and `X_REDIRECT_URI`; starts a loopback callback listener;
+opens the browser to X; verifies callback path and state; exchanges the returned
+authorization code; writes the new bearer/refresh tokens; then runs
+`oauth-probe`. Default redirect is `http://127.0.0.1:8765/callback`, so the X app
+must have that callback registered or `--redirect-uri` / `X_REDIRECT_URI` must
+point at the registered loopback callback. On 2026-06-27 the live `agentforge`
+X app was updated to include that loopback callback, the local Arcwell home
+stored `X_REDIRECT_URI`, and `arcwell x oauth-reauthorize` completed browser
+consent, callback capture, token exchange/write-back, and all endpoint probes
+with sync run `6101a58d-0162-4415-b345-57030a7d2943`.
 
 `arcwell x oauth-probe` / `x_oauth_probe` is the first-class endpoint-scope
 probe for current X credentials. It is provider-network policy/cost gated,

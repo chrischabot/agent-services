@@ -1188,8 +1188,22 @@ PR, implementation note, or final report:
       refresh, so this is diagnosed as system policy drift rather than a user
       token request. When refresh material and policy are present, short-lived X
       bearer expiry is marked `refreshable` and suppressed from credential
-      reminders. Remaining work: browser/local-callback OAuth reauthorization
-      when the stored refresh token itself is missing or provider-revoked.
+      reminders. `arcwell x oauth-reauthorize` now resolves stored client
+      metadata, policy-gates browser reauthorization before launch, captures a
+      loopback callback, exchanges the code, stores returned bearer/refresh
+      tokens, and runs the endpoint-scope probe. Local severe tests cover
+      policy denial before browser launch, stored `X_CLIENT_ID` /
+      `TWITTER_OAUTH2_CLIENT_ID` aliases, loopback redirect validation, state
+      mismatch, provider error callbacks, and no user-known token/client-string
+      requirement. Live 2026-06-27 browser proof found the actual blocker:
+      the configured X app only had an unhealthy Atlas callback, so X rejected
+      the loopback redirect before consent. The matching `agentforge` app now
+      also registers `http://127.0.0.1:8765/callback`, local Arcwell stores
+      that value as `X_REDIRECT_URI`, and `arcwell x oauth-reauthorize`
+      completed browser consent, callback capture, token exchange/write-back,
+      and endpoint-scope probe with sync run
+      `6101a58d-0162-4415-b345-57030a7d2943`. Remaining work: repair the
+      Atlas/Cloudflare callback so remote callback resilience is not a 502.
 - [x] Repair X portable export freshness without packaging secret-like local
       evidence. Portable export now sanitizes token-shaped fields/values before
       writing bundle rows, validation still rejects unsanitized bundles, and

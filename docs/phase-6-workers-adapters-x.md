@@ -12,6 +12,14 @@ Date: 2026-06-19
 - Added arXiv search adapter that turns Atom entries into source cards.
 - Added X OAuth 2.0 PKCE authorization URL generation.
 - Added X OAuth code exchange and refresh helpers that store returned tokens in local SQLite secrets.
+- Added X OAuth browser/local-callback reauthorization that resolves stored
+  client metadata, opens the browser, captures the loopback callback, exchanges
+  the code, stores tokens, and probes endpoint scopes.
+- Proved live browser reauthorization on 2026-06-27 after registering
+  `http://127.0.0.1:8765/callback` on the matching `agentforge` X app and
+  storing it locally as `X_REDIRECT_URI`; the run captured the callback,
+  rotated tokens, and passed endpoint probes with sync run
+  `6101a58d-0162-4415-b345-57030a7d2943`.
 - Added live X recent search using env or SQLite `X_BEARER_TOKEN`.
 - Added X recent-search cursoring through `x:recent-search:<query>`.
 - Added SQLite secret-value storage for local provider tokens.
@@ -26,9 +34,10 @@ arcwell wiki enqueue-arxiv "cat:cs.AI" --limit 10
 arcwell x enqueue-recent-search "from:openai" --max-results 25
 arcwell worker run-once --max-jobs 10
 
-arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,bookmark.read,follows.read,offline.access
-arcwell x oauth-exchange --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --code "$CODE" --code-verifier "$CODE_VERIFIER"
-arcwell x oauth-refresh --client-id "$X_CLIENT_ID"
+arcwell x oauth-reauthorize
+arcwell x oauth-url
+arcwell x oauth-exchange --code "$CODE" --code-verifier "$CODE_VERIFIER"
+arcwell x oauth-refresh
 arcwell x recent-search "from:openai" --max-results 25
 
 arcwell secrets set-value X_BEARER_TOKEN "$TOKEN" --scope x

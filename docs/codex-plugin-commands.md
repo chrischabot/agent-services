@@ -78,6 +78,12 @@ follow-up command used to verify hook events.
   `provider:<provider>:credential-probe`, and reports missing secrets,
   policy/cost denials, 401/403 revocation-style failures, 429/quota failures,
   provider-network failures, and response-shape mismatches separately.
+- `/x-oauth reauthorize` routes to `arcwell x oauth-reauthorize`: it resolves
+  stored X client metadata, starts a loopback callback, opens the browser to X,
+  verifies callback state, exchanges the authorization code, stores returned
+  bearer/refresh tokens, and runs the X endpoint-scope probe. Use this when
+  refresh material is missing or provider-revoked; normal short-lived bearer
+  expiry should self-refresh without this path.
 
 ## Install
 

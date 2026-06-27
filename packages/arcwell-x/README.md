@@ -15,11 +15,12 @@ arcwell x import-archive ./twitter-archive.zip --select tweets,bookmarks,likes -
 arcwell x export-portable --out ./arcwell-x-portable
 arcwell x validate-portable ./arcwell-x-portable
 arcwell x import-portable ./arcwell-x-portable
-arcwell x oauth-url --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --scopes tweet.read,users.read,bookmark.read,follows.read,offline.access
-arcwell x oauth-exchange --client-id "$X_CLIENT_ID" --redirect-uri http://127.0.0.1/callback --code "$CODE" --code-verifier "$CODE_VERIFIER"
-arcwell x oauth-refresh --client-id "$X_CLIENT_ID"
+arcwell x oauth-reauthorize
+arcwell x oauth-url
+arcwell x oauth-exchange --code "$CODE" --code-verifier "$CODE_VERIFIER"
+arcwell x oauth-refresh
 arcwell x oauth-probe --search-query "from:openai"
-arcwell x oauth-revoke --name X_BEARER_TOKEN --client-id "$X_CLIENT_ID" --token-type-hint access_token --delete-local
+arcwell x oauth-revoke --name X_BEARER_TOKEN --token-type-hint access_token --delete-local
 arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 1000 --max-recent-follows 100
 arcwell x recent-search "from:openai" --max-results 25
 arcwell x enqueue-recent-search "from:openai" --max-results 25
@@ -173,7 +174,15 @@ Boundary:
   problem; `secret_health` marks it `refreshable`. If a local policy file blocks
   that self-refresh path, `secret_health` reports `X_OAUTH_REFRESH_POLICY` so the
   system fault is visible without asking the user for token values.
-- OAuth authorization URL generation returns the PKCE `code_verifier`; keep it until the callback code has been exchanged.
+- `arcwell x oauth-reauthorize` owns the normal reauthorization loop: it resolves
+  stored `X_CLIENT_ID`/`TWITTER_OAUTH2_CLIENT_ID`, stored client secret aliases,
+  and `X_REDIRECT_URI` when available; starts a fixed loopback callback listener;
+  opens Chrome/system browser to X; verifies callback path and state; exchanges
+  the authorization code; stores returned tokens; then runs `oauth-probe`.
+  The live `agentforge` X app has `http://127.0.0.1:8765/callback` registered,
+  and the real local home stores that value as `X_REDIRECT_URI`, so normal
+  reauthorization does not require user-supplied token strings.
+- OAuth authorization URL generation returns the PKCE `code_verifier`; keep it until the callback code has been exchanged when using the manual URL/exchange path.
 - Live recent search uses X API v2 and stores `x:recent-search:<query>` cursor state from `meta.newest_id`.
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.
 - Full following import is available for diagnostics/backfill only; do not use it as the default monitor seed because it imports the whole social graph.
@@ -223,7 +232,7 @@ When `X_USER_CONTEXT_SOURCE_HOME` contains `X_BEARER_TOKEN` and
 `X_REFRESH_TOKEN`, the script copies that home into a temporary smoke home and
 unsets env bearer tokens for provider calls so an application-only bearer cannot
 mask the user-context proof. If the copied access token has expired, refresh the
-real OAuth token first with `arcwell x oauth-refresh --client-id "$X_CLIENT_ID"`,
+real OAuth token first with `arcwell x oauth-refresh`,
 then rerun the copied-home smoke. The refresh output records stored secret
 names and expiry metadata only, not token values.
 

@@ -3350,6 +3350,14 @@ pub struct XOAuthScopeProbeReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XOAuthReauthorizePreflightReport {
+    pub status: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCredentialProbeEndpoint {
     pub provider: String,
     pub secret_name: Option<String>,
@@ -16835,7 +16843,7 @@ impl Store {
         validate_key(client_id)?;
         validate_public_http_url(redirect_uri)?;
         let scopes = if scopes.is_empty() {
-            vec!["tweet.read".to_string(), "users.read".to_string()]
+            default_x_oauth_scopes()
         } else {
             scopes.to_vec()
         };
@@ -16860,6 +16868,76 @@ impl Store {
             code_verifier,
             code_challenge,
             scopes,
+        })
+    }
+
+    pub fn resolve_x_oauth_client_id(&self, explicit: Option<&str>) -> Result<String> {
+        if let Some(client_id) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+            validate_key(client_id)?;
+            return Ok(client_id.to_string());
+        }
+        self.resolve_x_client_id()?
+            .context("X_CLIENT_ID is required; store it with `arcwell secrets set-value X_CLIENT_ID ... --scope x` or pass --client-id")
+    }
+
+    pub fn resolve_x_oauth_redirect_uri(&self, explicit: Option<&str>) -> Result<String> {
+        let redirect_uri = explicit
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                std::env::var("X_REDIRECT_URI")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                self.get_usable_secret_value("X_REDIRECT_URI")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "http://127.0.0.1:8765/callback".to_string());
+        validate_public_http_url(&redirect_uri)?;
+        Ok(redirect_uri)
+    }
+
+    pub fn x_oauth_reauthorize_preflight(
+        &self,
+        redirect_uri: &str,
+        scopes: &[String],
+    ) -> Result<XOAuthReauthorizePreflightReport> {
+        validate_public_http_url(redirect_uri)?;
+        let scopes = if scopes.is_empty() {
+            default_x_oauth_scopes()
+        } else {
+            scopes.to_vec()
+        };
+        for scope in &scopes {
+            validate_key(scope)?;
+        }
+        self.policy_guard(PolicyRequest {
+            action: "provider.oauth".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("x_oauth".to_string()),
+            channel: None,
+            subject: None,
+            target: Some(excerpt("https://x.com/i/oauth2/authorize", 240)),
+            projected_usd: None,
+            metadata: json!({
+                "operation": "reauthorize_browser",
+                "redirect_uri": redirect_uri,
+                "scopes": scopes,
+            }),
+            untrusted_excerpt: None,
+        })?;
+        Ok(XOAuthReauthorizePreflightReport {
+            status: "ready".to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            scopes,
+            policy: "allowed".to_string(),
         })
     }
 
@@ -17691,10 +17769,16 @@ impl Store {
         let secret = explicit
             .map(ToOwned::to_owned)
             .or_else(|| std::env::var("X_CLIENT_SECRET").ok())
+            .or_else(|| std::env::var("TWITTER_OAUTH2_CLIENT_SECRET").ok())
             .or_else(|| {
                 self.get_usable_secret_value("X_CLIENT_SECRET")
                     .ok()
                     .flatten()
+                    .or_else(|| {
+                        self.get_usable_secret_value("TWITTER_OAUTH2_CLIENT_SECRET")
+                            .ok()
+                            .flatten()
+                    })
             });
         if let Some(secret) = &secret
             && (secret.is_empty() || secret.len() > 20_000)
@@ -22673,8 +22757,17 @@ impl Store {
             && !value.trim().is_empty()
         {
             Some(value.trim().to_string())
+        } else if let Ok(value) = std::env::var("TWITTER_OAUTH2_CLIENT_ID")
+            && !value.trim().is_empty()
+        {
+            Some(value.trim().to_string())
         } else {
             self.get_usable_secret_value("X_CLIENT_ID")?
+                .or_else(|| {
+                    self.get_usable_secret_value("TWITTER_OAUTH2_CLIENT_ID")
+                        .ok()
+                        .flatten()
+                })
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
@@ -58957,6 +59050,19 @@ fn provider_user_agent(provider: &str) -> String {
     }
 }
 
+fn default_x_oauth_scopes() -> Vec<String> {
+    [
+        "tweet.read",
+        "users.read",
+        "bookmark.read",
+        "follows.read",
+        "offline.access",
+    ]
+    .iter()
+    .map(|scope| (*scope).to_string())
+    .collect()
+}
+
 fn provider_credential_probe_specs(
     providers: &[String],
 ) -> Result<Vec<ProviderCredentialProbeSpec>> {
@@ -89905,6 +90011,109 @@ priority = 20
                 .contains("did not include an access_token or refresh_token")
         );
         assert!(store.list_secret_values().unwrap().is_empty());
+    }
+
+    #[test]
+    fn severe_x_oauth_reauthorize_preflight_blocks_policy_before_browser() {
+        // CLAIM: browser-assisted X reauthorization is policy-gated before
+        // opening a browser or reaching X.
+        // PRECONDITIONS: local policy denies provider.oauth for arcwell-x/x_oauth.
+        // POSTCONDITIONS: preflight fails with policy denial and no source or
+        // secret state is changed.
+        // ORACLE: error text, cost summary, and empty local secret inventory.
+        // SEVERITY: Severe because browser auth recovery is high-authority
+        // credential work and must not bypass Arcwell policy gates.
+        let store = test_store("x-oauth-reauthorize-policy-deny");
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "deny-x-oauth-reauthorize"
+effect = "deny"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "deny browser reauthorization fixture"
+priority = 50
+"#,
+        );
+
+        let error = store
+            .x_oauth_reauthorize_preflight(
+                "http://127.0.0.1:8765/callback",
+                &["tweet.read".to_string(), "offline.access".to_string()],
+            )
+            .expect_err("policy denial must happen before browser launch")
+            .to_string();
+        assert!(error.contains("policy denied provider.oauth"), "{error}");
+        assert_eq!(store.cost_summary().unwrap().2, 0);
+        assert!(store.list_secret_values().unwrap().is_empty());
+    }
+
+    #[test]
+    fn severe_x_oauth_reauthorize_resolves_stored_client_aliases_without_user_token_material() {
+        // CLAIM: reauthorization can use stored Arcwell client metadata and
+        // does not require the operator to know token/client strings.
+        // PRECONDITIONS: only legacy TWITTER_OAUTH2_* client aliases and a
+        // stored redirect URI are present.
+        // POSTCONDITIONS: client id, client secret, and redirect URI resolve;
+        // preflight returns the full default user-context scope set.
+        // ORACLE: resolved non-secret client id/redirect and preflight scopes.
+        // SEVERITY: Severe because requiring the user to retype client metadata
+        // recreates the credential-management failure mode this path fixes.
+        let store = test_store("x-oauth-reauthorize-aliases");
+        store
+            .set_secret_value("TWITTER_OAUTH2_CLIENT_ID", "stored-client-id", "x")
+            .unwrap();
+        store
+            .set_secret_value("TWITTER_OAUTH2_CLIENT_SECRET", "stored-client-secret", "x")
+            .unwrap();
+        store
+            .set_secret_value("X_REDIRECT_URI", "http://127.0.0.1:8765/callback", "x")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-x-oauth-reauthorize"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow browser reauthorization fixture"
+priority = 20
+"#,
+        );
+
+        assert_eq!(
+            store.resolve_x_oauth_client_id(None).unwrap(),
+            "stored-client-id"
+        );
+        assert_eq!(
+            store.resolve_x_oauth_redirect_uri(None).unwrap(),
+            "http://127.0.0.1:8765/callback"
+        );
+        assert_eq!(
+            store.resolve_x_client_secret(None).unwrap().as_deref(),
+            Some("stored-client-secret")
+        );
+        let report = store
+            .x_oauth_reauthorize_preflight("http://127.0.0.1:8765/callback", &[])
+            .unwrap();
+        assert_eq!(report.status, "ready");
+        for scope in [
+            "tweet.read",
+            "users.read",
+            "bookmark.read",
+            "follows.read",
+            "offline.access",
+        ] {
+            assert!(report.scopes.contains(&scope.to_string()), "{report:?}");
+        }
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("stored-client-secret"));
     }
 
     #[test]

@@ -709,6 +709,18 @@ PR, implementation note, or final report:
       real-home X manual live Cloudflare digest delivery passed for candidate
       `7cfec561-3827-417a-8e93-957ee84ff69a`; broader scheduled real external
       recurrence remains unproven.
+      2026-06-27 follow-up: digest/email rendering now fails the old
+      metadata/link-dump shape in severe tests, reader-facing digest bodies omit
+      source-card ids and review scores from the notification body, and email
+      sends auto-render Markdown/plain report text into inert HTML when no
+      explicit HTML body is supplied. A corrected editorial AI briefing was
+      written to `docs/reports/2026-06-27-ai-briefing-editorial.md`, ingested as
+      wiki page `ai-briefing-2026-06-27-editorial-0c43849e`, and delivered live
+      through Cloudflare Email with provider status 200. The three source
+      failures named in the prior bad briefing were repaired: Simon Willison
+      feed URL replaced with `/tils/feed.atom`, smol.ai RSS succeeded after the
+      bounded fetch cap was raised to 8 MB, and `llamaindex-ai` was superseded
+      by `run-llama`.
 - [ ] Add production monitoring for email ingress/outbound if email becomes a
       critical alert path.
 - [ ] Add Cloudflare callback/cron event capture after edge inbox is durable and

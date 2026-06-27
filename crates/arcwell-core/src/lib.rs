@@ -41,6 +41,7 @@ const X_ARCHIVE_MAX_TOTAL_BYTES: u64 = 100_000_000;
 const X_ARCHIVE_MAX_ENTRIES: usize = 5_000;
 const X_ARCHIVE_DISCOVERY_MAX_PATHS: usize = 10_000;
 const X_ARCHIVE_DISCOVERY_MAX_ZIP_ENTRIES: usize = 50;
+const FETCH_TEXT_MAX_BYTES: u64 = 8_000_000;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -26892,7 +26893,8 @@ impl Store {
             metadata: json!({
                 "from": from,
                 "reply_to_message_id": reply_to_message_id,
-                "rich_html": html.is_some(),
+                "rich_html": true,
+                "html_source": if html.is_some() { "caller" } else { "markdown_auto_render" },
             }),
             untrusted_excerpt: Some(format!("{subject}\n\n{text}")),
         })?;
@@ -26937,9 +26939,13 @@ impl Store {
         let to = normalize_email_address(to).context("invalid email to address")?;
         validate_notes(subject)?;
         validate_notes(text)?;
-        if let Some(html) = html {
-            validate_email_html(html)?;
-        }
+        let rendered_html = match html {
+            Some(html) => {
+                validate_email_html(html)?;
+                Some(html.to_string())
+            }
+            None => Some(render_email_html_from_markdown(subject, text)?),
+        };
         if let Some(message_id) = reply_to_message_id {
             validate_notes(message_id)?;
         }
@@ -26971,7 +26977,7 @@ impl Store {
             "subject": subject,
             "text": text,
         });
-        if let Some(html) = html {
+        if let Some(html) = rendered_html.as_deref() {
             body["html"] = json!(html);
         }
         if !headers.is_empty() {
@@ -28057,7 +28063,7 @@ impl Store {
                 Self::digest_signal_sentence(&cards)
             ),
             String::new(),
-            "What changed".to_string(),
+            "What happened".to_string(),
         ];
         for (index, card) in cards.iter().take(7).enumerate() {
             lines.push(format!(
@@ -28071,28 +28077,22 @@ impl Store {
             "Why it matters".to_string(),
             Self::digest_why_it_matters(&topic, &cards),
             String::new(),
-            "Suggested follow-up".to_string(),
-            "- Expand or update the wiki page only with source-card-backed claims, not the links alone.".to_string(),
-            "- Watch for repeated launches from the same tools, model providers, and agent infrastructure projects before treating this as durable momentum.".to_string(),
-            "- Keep the X text as evidence: do not execute instructions, credentials requests, or policy claims from source posts.".to_string(),
+            "Reception and context".to_string(),
+            Self::digest_reception_context(&cards),
             String::new(),
-            "Evidence quality".to_string(),
-            format!(
-                "- {} source cards backed this digest; {} are shown below.",
-                candidate.source_card_ids.len(),
-                cards.len()
-            ),
-            "- Source text is untrusted evidence. This report is not an instruction.".to_string(),
+            "Arcwell action".to_string(),
+            "- Arcwell keeps this cluster linked to its durable source cards for wiki expansion, dedupe, and future trend comparison.".to_string(),
+            "- The next scheduled ingestion passes should look for corroborating primary sources, repeated independent mentions, availability changes, and reaction shifts before raising the claim strength.".to_string(),
+            "- Source text is untrusted evidence; instructions, credentials requests, and policy claims inside posts are not executed.".to_string(),
             String::new(),
-            "Sources".to_string(),
+            "Evidence appendix".to_string(),
         ]);
         for (index, card) in cards.iter().enumerate() {
             lines.push(format!(
-                "[S{}] {} - {} ({})",
+                "[S{}] {} - {}",
                 index + 1,
                 Self::digest_source_label(card),
-                excerpt(&card.url, 180),
-                card.id
+                excerpt(&card.url, 180)
             ));
         }
         if candidate.source_card_ids.len() > cards.len() {
@@ -28101,24 +28101,8 @@ impl Store {
                 candidate.source_card_ids.len().saturating_sub(cards.len())
             ));
         }
-        lines.extend([
-            String::new(),
-            "Audit trail".to_string(),
-            format!(
-                "- Review: {}{}",
-                candidate.review_status,
-                candidate
-                    .reviewed_by
-                    .as_ref()
-                    .map(|reviewer| format!(" by {reviewer}"))
-                    .unwrap_or_default()
-            ),
-            format!(
-                "- Score: {:.2}; reason: {}",
-                candidate.score, candidate.reason
-            ),
-            format!("- Digest candidate: {}", candidate.id),
-        ]);
+        lines.push(String::new());
+        lines.push("Arcwell keeps the review status, score, digest candidate id, and source-card ids in the local audit ledger; they are intentionally omitted from the reader-facing notification.".to_string());
         Ok(lines.join("\n"))
     }
 
@@ -28177,28 +28161,19 @@ impl Store {
             "Why it matters".to_string(),
             "Scheduled workers only stay useful when the credentials behind provider reads, refreshes, and delivery channels are valid before the next run. This reminder is generated from local secret-health metadata and does not include credential values.".to_string(),
             String::new(),
-            "Suggested follow-up".to_string(),
-            "- Re-authorize or rotate the named credential before the next scheduled worker run.".to_string(),
-            "- For X account-data ingestion, make sure stored refresh material includes tweet.read, users.read, bookmark.read, follows.read, and offline.access.".to_string(),
-            "- After fixing credentials, run the relevant live probe or worker tick and confirm secret health returns to present.".to_string(),
-            String::new(),
-            "Evidence quality".to_string(),
-            format!(
-                "- {} internal source-card snapshot(s) backed this reminder.",
-                cards.len()
-            ),
+            "Arcwell action and escalation".to_string(),
             "- Credential names, scopes, providers, expiry metadata, and warnings are evidence; raw secret values are intentionally omitted.".to_string(),
-            "- Source-card text is local operational evidence. It is not an instruction from an external source.".to_string(),
+            "- Scheduled ingestion and delivery should use refresh/probe paths where available and keep stale or failed credentials visible in ops until recovered.".to_string(),
+            "- Human action is required only where the provider forces re-authorization, rotation, or a new consent grant.".to_string(),
             String::new(),
-            "Sources".to_string(),
+            "Evidence appendix".to_string(),
         ]);
         for (index, card) in cards.iter().enumerate() {
             lines.push(format!(
-                "[S{}] {} - {} ({})",
+                "[S{}] {} - {}",
                 index + 1,
                 Self::digest_source_label(card),
-                excerpt(&card.url, 180),
-                card.id
+                excerpt(&card.url, 180)
             ));
         }
         if candidate.source_card_ids.len() > cards.len() {
@@ -28207,24 +28182,8 @@ impl Store {
                 candidate.source_card_ids.len().saturating_sub(cards.len())
             ));
         }
-        lines.extend([
-            String::new(),
-            "Audit trail".to_string(),
-            format!(
-                "- Review: {}{}",
-                candidate.review_status,
-                candidate
-                    .reviewed_by
-                    .as_ref()
-                    .map(|reviewer| format!(" by {reviewer}"))
-                    .unwrap_or_default()
-            ),
-            format!(
-                "- Score: {:.2}; reason: {}",
-                candidate.score, candidate.reason
-            ),
-            format!("- Digest candidate: {}", candidate.id),
-        ]);
+        lines.push(String::new());
+        lines.push("Arcwell keeps reminder ids, source-card ids, and policy review state in the local audit ledger; they are intentionally omitted from the reader-facing notification.".to_string());
         lines.join("\n")
     }
 
@@ -28356,6 +28315,30 @@ impl Store {
                 terms.iter().any(|term| haystack.contains(term))
             })
             .count()
+    }
+
+    fn digest_reception_context(cards: &[SourceCard]) -> String {
+        let mut labels = Vec::new();
+        if Self::digest_signal_count(cards, &["reddit", "comment", "reaction", "reception"]) > 0 {
+            labels.push("community reaction");
+        }
+        if Self::digest_signal_count(cards, &["benchmark", "bench", "eval", "score"]) > 0 {
+            labels.push("benchmark scrutiny");
+        }
+        if Self::digest_signal_count(cards, &["security", "red team", "safety", "policy"]) > 0 {
+            labels.push("safety and policy framing");
+        }
+        if Self::digest_signal_count(cards, &["github", "release", "repo", "sdk", "mcp"]) > 0 {
+            labels.push("developer adoption signals");
+        }
+        if labels.is_empty() {
+            "The saved evidence is still mostly first-order source material. Arcwell should treat this as an early signal until follow-on sources show how developers, researchers, or customers react.".to_string()
+        } else {
+            format!(
+                "The saved evidence includes {}. That makes the story more useful than a single link, but the claim strength should still rise only when independent sources repeat or challenge it.",
+                labels.join(", ")
+            )
+        }
     }
 
     fn digest_why_it_matters(topic: &str, cards: &[SourceCard]) -> String {
@@ -42758,6 +42741,225 @@ fn validate_email_html(html: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn render_email_html_from_markdown(subject: &str, markdown: &str) -> Result<String> {
+    validate_notes(subject)?;
+    validate_notes(markdown)?;
+    let fragment = render_email_markdown_fragment(markdown);
+    let html = format!(
+        r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{}</title></head>
+<body style="margin:0;background:#f7f7f4;color:#202124;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.55;">
+  <div style="max-width:760px;margin:0 auto;padding:28px 22px 40px;">
+    <article style="background:#ffffff;border:1px solid #deded8;border-radius:6px;padding:24px 28px;">
+{}
+    </article>
+  </div>
+</body>
+</html>"#,
+        escape_html_attr(subject),
+        fragment
+    );
+    validate_email_html(&html)?;
+    Ok(html)
+}
+
+fn render_email_markdown_fragment(markdown: &str) -> String {
+    let mut html = String::new();
+    let mut paragraph = Vec::<String>::new();
+    let mut list_open = false;
+    let mut ordered_list_open = false;
+    let mut in_code = false;
+    let mut code = String::new();
+
+    for raw_line in markdown.lines() {
+        let line = raw_line.trim_end();
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            flush_email_paragraph(&mut html, &mut paragraph);
+            close_email_lists(&mut html, &mut list_open, &mut ordered_list_open);
+            if in_code {
+                html.push_str("<pre style=\"white-space:pre-wrap;background:#f4f4f1;border:1px solid #e4e4dd;border-radius:4px;padding:12px;overflow:auto;\"><code>");
+                html.push_str(&escape_html_fragment(&code));
+                html.push_str("</code></pre>\n");
+                code.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+            }
+            continue;
+        }
+        if in_code {
+            code.push_str(line);
+            code.push('\n');
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_email_paragraph(&mut html, &mut paragraph);
+            close_email_lists(&mut html, &mut list_open, &mut ordered_list_open);
+            continue;
+        }
+        if let Some((level, heading)) = email_markdown_heading(trimmed) {
+            flush_email_paragraph(&mut html, &mut paragraph);
+            close_email_lists(&mut html, &mut list_open, &mut ordered_list_open);
+            let tag = match level {
+                1 => "h1",
+                2 => "h2",
+                _ => "h3",
+            };
+            let style = match level {
+                1 => "font-size:26px;line-height:1.2;margin:0 0 18px;",
+                2 => "font-size:19px;line-height:1.3;margin:26px 0 10px;",
+                _ => "font-size:16px;line-height:1.35;margin:20px 0 8px;",
+            };
+            html.push_str(&format!(
+                "<{tag} style=\"{style}\">{}</{tag}>\n",
+                render_email_inline_markdown(heading)
+            ));
+            continue;
+        }
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            flush_email_paragraph(&mut html, &mut paragraph);
+            if ordered_list_open {
+                html.push_str("</ol>\n");
+                ordered_list_open = false;
+            }
+            if !list_open {
+                html.push_str("<ul style=\"margin:8px 0 16px 22px;padding:0;\">\n");
+                list_open = true;
+            }
+            html.push_str(&format!(
+                "<li style=\"margin:5px 0;\">{}</li>\n",
+                render_email_inline_markdown(item)
+            ));
+            continue;
+        }
+        if let Some(item) = email_ordered_list_item(trimmed) {
+            flush_email_paragraph(&mut html, &mut paragraph);
+            if list_open {
+                html.push_str("</ul>\n");
+                list_open = false;
+            }
+            if !ordered_list_open {
+                html.push_str("<ol style=\"margin:8px 0 16px 22px;padding:0;\">\n");
+                ordered_list_open = true;
+            }
+            html.push_str(&format!(
+                "<li style=\"margin:5px 0;\">{}</li>\n",
+                render_email_inline_markdown(item)
+            ));
+            continue;
+        }
+        close_email_lists(&mut html, &mut list_open, &mut ordered_list_open);
+        paragraph.push(trimmed.to_string());
+    }
+    if in_code {
+        html.push_str("<pre style=\"white-space:pre-wrap;background:#f4f4f1;border:1px solid #e4e4dd;border-radius:4px;padding:12px;overflow:auto;\"><code>");
+        html.push_str(&escape_html_fragment(&code));
+        html.push_str("</code></pre>\n");
+    }
+    flush_email_paragraph(&mut html, &mut paragraph);
+    close_email_lists(&mut html, &mut list_open, &mut ordered_list_open);
+    html
+}
+
+fn flush_email_paragraph(html: &mut String, paragraph: &mut Vec<String>) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let text = paragraph.join(" ");
+    html.push_str(&format!(
+        "<p style=\"margin:0 0 15px;\">{}</p>\n",
+        render_email_inline_markdown(&text)
+    ));
+    paragraph.clear();
+}
+
+fn close_email_lists(html: &mut String, list_open: &mut bool, ordered_list_open: &mut bool) {
+    if *list_open {
+        html.push_str("</ul>\n");
+        *list_open = false;
+    }
+    if *ordered_list_open {
+        html.push_str("</ol>\n");
+        *ordered_list_open = false;
+    }
+}
+
+fn email_markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if (1..=3).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+        Some((hashes, line[hashes + 1..].trim()))
+    } else {
+        None
+    }
+}
+
+fn email_ordered_list_item(line: &str) -> Option<&str> {
+    let (prefix, rest) = line.split_once(". ")?;
+    if !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+fn render_email_inline_markdown(input: &str) -> String {
+    let mut out = String::new();
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        if chars[idx] == '`'
+            && let Some(end) = chars[idx + 1..].iter().position(|ch| *ch == '`')
+        {
+            let code = chars[idx + 1..idx + 1 + end].iter().collect::<String>();
+            out.push_str("<code style=\"font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f4f4f1;border-radius:3px;padding:1px 4px;\">");
+            out.push_str(&escape_html_fragment(&code));
+            out.push_str("</code>");
+            idx += end + 2;
+            continue;
+        }
+        if chars[idx] == '['
+            && let Some(close_label_rel) = chars[idx + 1..].iter().position(|ch| *ch == ']')
+        {
+            let close_label = idx + 1 + close_label_rel;
+            if chars.get(close_label + 1) == Some(&'(')
+                && let Some(close_url_rel) =
+                    chars[close_label + 2..].iter().position(|ch| *ch == ')')
+            {
+                let close_url = close_label + 2 + close_url_rel;
+                let label = chars[idx + 1..close_label].iter().collect::<String>();
+                let url = chars[close_label + 2..close_url].iter().collect::<String>();
+                if email_link_url_allowed(&url) {
+                    out.push_str(&format!(
+                        "<a href=\"{}\" style=\"color:#174ea6;text-decoration:underline;\">{}</a>",
+                        escape_html_attr(&url),
+                        escape_html_fragment(&label)
+                    ));
+                    idx = close_url + 1;
+                    continue;
+                }
+            }
+        }
+        out.push_str(&escape_html_fragment(&chars[idx].to_string()));
+        idx += 1;
+    }
+    out
+}
+
+fn email_link_url_allowed(url: &str) -> bool {
+    Url::parse(url)
+        .map(|parsed| matches!(parsed.scheme(), "http" | "https"))
+        .unwrap_or(false)
+}
+
+fn escape_html_attr(text: &str) -> String {
+    escape_html_fragment(text).replace('"', "&quot;")
 }
 
 fn email_request_error_summary(error: &reqwest::Error) -> String {
@@ -59037,16 +59239,16 @@ fn fetch_text_with_user_agent(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        && length > 2_000_000
+        && length > FETCH_TEXT_MAX_BYTES
     {
         bail!("fetched body is too large");
     }
     let mut bytes = Vec::new();
-    let mut limited = response.take(2_000_001);
+    let mut limited = response.take(FETCH_TEXT_MAX_BYTES + 1);
     limited
         .read_to_end(&mut bytes)
         .with_context(|| format!("reading fetch response: {url}"))?;
-    if bytes.len() > 2_000_000 {
+    if bytes.len() > FETCH_TEXT_MAX_BYTES as usize {
         bail!("fetched body is too large");
     }
     String::from_utf8(bytes).with_context(|| format!("fetch returned invalid text: {url}"))
@@ -81822,6 +82024,60 @@ ARXIV=( "cat:cs.AI" )
     }
 
     #[test]
+    fn severe_email_send_auto_renders_markdown_to_safe_html() {
+        // CLAIM: Markdown/plain report emails are sent as human-rendered HTML
+        // by default, while hostile source text is escaped into inert content.
+        // ORACLE: the recorded provider payload contains an html field with
+        // heading/list/link rendering, no raw Markdown heading, and no active
+        // script tag.
+        // SEVERITY: Severe because raw Markdown in email made reports look
+        // delivered while leaving the reader with unreadable markup.
+        let store = test_store("email-send-markdown-html");
+        store
+            .authorize_channel_subject("email", "email:friend@example.com", false, false, true)
+            .unwrap();
+        let (api, requests) = mock_recording_sequence_server(vec![(
+            "200 OK",
+            "",
+            r#"{"success":true,"result":{"id":"msg_html_123"}}"#,
+            "application/json",
+        )]);
+        let markdown = "# AI briefing\n\n## What happened\n\n- OpenAI launched [Sol](https://example.com/sol).\n- <script>alert(1)</script> stayed inert.";
+        let report = store
+            .send_cloudflare_email(
+                "abcd1234",
+                "SECRET_CF_TOKEN_SHOULD_NOT_PERSIST",
+                "agent@example.com",
+                "friend@example.com",
+                "AI briefing",
+                markdown,
+                None,
+                None,
+                Some(&api),
+            )
+            .unwrap();
+        assert!(report.ok);
+        let request = requests.lock().unwrap().join("\n");
+        let payload: Value =
+            serde_json::from_str(request.split("\r\n\r\n").last().unwrap_or_default()).unwrap();
+        let html = payload.get("html").and_then(Value::as_str).unwrap();
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+        assert!(html.contains("<h1"), "{html}");
+        assert!(html.contains("<h2"), "{html}");
+        assert!(html.contains("<li"), "{html}");
+        assert!(html.contains("href=\"https://example.com/sol\""), "{html}");
+        assert!(
+            !html.starts_with("# AI briefing"),
+            "html must not be raw Markdown: {html}"
+        );
+        assert_eq!(report.message.body, markdown);
+    }
+
+    #[test]
     fn librarian_and_digest_pipeline_create_auditable_outputs() {
         let store = test_store("librarian-digest");
         let card = store
@@ -82354,7 +82610,11 @@ priority = 10
         assert_eq!(telegram.delivery.destination, "telegram:chat:123");
         assert_eq!(telegram.message.status, "sent");
         assert!(telegram.message.body.contains(&digest.topic));
-        assert!(telegram.message.body.contains(&card.id));
+        assert!(
+            !telegram.message.body.contains(&card.id),
+            "reader-facing Telegram digest must not expose internal source-card ids: {}",
+            telegram.message.body
+        );
         assert!(telegram.message.body.contains("untrusted evidence"));
         let attempts = store.list_channel_delivery_attempts(None).unwrap();
         assert_eq!(attempts.len(), 1);
@@ -82624,7 +82884,7 @@ priority = 10
         assert_eq!(email.message.status, "sent");
         assert!(email.message.body.contains(&digest.topic));
         assert!(email.message.body.contains("Bottom line"));
-        assert!(email.message.body.contains("What changed"));
+        assert!(email.message.body.contains("What happened"));
         assert!(email.message.body.contains("Why it matters"));
         assert!(
             email
@@ -82632,7 +82892,11 @@ priority = 10
                 .body
                 .contains("Approved email digest item exists.")
         );
-        assert!(email.message.body.contains(&card.id));
+        assert!(
+            !email.message.body.contains(&card.id),
+            "reader-facing digest body must not expose internal source-card ids: {}",
+            email.message.body
+        );
         assert!(email.message.body.contains("untrusted evidence"));
         assert!(
             !email
@@ -82722,8 +82986,8 @@ priority = 10
         // CLAIM: A delivered digest is human-usable without clicking every X
         // link; source URLs are citations, not the product.
         // ORACLE: the rendered body has bottom-line/report sections, includes
-        // source-card substance and uncertainty/trust language, keeps internal
-        // review/score metadata in an audit trail, and does not begin with the
+        // source-card substance and trust language, keeps internal ids out of
+        // the notification body, and does not begin with the
         // old "candidate metadata plus Sources" dump.
         // SEVERITY: Severe because otherwise live delivery can appear
         // successful while sending the user unusable operational metadata.
@@ -82800,12 +83064,11 @@ priority = 10
         );
         for required in [
             "Bottom line",
-            "What changed",
+            "What happened",
             "Why it matters",
-            "Suggested follow-up",
-            "Evidence quality",
-            "Sources",
-            "Audit trail",
+            "Reception and context",
+            "Arcwell action",
+            "Evidence appendix",
             "Gemma 4 launched on Cerebras",
             "Xcode agentic LLM support",
             "new open-source computer-use agent",
@@ -82821,12 +83084,19 @@ priority = 10
             "must not render the old metadata-first dump:\n{body}"
         );
         assert!(
-            body.find("Audit trail").unwrap() > body.find("Sources").unwrap(),
-            "internal review metadata belongs after the report and source appendix:\n{body}"
+            !body.contains(&digest.id) && source_ids.iter().all(|id| !body.contains(id)),
+            "internal digest/source-card ids must stay in the local ledger, not the notification:\n{body}"
         );
         assert!(
-            body.find("https://x.com").unwrap() > body.find("Sources").unwrap(),
+            body.find("https://x.com").unwrap() > body.find("Evidence appendix").unwrap(),
             "source links should appear in the source appendix, not replace the report:\n{body}"
+        );
+        assert!(
+            !body.contains("Suggested follow-up")
+                && !body.contains("Recommended follow-up")
+                && !body.contains("Bookmark completeness proof")
+                && !body.contains("Failures and incompleteness"),
+            "reader-facing digest must not assign ops work back to the user:\n{body}"
         );
     }
 
@@ -83118,8 +83388,8 @@ priority = 10
             "Bottom line",
             "What needs attention",
             "Why it matters",
-            "Suggested follow-up",
-            "Evidence quality",
+            "Arcwell action and escalation",
+            "Evidence appendix",
             "X_BEARER_TOKEN",
             "X_REFRESH_TOKEN",
             "X_CLIENT_ID",

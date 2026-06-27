@@ -172,6 +172,24 @@ PR, implementation note, or final report:
       least three source families, durable events/clusters/decisions,
       source-backed wiki writing, digest routing, external delivery ledger,
       ops visibility, and wall-clock recurrence without manual intervention.
+      Current real-home 2026-06-27 slice: warm four-times-daily watch-source
+      cadence is configured locally for X bookmarks, source adapters, backlog
+      clustering, model clustering, model writing, and entity resolution;
+      Codex automations run six-hour catch-up scans and a 7am daily editorial
+      briefing; high-confidence breaking candidates route through the Arcwell
+      digest-alert schedule `Breaking AI knowledge alerts`. The worker now
+      filters due sources before applying the batch cap, advances source health
+      using watch-source cadence, classifies entity-resolution model jobs under
+      `arcwell-knowledge/openai`, and byte-truncates knowledge-event titles and
+      summaries so long Unicode RSS/blog evidence cannot dead-letter backlog
+      clustering. Live real-home proof completed OpenAI entity-resolution jobs,
+      retried and completed the two formerly dead-lettered backlog jobs,
+      clustered 500 source cards into 38 durable clusters, and auto-enqueued
+      38 editorial follow-ups. Remaining before this checkbox can close:
+      replace Codex-side 7am/catch-up automations with first-class native
+      Arcwell fixed-time issue scheduling, record multi-day sleep/shutdown/
+      restart catch-up proof, broaden live X quota/tier coverage, and prove
+      recurring live external delivery over time without manual drains.
       First substrate slice now exists in `arcwell-core`: durable
       `knowledge_events`, `knowledge_event_sources`, `knowledge_clusters`,
       `knowledge_editorial_decisions`, and `knowledge_reports`, with source-card

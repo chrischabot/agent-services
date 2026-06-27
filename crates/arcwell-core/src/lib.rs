@@ -10259,8 +10259,11 @@ impl Store {
         } else {
             source_family.trim().to_string()
         };
+        let fetch_safe_url = canonical_source_url(&card.url)
+            .ok()
+            .filter(|url| validate_fetch_url(url).is_ok());
         let source = self.upsert_research_source(ResearchSourceInput {
-            url: Some(card.url.clone()),
+            url: fetch_safe_url,
             local_ref: Some(format!("source-card:{}", card.id)),
             title: card.title.clone(),
             source_family,
@@ -14565,7 +14568,11 @@ impl Store {
             last_item_date: None,
             cursor_key: None,
             cursor_value: None,
-            next_run_at: Some(&now_plus_seconds(3600)),
+            next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                "knowledge_entity_resolution",
+                &source.locator,
+                6 * 60 * 60,
+            ))),
         })?;
         Ok(None)
     }
@@ -15850,6 +15857,7 @@ impl Store {
         &self,
         max_sources: usize,
     ) -> Result<WatchSourcePollEnqueueReport> {
+        let max_sources = max_sources.clamp(1, 100);
         let mut report = WatchSourcePollEnqueueReport {
             inspected: 0,
             enqueued: 0,
@@ -15857,14 +15865,8 @@ impl Store {
             jobs: Vec::new(),
             errors: Vec::new(),
         };
-        for source in self
-            .list_watch_sources()?
-            .into_iter()
-            .take(max_sources.clamp(1, 100))
-        {
-            report.inspected += 1;
+        for source in self.list_watch_sources()? {
             if source.status != "active" {
-                report.skipped += 1;
                 continue;
             }
             let source_key = watch_source_health_key(&source)?;
@@ -15872,9 +15874,12 @@ impl Store {
                 && let Some(next_run_at) = health.next_run_at.as_deref()
                 && !timestamp_is_due(next_run_at)
             {
-                report.skipped += 1;
                 continue;
             }
+            if report.inspected >= max_sources {
+                break;
+            }
+            report.inspected += 1;
             let job = match source.source_kind.as_str() {
                 "rss" => self.enqueue_rss_job(&source.locator),
                 "blog" => self.enqueue_wiki_job("ingest_url", json!({ "url": source.locator })),
@@ -21426,8 +21431,20 @@ impl Store {
         let mut entities_by_id = BTreeMap::<String, KnowledgeEntity>::new();
         let mut relations_by_id = BTreeMap::<String, KnowledgeRelation>::new();
         for card in &source_cards {
-            let event =
-                self.upsert_knowledge_event(knowledge_event_input_from_source_card(card)?)?;
+            let event_input = knowledge_event_input_from_source_card(card).with_context(|| {
+                format!(
+                    "building knowledge event input from source card {} ({})",
+                    card.id, card.title
+                )
+            })?;
+            let event = self.upsert_knowledge_event(event_input).with_context(|| {
+                format!(
+                    "upserting knowledge event from source card {} title_len={} summary_len={}",
+                    card.id,
+                    card.title.len(),
+                    card.summary.len()
+                )
+            })?;
             let event_source = self.add_knowledge_event_source(KnowledgeEventSourceInput {
                 event_id: event.id.clone(),
                 source_card_id: card.id.clone(),
@@ -22688,7 +22705,9 @@ impl Store {
                 .and_then(|item| item.created_at.as_deref()),
             cursor_key: Some(cursor_key),
             cursor_value: effective_cursor.as_deref(),
-            next_run_at: Some(&now_plus_seconds(900)),
+            next_run_at: Some(&now_plus_seconds(
+                self.watch_source_next_run_seconds("x_handle", handle, 900),
+            )),
         })?;
 
         Ok(XMonitorSourceReport {
@@ -22890,6 +22909,20 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    fn watch_source_next_run_seconds(
+        &self,
+        source_kind: &str,
+        locator: &str,
+        fallback_seconds: i64,
+    ) -> i64 {
+        let id = watch_source_id(source_kind, locator);
+        self.read_watch_source(&id)
+            .ok()
+            .flatten()
+            .and_then(|source| watch_source_cadence_seconds(&source.cadence))
+            .unwrap_or(fallback_seconds)
     }
 
     fn record_source_failure(
@@ -34367,8 +34400,42 @@ impl Store {
                     self.complete_wiki_job(&job.id, result)
                 }
             }
-            Err(error) => self.fail_wiki_job(&job.id, &error.to_string()),
+            Err(error) => {
+                let error = error.to_string();
+                let failed = self.fail_wiki_job(&job.id, &error)?;
+                if job.kind == "knowledge_entity_resolution_model" {
+                    let _ = self.record_knowledge_entity_resolution_job_failure_health(
+                        &job.input_json,
+                        &error,
+                    );
+                }
+                Ok(failed)
+            }
         }
+    }
+
+    fn record_knowledge_entity_resolution_job_failure_health(
+        &self,
+        input: &Value,
+        error: &str,
+    ) -> Result<()> {
+        let source_key = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("watch_source_key"))
+            .and_then(Value::as_str)
+            .unwrap_or("knowledge:entity-resolution:entities");
+        let locator = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("locator"))
+            .and_then(Value::as_str)
+            .unwrap_or("entities");
+        self.record_source_failure(
+            source_key,
+            "knowledge_entity_resolution",
+            "knowledge_entity_resolution",
+            locator,
+            error,
+        )
     }
 
     fn guard_wiki_job_provider_policy(&self, job: &WikiJob) -> Result<()> {
@@ -35400,7 +35467,9 @@ impl Store {
             last_item_date: last_item_date.as_deref(),
             cursor_key: Some(&cursor_key),
             cursor_value: Some(&cursor_value),
-            next_run_at: Some(&now_plus_seconds(3600)),
+            next_run_at: Some(&now_plus_seconds(
+                self.watch_source_next_run_seconds("rss", feed_url, 3600),
+            )),
         })?;
         Ok(json!({
             "source_cards": card_ids,
@@ -35482,7 +35551,11 @@ impl Store {
                 last_item_date: last_item_date.as_deref(),
                 cursor_key: Some(&cursor_key),
                 cursor_value: Some(&cursor_value),
-                next_run_at: Some(&now_plus_seconds(3600)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "github_repo",
+                    &format!("{owner}/{repo}:{mode}"),
+                    3600,
+                ))),
             })?;
             let card_ids: Vec<String> = card_ids.into_iter().collect();
             Ok(
@@ -35552,7 +35625,11 @@ impl Store {
                 last_item_date: last_item_date.as_deref(),
                 cursor_key: Some(&cursor_key),
                 cursor_value: Some(&cursor_value),
-                next_run_at: Some(&now_plus_seconds(3600)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "github_owner",
+                    owner,
+                    3600,
+                ))),
             })?;
             let card_ids: Vec<String> = card_ids.into_iter().collect();
             Ok(
@@ -35639,7 +35716,11 @@ impl Store {
                 last_item_date: last_item_date.as_deref(),
                 cursor_key: Some(&cursor_key),
                 cursor_value: Some(&cursor_value),
-                next_run_at: Some(&now_plus_seconds(3600)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "arxiv_query",
+                    query,
+                    3600,
+                ))),
             })?;
             let card_ids: Vec<String> = card_ids.into_iter().collect();
             Ok(
@@ -35742,7 +35823,11 @@ impl Store {
                 last_item_date: last_item_date.as_deref(),
                 cursor_key: Some(&source_key),
                 cursor_value: Some(&cursor_value),
-                next_run_at: Some(&now_plus_seconds(1800)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "hackernews",
+                    &feed,
+                    1800,
+                ))),
             })?;
             let card_ids: Vec<String> = card_ids.into_iter().collect();
             Ok(json!({
@@ -36093,7 +36178,11 @@ impl Store {
             last_item_date: last_item_date.as_deref(),
             cursor_key: Some(source_key),
             cursor_value: Some(&cursor_value),
-            next_run_at: Some(&now_plus_seconds(1800)),
+            next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                "reddit",
+                &locator.source_detail(),
+                1800,
+            ))),
         })?;
         let card_ids: Vec<String> = card_ids.into_iter().collect();
         Ok(json!({
@@ -36310,7 +36399,11 @@ impl Store {
                 last_item_date: None,
                 cursor_key: None,
                 cursor_value: None,
-                next_run_at: Some(&now_plus_seconds(3600)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "knowledge_model_write",
+                    locator,
+                    6 * 60 * 60,
+                ))),
             })?;
         }
         Ok(json!({
@@ -36363,44 +36456,51 @@ impl Store {
         let invocation = match invocation_result {
             Ok(invocation) => invocation,
             Err(error) => {
-                if let Some(lineage) = input.get("lineage")
-                    && let Some(source_key) =
-                        lineage.get("watch_source_key").and_then(Value::as_str)
-                {
-                    let locator = lineage
-                        .get("locator")
-                        .and_then(Value::as_str)
-                        .unwrap_or("entities");
-                    let _ = self.record_source_failure(
-                        source_key,
-                        "knowledge_entity_resolution",
-                        "knowledge_entity_resolution",
-                        locator,
-                        &error.to_string(),
-                    );
-                }
+                let source_key = input
+                    .get("lineage")
+                    .and_then(|lineage| lineage.get("watch_source_key"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("knowledge:entity-resolution:entities");
+                let locator = input
+                    .get("lineage")
+                    .and_then(|lineage| lineage.get("locator"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("entities");
+                let _ = self.record_source_failure(
+                    source_key,
+                    "knowledge_entity_resolution",
+                    "knowledge_entity_resolution",
+                    locator,
+                    &error.to_string(),
+                );
                 bail!("{}", redact_secret_like_text(&error.to_string()));
             }
         };
-        if let Some(lineage) = input.get("lineage")
-            && let Some(source_key) = lineage.get("watch_source_key").and_then(Value::as_str)
-        {
-            let locator = lineage
-                .get("locator")
-                .and_then(Value::as_str)
-                .unwrap_or("entities");
-            self.record_source_success(SourceHealthUpdate {
-                key: source_key,
-                provider: "arcwell",
-                source_kind: "knowledge_entity_resolution",
+        let source_key = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("watch_source_key"))
+            .and_then(Value::as_str)
+            .unwrap_or("knowledge:entity-resolution:entities");
+        let locator = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("locator"))
+            .and_then(Value::as_str)
+            .unwrap_or("entities");
+        self.record_source_success(SourceHealthUpdate {
+            key: source_key,
+            provider: "arcwell",
+            source_kind: "knowledge_entity_resolution",
+            locator,
+            last_item_id: Some(invocation.resolution.id.as_str()),
+            last_item_date: None,
+            cursor_key: None,
+            cursor_value: None,
+            next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                "knowledge_entity_resolution",
                 locator,
-                last_item_id: Some(invocation.resolution.id.as_str()),
-                last_item_date: None,
-                cursor_key: None,
-                cursor_value: None,
-                next_run_at: Some(&now_plus_seconds(3600)),
-            })?;
-        }
+                6 * 60 * 60,
+            ))),
+        })?;
         Ok(json!({
             "status": "completed",
             "resolution_id": invocation.resolution.id,
@@ -36454,7 +36554,11 @@ impl Store {
             last_item_date: None,
             cursor_key: None,
             cursor_value: None,
-            next_run_at: Some(&now_plus_seconds(3600)),
+            next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                "knowledge_backlog",
+                "source-cards",
+                6 * 60 * 60,
+            ))),
         })?;
         Ok(json!({
             "status": "completed",
@@ -36533,7 +36637,11 @@ impl Store {
                 last_item_date: None,
                 cursor_key: None,
                 cursor_value: None,
-                next_run_at: Some(&now_plus_seconds(3600)),
+                next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                    "knowledge_model_clusters",
+                    &query,
+                    6 * 60 * 60,
+                ))),
             })?;
             return Ok(json!({
                 "status": "skipped_no_source_cards",
@@ -36574,7 +36682,11 @@ impl Store {
             last_item_date,
             cursor_key: None,
             cursor_value: None,
-            next_run_at: Some(&now_plus_seconds(3600)),
+            next_run_at: Some(&now_plus_seconds(self.watch_source_next_run_seconds(
+                "knowledge_model_clusters",
+                &query,
+                6 * 60 * 60,
+            ))),
         })?;
         Ok(json!({
             "status": "completed",
@@ -38433,14 +38545,14 @@ fn semantic_tokens(value: &str) -> BTreeSet<String> {
 fn normalize_knowledge_event_input(input: KnowledgeEventInput) -> Result<KnowledgeEventInput> {
     let normalized = KnowledgeEventInput {
         event_type: input.event_type.trim().to_string(),
-        title: input.title.trim().to_string(),
+        title: excerpt_bytes(input.title.trim(), 500),
         canonical_key: input.canonical_key.trim().to_string(),
         primary_entity_key: input
             .primary_entity_key
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         event_time: input.event_time.map(|value| value.trim().to_string()),
-        summary: input.summary.trim().to_string(),
+        summary: excerpt_bytes(input.summary.trim(), 10_000),
         confidence: input.confidence,
         metadata: input.metadata,
     };
@@ -39128,11 +39240,11 @@ fn knowledge_event_input_from_source_card(card: &SourceCard) -> Result<Knowledge
     let canonical_key = knowledge_canonical_key_for_card(card);
     Ok(KnowledgeEventInput {
         event_type,
-        title: card.title.clone(),
+        title: excerpt(&card.title, 500),
         canonical_key,
         primary_entity_key: knowledge_primary_entity_key_for_card(card),
         event_time: knowledge_event_time_for_source_card(card)?,
-        summary: card.summary.clone(),
+        summary: excerpt(&card.summary, 10_000),
         confidence: knowledge_source_confidence_for_card(card),
         metadata: json!({
             "source_card_id": card.id,
@@ -42234,6 +42346,29 @@ fn wiki_job_policy_context(
                 .get("cluster_id")
                 .and_then(Value::as_str)
                 .map(|value| excerpt(value, 240)),
+            None,
+        ),
+        "knowledge_entity_resolution_model" => (
+            "arcwell-knowledge",
+            input
+                .get("model_provider")
+                .and_then(Value::as_str)
+                .and_then(|value| match value {
+                    "openai" => Some("openai"),
+                    "mock" => Some("mock"),
+                    _ => None,
+                }),
+            Some(format!(
+                "{} / {}",
+                input
+                    .get("left_entity_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                input
+                    .get("right_entity_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            )),
             None,
         ),
         "knowledge_cluster_backlog" => (
@@ -55507,6 +55642,15 @@ fn validate_watch_source_cadence(cadence: &str) -> Result<()> {
     }
 }
 
+fn watch_source_cadence_seconds(cadence: &str) -> Option<i64> {
+    match cadence {
+        "hot" => Some(60 * 60),
+        "warm" => Some(6 * 60 * 60),
+        "cold" => Some(24 * 60 * 60),
+        _ => None,
+    }
+}
+
 fn validate_watch_source_status(status: &str) -> Result<()> {
     match status {
         "active" | "paused" | "error" => Ok(()),
@@ -62588,6 +62732,22 @@ fn excerpt(content: &str, max_chars: usize) -> String {
     cleaned.chars().take(max_chars).collect()
 }
 
+fn excerpt_bytes(content: &str, max_bytes: usize) -> String {
+    let cleaned = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.len() <= max_bytes {
+        return cleaned;
+    }
+    let mut end = 0;
+    for (index, ch) in cleaned.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    cleaned[..end].to_string()
+}
+
 fn is_generated_wiki_page(title: &str) -> bool {
     is_generated_title(title)
 }
@@ -65650,10 +65810,10 @@ mod tests {
             .expect("backlog cluster");
 
         let second = store.run_worker_once(1).unwrap();
-        let second_watch = second.watch_poll.expect("second watch poll");
-        assert_eq!(second_watch.inspected, 1);
-        assert_eq!(second_watch.enqueued, 0);
-        assert_eq!(second_watch.skipped, 1);
+        assert!(
+            second.watch_poll.is_none(),
+            "future next_run_at should keep the backlog source out of the due watch batch"
+        );
         let editorial = second
             .knowledge_cluster_editorial_decision
             .expect("knowledge editorial enqueue report");
@@ -68873,6 +69033,28 @@ reason = "cluster proposals disabled"
                 metadata: json!({}),
             })
             .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-mock-entity-resolution-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+provider = "mock"
+source = "knowledge_entity_resolution_model"
+reason = "allow mock entity resolution worker enqueue in severe recurrence test"
+
+[[rules]]
+id = "allow-mock-entity-resolution-network"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-knowledge"
+provider = "mock"
+source = "knowledge_entity_resolution"
+reason = "allow mock entity resolution provider in severe recurrence test"
+"#,
+        );
 
         let source = store
             .schedule_knowledge_entity_resolution("mock", None, None, None, 10, "warm", "active")
@@ -68881,7 +69063,7 @@ reason = "cluster proposals disabled"
         assert_eq!(source.locator, "entities");
 
         let first = store.run_worker_once(10).unwrap();
-        assert_eq!(first.completed, 1);
+        assert_eq!(first.completed, 1, "{first:?}");
         assert_eq!(
             first.watch_poll.as_ref().map(|report| report.enqueued),
             Some(1)
@@ -69033,7 +69215,9 @@ reason = "scheduled entity resolution provider disabled"
         let health = store
             .get_source_health("knowledge:entity-resolution:entities")
             .unwrap()
-            .expect("policy denial should be visible in source health");
+            .unwrap_or_else(|| {
+                panic!("policy denial should be visible in source health: {report:?}")
+            });
         assert_ne!(health.status, "healthy");
         assert!(
             health
@@ -71967,6 +72151,114 @@ reason = "RSS enqueue disabled during policy test"
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].action, "worker.enqueue");
         assert_eq!(decisions[0].effect, "deny");
+    }
+
+    #[test]
+    fn severe_entity_resolution_model_worker_enqueue_uses_knowledge_policy_context() {
+        // CLAIM: Entity-resolution model jobs use the knowledge package/provider
+        // policy context, not the generic wiki fallback.
+        // ORACLE: A policy that only allows arcwell-knowledge/openai entity
+        // resolution permits enqueue and records that exact context.
+        // SEVERITY: Severe because scheduled semantic resolution otherwise
+        // silently stalls behind a misleading "no matching policy rule" error.
+        let store = test_store("entity-resolution-worker-policy-context");
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-openai-entity-resolution-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+provider = "openai"
+source = "knowledge_entity_resolution_model"
+reason = "allow OpenAI entity-resolution enqueue only when context is precise"
+
+[[rules]]
+id = "allow-test-source-card-fixtures"
+effect = "allow"
+action = "source.write"
+reason = "allow source-card fixtures for policy-context test"
+"#,
+        );
+        let left_card = store
+            .add_source_card(SourceCardInput {
+                title: "Policy Context Left evidence".to_string(),
+                url: "https://example.com/policy-context-left".to_string(),
+                source_type: "blog".to_string(),
+                provider: "test".to_string(),
+                summary: "Evidence for the left policy-context entity.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: None,
+                metadata: json!({}),
+            })
+            .unwrap();
+        let right_card = store
+            .add_source_card(SourceCardInput {
+                title: "Policy Context Right evidence".to_string(),
+                url: "https://example.com/policy-context-right".to_string(),
+                source_type: "blog".to_string(),
+                provider: "test".to_string(),
+                summary: "Evidence for the right policy-context entity.".to_string(),
+                claims: Vec::new(),
+                retrieved_at: None,
+                metadata: json!({}),
+            })
+            .unwrap();
+        let left = store
+            .upsert_knowledge_entity(KnowledgeEntityInput {
+                entity_type: "company".to_string(),
+                name: "Policy Context Left".to_string(),
+                canonical_key: "company:policy-context-left".to_string(),
+                aliases: vec!["Policy Context Left".to_string()],
+                homepage_url: None,
+                source_card_ids: vec![left_card.id],
+                wiki_page_id: None,
+                confidence: 0.9,
+                metadata: json!({}),
+            })
+            .unwrap();
+        let right = store
+            .upsert_knowledge_entity(KnowledgeEntityInput {
+                entity_type: "company".to_string(),
+                name: "Policy Context Right".to_string(),
+                canonical_key: "company:policy-context-right".to_string(),
+                aliases: vec!["Policy Context Right".to_string()],
+                homepage_url: None,
+                source_card_ids: vec![right_card.id],
+                wiki_page_id: None,
+                confidence: 0.9,
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let job = store
+            .enqueue_knowledge_entity_resolution_model_job(
+                &left.id,
+                &right.id,
+                "openai",
+                Some("gpt-4.1-mini"),
+                Some("https://api.openai.com/v1/responses"),
+                Some(30),
+            )
+            .unwrap();
+        assert_eq!(job.kind, "knowledge_entity_resolution_model");
+
+        let decisions = store.list_policy_decisions(10).unwrap();
+        let decision = decisions
+            .iter()
+            .find(|decision| decision.action == "worker.enqueue")
+            .expect("worker enqueue policy decision should be recorded");
+        assert_eq!(decision.effect, "allow");
+        assert_eq!(decision.package.as_deref(), Some("arcwell-knowledge"));
+        assert_eq!(decision.provider.as_deref(), Some("openai"));
+        assert_eq!(
+            decision.source.as_deref(),
+            Some("knowledge_entity_resolution_model")
+        );
+        let target = decision.target.as_deref().unwrap_or_default();
+        assert!(target.contains(&left.id), "{target}");
+        assert!(target.contains(&right.id), "{target}");
     }
 
     #[test]
@@ -85102,7 +85394,9 @@ priority = 10
 
     #[test]
     fn severe_scheduled_watch_source_enqueue_respects_next_run_backoff() {
-        // CLAIM: scheduled polling hooks enqueue due active sources and skip sources whose source-health backoff is still future-dated.
+        // CLAIM: scheduled polling hooks enqueue due active sources without
+        // letting future-dated source-health backoff rows consume the bounded
+        // due-source batch.
         // PRECONDITIONS: Two RSS watch sources exist; one has future next_run_at from prior source health.
         // POSTCONDITIONS: Only the due source gets a wiki job.
         // ORACLE: enqueue report and durable wiki_jobs list.
@@ -85142,16 +85436,136 @@ priority = 10
             })
             .unwrap();
 
-        let report = store.enqueue_due_watch_source_jobs(10).unwrap();
-        assert_eq!(report.inspected, 2);
+        let report = store.enqueue_due_watch_source_jobs(1).unwrap();
+        assert_eq!(report.inspected, 1);
         assert_eq!(report.enqueued, 1);
-        assert_eq!(report.skipped, 1);
+        assert_eq!(report.skipped, 0);
         let jobs = store.list_wiki_jobs().unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].kind, "rss_fetch");
         assert_eq!(
             jobs[0].input_json.get("url").and_then(Value::as_str),
             Some("https://example.com/feed.xml")
+        );
+    }
+
+    #[test]
+    fn severe_watch_source_cadence_controls_success_next_run_interval() {
+        // CLAIM: watch source cadence is operational scheduling state, not just
+        // display metadata.
+        // ORACLE: helper lookup maps configured cadence to the next-run delay
+        // used by source-health success writes.
+        // SEVERITY: Severe because four-times-daily source polling is a false
+        // promise if the cadence column is ignored by worker scheduling.
+        let store = test_store("watch-source-cadence-next-run");
+        store
+            .upsert_watch_source(WatchSourceInput {
+                source_kind: "rss".to_string(),
+                locator: "https://example.com/feed.xml".to_string(),
+                label: "Example RSS".to_string(),
+                cadence: "warm".to_string(),
+                status: "active".to_string(),
+                metadata: Value::Null,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.watch_source_next_run_seconds("rss", "https://example.com/feed.xml", 123),
+            6 * 60 * 60
+        );
+        assert_eq!(
+            store.watch_source_next_run_seconds("rss", "https://example.com/missing.xml", 123),
+            123
+        );
+    }
+
+    #[test]
+    fn severe_source_card_projection_truncates_oversized_event_summaries() {
+        // CLAIM: one oversized source-card summary cannot dead-letter backlog
+        // clustering before source-card-backed events/clusters are written.
+        // ORACLE: source-card-derived knowledge event input validates after
+        // normalization.
+        // SEVERITY: Severe because production web/blog pages can easily exceed
+        // event summary limits.
+        let store = test_store("source-card-event-summary-truncation");
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "Oversized source-card summary from a provider page".to_string(),
+                url: "https://example.com/oversized-summary".to_string(),
+                source_type: "blog".to_string(),
+                provider: "web".to_string(),
+                summary: "This source summary is useful but very long. ".repeat(400),
+                claims: Vec::new(),
+                retrieved_at: Some(now()),
+                metadata: json!({
+                    "source_kind": "blog",
+                    "source_detail": "https://example.com/oversized-summary"
+                }),
+            })
+            .unwrap();
+
+        let event = knowledge_event_input_from_source_card(&card).unwrap();
+        validate_knowledge_event_input(&event).unwrap();
+        assert!(event.summary.len() <= 10_000);
+
+        let normalized = normalize_knowledge_event_input(KnowledgeEventInput {
+            event_type: "release".to_string(),
+            title: "Provider generated an oversized title with unicode ø. ".repeat(40),
+            canonical_key: "event:oversized-normalized-summary".to_string(),
+            primary_entity_key: None,
+            event_time: None,
+            summary: "Provider generated an oversized normalized summary with unicode ø. "
+                .repeat(400),
+            confidence: 0.8,
+            metadata: json!({}),
+        })
+        .unwrap();
+        assert!(normalized.title.len() <= 500);
+        assert!(normalized.summary.len() <= 10_000);
+    }
+
+    #[test]
+    fn severe_research_source_link_keeps_non_https_source_card_as_local_evidence() {
+        // CLAIM: source-card evidence with a non-fetch-safe external URL can
+        // still be linked into research/investigation runs through its local
+        // source-card reference.
+        // ORACLE: the research source row has no fetch URL but preserves the
+        // source-card local_ref, preventing cluster expansion dead letters.
+        // SEVERITY: Severe because older arXiv source cards may carry
+        // http://arxiv.org URLs that are valid evidence but not fetch-safe.
+        let store = test_store("research-source-card-non-https-local-ref");
+        let workflow = store
+            .create_research_workflow("arXiv local evidence")
+            .unwrap();
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: "HTTP arXiv source-card evidence".to_string(),
+                url: "http://arxiv.org/abs/2606.27377v1".to_string(),
+                source_type: "arxiv".to_string(),
+                provider: "arxiv".to_string(),
+                summary:
+                    "HTTP arXiv source-card evidence should remain linkable as local evidence."
+                        .to_string(),
+                claims: Vec::new(),
+                retrieved_at: Some(now()),
+                metadata: json!({ "source_kind": "arxiv" }),
+            })
+            .unwrap();
+
+        let linked = store
+            .link_source_card_to_research_run(
+                &workflow.run.id,
+                &card.id,
+                "arxiv",
+                "source-card",
+                "Linked as local evidence; external URL is not fetch-safe.",
+                None,
+            )
+            .unwrap();
+        assert!(linked.source.url.is_none());
+        assert_eq!(
+            linked.source.local_ref.as_deref(),
+            Some(format!("source-card:{}", card.id).as_str())
         );
     }
 
@@ -85498,12 +85912,10 @@ reason = "network blocked for resident poll test"
         );
 
         let immediate = store.run_worker_once(1).unwrap();
-        let immediate_poll = immediate
-            .watch_poll
-            .expect("worker should still inspect scheduled bookmark source");
-        assert_eq!(immediate_poll.inspected, 1);
-        assert_eq!(immediate_poll.enqueued, 0);
-        assert_eq!(immediate_poll.skipped, 1);
+        assert!(
+            immediate.watch_poll.is_none(),
+            "future next_run_at should keep the bookmark source out of the due watch batch"
+        );
         assert_eq!(
             immediate.processed, 0,
             "future next_run_at must prevent immediate duplicate bookmark imports"

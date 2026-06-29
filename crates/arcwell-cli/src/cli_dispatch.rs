@@ -1,0 +1,38 @@
+use crate::*;
+
+pub(crate) fn run(store: Store, command: Command) -> Result<()> {
+    match command {
+        Command::Health => print_json(&store.health()?),
+        Command::Ops => print_json(&store.ops_snapshot()?),
+        Command::Provider(args) => provider(store, args),
+        Command::Doctor(args) => doctor(store, args),
+        Command::Service(args) => service(store, args),
+        Command::Serve(_) => unreachable!(),
+        Command::Mcp => unreachable!(),
+        Command::Worker(args) => worker(store, args),
+        Command::Profile(args) => profile(store, args),
+        Command::Memory(args) => memory(store, args),
+        Command::Wiki(args) => wiki(store, args),
+        Command::SourceCard(args) => source_card(store, args),
+        Command::Knowledge(args) => knowledge(store, args),
+        Command::Research(args) => research(store, args),
+        Command::Commerce(args) => commerce(store, args),
+        Command::Job(args) => job(store, args),
+        Command::Radar(args) => radar(store, args),
+        Command::X(args) => x_command(store, args),
+        Command::Telegram(args) => telegram(store, args),
+        Command::Email(args) => email(store, args),
+        Command::Edge(args) => edge(store, args),
+        Command::Project(args) => project(store, args),
+        Command::Controller(args) => controller(store, args),
+        Command::Work(args) => work(store, args),
+        Command::Procedure(args) => procedure(store, args),
+        Command::Import(args) => import(store, args),
+        Command::Candidate(args) => candidate(store, args),
+        Command::Backup(args) => backup(store, args),
+        Command::Cost(args) => cost(store, args),
+        Command::Policy(args) => policy(store, args),
+        Command::Secrets(args) => secrets(store, args),
+        Command::Cursors(args) => cursors(store, args),
+    }
+}

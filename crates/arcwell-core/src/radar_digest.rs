@@ -1175,11 +1175,18 @@ pub(crate) fn daily_briefing_source_card_evidence_time(card: &SourceCard) -> Opt
     .into_iter()
     .flatten()
     {
-        if let Ok(parsed) = DateTime::parse_from_rfc3339(value.trim()) {
-            return Some(parsed.with_timezone(&Utc));
+        if let Some(parsed) = daily_briefing_parse_source_time(value.trim()) {
+            return Some(parsed);
         }
     }
     None
+}
+
+pub(crate) fn daily_briefing_parse_source_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .or_else(|_| DateTime::parse_from_rfc2822(value))
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
 }
 
 pub(crate) fn daily_briefing_story_body(

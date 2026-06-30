@@ -803,6 +803,55 @@ fn severe_daily_briefing_rejects_generated_social_reply_buckets() {
 }
 
 #[test]
+fn severe_daily_briefing_respects_rfc2822_feed_dates() {
+    // CLAIM: last-24-hours filtering uses the feed item's actual timestamp,
+    // including RFC 2822 RSS dates, instead of treating unparsable feed dates
+    // as fresh unknowns.
+    // ORACLE: an April RSS item is outside the June 29-30 window, while a
+    // June 29 RSS item with the same date format is inside it.
+    // SEVERITY: Severe because old fetched feed items were leaking into
+    // "today" briefings as if retrieval freshness were news freshness.
+    let window = daily_briefing_window("2026-06-29T00:00:00+00:00", "2026-06-30T00:00:00+00:00");
+    let stale = SourceCard {
+        id: "src-stale-rss".to_string(),
+        title: "ThursdAI - Apr 30".to_string(),
+        url: "https://sub.thursdai.news/p/thursdai-apr-30-ai-detects-cancer".to_string(),
+        source_type: "rss".to_string(),
+        provider: "rss".to_string(),
+        summary: "An April recap should not become today's briefing item.".to_string(),
+        claims: Vec::new(),
+        retrieved_at: "Fri, 01 May 2026 00:34:57 GMT".to_string(),
+        wiki_page_id: "source-card-stale-rss".to_string(),
+        content_sha256: "sha".to_string(),
+        metadata: json!({}),
+        created_at: now(),
+        updated_at: now(),
+    };
+    let fresh = SourceCard {
+        id: "src-fresh-rss".to_string(),
+        title: "not much happened today".to_string(),
+        url: "https://news.smol.ai/issues/26-06-29-not-much/".to_string(),
+        source_type: "rss".to_string(),
+        provider: "rss".to_string(),
+        summary: "A June 29 feed item belongs in the June 29-30 window.".to_string(),
+        retrieved_at: "Mon, 29 Jun 2026 05:44:39 GMT".to_string(),
+        wiki_page_id: "source-card-fresh-rss".to_string(),
+        ..stale.clone()
+    };
+
+    assert!(
+        !daily_briefing_source_card_is_in_window(&stale, window.as_ref()),
+        "{:?}",
+        daily_briefing_source_card_evidence_time(&stale)
+    );
+    assert!(
+        daily_briefing_source_card_is_in_window(&fresh, window.as_ref()),
+        "{:?}",
+        daily_briefing_source_card_evidence_time(&fresh)
+    );
+}
+
+#[test]
 fn severe_daily_briefing_scans_past_generated_repo_backlog_for_today_story() {
     // CLAIM: a rerun is a last-24-hours briefing, not a delta over the newest
     // generated report rows. Repo-only working notes at the top of the update

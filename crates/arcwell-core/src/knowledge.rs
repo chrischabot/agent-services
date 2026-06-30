@@ -2057,11 +2057,45 @@ fn knowledge_projection_evidence_sentence(primary_count: usize, reaction_count: 
 
 pub(crate) fn knowledge_projection_source_label(card: &SourceCard) -> String {
     let title = html_unescape_basic(card.title.trim());
-    if let Some(rest) = title.strip_prefix("GitHub repo ") {
+    if let Some(handle) = knowledge_projection_x_handle(card) {
+        format!("@{handle} on X")
+    } else if let Some(rest) = title.strip_prefix("GitHub repo ") {
+        rest.trim().to_string()
+    } else if let Some(rest) = title.strip_prefix("GitHub release ") {
         rest.trim().to_string()
     } else {
         excerpt(&title, 100)
     }
+}
+
+fn knowledge_projection_x_handle(card: &SourceCard) -> Option<String> {
+    if !matches!(card.provider.as_str(), "x" | "twitter")
+        && !matches!(card.source_type.as_str(), "x" | "x_tweet")
+    {
+        return None;
+    }
+    let from_metadata = card
+        .metadata
+        .get("author_handle")
+        .or_else(|| card.metadata.get("handle"))
+        .and_then(Value::as_str)
+        .map(|handle| handle.trim().trim_start_matches('@').to_string())
+        .filter(|handle| !handle.is_empty());
+    if from_metadata.is_some() {
+        return from_metadata;
+    }
+    Url::parse(&card.url).ok().and_then(|url| {
+        let host = url.host_str()?;
+        if !matches!(
+            host,
+            "x.com" | "www.x.com" | "twitter.com" | "www.twitter.com"
+        ) {
+            return None;
+        }
+        url.path_segments()
+            .and_then(|mut segments| segments.next().map(ToOwned::to_owned))
+            .filter(|segment| !segment.is_empty() && !matches!(segment.as_str(), "i" | "intent"))
+    })
 }
 
 pub(crate) fn knowledge_projection_source_summary(card: &SourceCard) -> String {
@@ -2075,6 +2109,7 @@ pub(crate) fn knowledge_projection_source_summary(card: &SourceCard) -> String {
     } else {
         summary.to_string()
     };
+    let text = strip_bare_urls(&html_unescape_basic(text.trim()));
     let mut parts = Vec::new();
     if !text.trim().is_empty() {
         parts.push(excerpt(text.trim(), 220));
@@ -2108,6 +2143,21 @@ pub(crate) fn knowledge_projection_source_summary(card: &SourceCard) -> String {
     } else {
         parts.join(" ")
     }
+}
+
+fn strip_bare_urls(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|part| {
+            let trimmed = part.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | '.' | ';' | ':'
+                )
+            });
+            !trimmed.starts_with("http://") && !trimmed.starts_with("https://")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn render_knowledge_cluster_wiki_page(

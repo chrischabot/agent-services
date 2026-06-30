@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn severe_projection_source_label_humanizes_x_and_strips_duplicate_urls() {
+    // CLAIM: source-backed reports should not make social evidence look like
+    // raw provider bookkeeping when a human opens the wiki page or report.
+    // ORACLE: an X source gets a readable handle label and its summary snippet
+    // omits bare URLs because the rendered evidence line already links the
+    // source.
+    // SEVERITY: Severe because source-card evidence can be technically
+    // correct while still becoming unreadable alert/report copy.
+    let card = SourceCard {
+        id: "src-x-human-label".to_string(),
+        title: "X: vercel 2070155382488764566".to_string(),
+        url: "https://x.com/vercel/status/2070155382488764566".to_string(),
+        source_type: "x_tweet".to_string(),
+        provider: "x".to_string(),
+        summary: "AI SDK 7 is here. https://t.co/example".to_string(),
+        claims: Vec::new(),
+        retrieved_at: "2026-06-30T10:00:00Z".to_string(),
+        wiki_page_id: "wiki-x-human-label".to_string(),
+        content_sha256: "sha".to_string(),
+        metadata: json!({}),
+        created_at: "2026-06-30T10:00:00Z".to_string(),
+        updated_at: "2026-06-30T10:00:00Z".to_string(),
+    };
+
+    assert_eq!(knowledge_projection_source_label(&card), "@vercel on X");
+    let summary = knowledge_projection_source_summary(&card);
+    assert!(summary.contains("AI SDK 7 is here."));
+    assert!(!summary.contains("https://"), "{summary}");
+}
+
+#[test]
 fn severe_source_card_backlog_clustering_splits_topics_and_skips_replay() {
     // CLAIM: broad backlog clustering coalesces unclustered source cards
     // into multiple durable source-backed clusters without collapsing the

@@ -1523,6 +1523,11 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         "ops-backlog-b",
         "Ops backlog evidence says OpenAI launch coverage exists for an MCP release.",
     );
+    let card_c = seed_knowledge_source_card(
+        &store,
+        "ops-backlog-c",
+        "Ops backlog evidence says OpenAI developer documentation changed for the MCP release.",
+    );
     let pending_digest = store
         .create_digest_candidate("Ordinary sourced note", std::slice::from_ref(&card_a.id))
         .unwrap();
@@ -1531,29 +1536,87 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         .create_digest_candidate("OpenAI MCP launch release", &[card_a.id.clone(), card_b.id])
         .unwrap();
     assert_eq!(ready_digest.status, "ready");
+    let approved_digest = store
+        .create_digest_candidate("OpenAI MCP docs release", &[card_a.id.clone(), card_c.id])
+        .unwrap();
+    assert_eq!(approved_digest.status, "ready");
     store
-        .approve_digest_candidate(&ready_digest.id, Some("ops-test"), Some("approved fixture"))
+        .approve_digest_candidate(
+            &approved_digest.id,
+            Some("ops-test"),
+            Some("approved fixture"),
+        )
         .unwrap();
 
-    store
+    let editorial_job = store
         .insert_wiki_job_with_status(
             "knowledge_cluster_editorial_decide",
             "pending",
             json!({ "cluster_id": "kcl-ops-backlog-editorial" }),
         )
         .unwrap();
-    store
+    let expansion_job = store
         .insert_wiki_job_with_status(
             "knowledge_cluster_expand",
             "pending",
             json!({ "cluster_id": "kcl-ops-backlog-expand" }),
         )
         .unwrap();
-    store
+    let generic_job = store
         .insert_wiki_job_with_status(
             "ingest_url",
             "pending",
             json!({ "url": "https://example.com" }),
+        )
+        .unwrap();
+
+    store
+        .conn
+        .execute(
+            "UPDATE candidates SET created_at = '2026-06-01T00:00:00Z' WHERE source_ref = 'ops-backlog:test'",
+            [],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE digest_candidates SET created_at = '2026-06-02T00:00:00Z' WHERE id = ?1",
+            [&pending_digest.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE digest_candidates SET created_at = '2026-06-03T00:00:00Z' WHERE id = ?1",
+            [&ready_digest.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE digest_candidates SET created_at = '2026-06-04T00:00:00Z' WHERE id = ?1",
+            [&approved_digest.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE wiki_jobs SET created_at = '2026-06-05T00:00:00Z', next_run_at = '2026-06-05T00:30:00Z' WHERE id = ?1",
+            [&editorial_job.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE wiki_jobs SET created_at = '2026-06-06T00:00:00Z', next_run_at = '2026-06-06T00:30:00Z' WHERE id = ?1",
+            [&expansion_job.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE wiki_jobs SET created_at = '2026-06-01T12:00:00Z', next_run_at = '2026-06-01T13:00:00Z' WHERE id = ?1",
+            [&generic_job.id],
         )
         .unwrap();
 
@@ -1562,11 +1625,52 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
     assert_eq!(snapshot.backlog.pending_memory_candidates, 2);
     assert_eq!(snapshot.backlog.pending_digest_candidates, 1);
     assert_eq!(snapshot.backlog.approved_digest_candidates, 1);
-    assert_eq!(snapshot.backlog.ready_digest_candidates, 0);
+    assert_eq!(snapshot.backlog.ready_digest_candidates, 1);
     assert_eq!(snapshot.backlog.pending_wiki_jobs, 3);
     assert_eq!(snapshot.backlog.pending_knowledge_jobs, 2);
     assert_eq!(snapshot.backlog.pending_knowledge_editorial_jobs, 1);
     assert_eq!(snapshot.backlog.pending_knowledge_expansion_jobs, 1);
+    assert_eq!(
+        snapshot
+            .backlog
+            .oldest_pending_memory_candidate_at
+            .as_deref(),
+        Some("2026-06-01T00:00:00Z")
+    );
+    assert_eq!(
+        snapshot
+            .backlog
+            .oldest_pending_digest_candidate_at
+            .as_deref(),
+        Some("2026-06-02T00:00:00Z")
+    );
+    assert_eq!(
+        snapshot.backlog.oldest_ready_digest_candidate_at.as_deref(),
+        Some("2026-06-03T00:00:00Z")
+    );
+    assert_eq!(
+        snapshot
+            .backlog
+            .oldest_approved_digest_candidate_at
+            .as_deref(),
+        Some("2026-06-04T00:00:00Z")
+    );
+    assert_eq!(
+        snapshot.backlog.oldest_pending_wiki_job_at.as_deref(),
+        Some("2026-06-01T12:00:00Z")
+    );
+    assert_eq!(
+        snapshot.backlog.oldest_pending_knowledge_job_at.as_deref(),
+        Some("2026-06-05T00:00:00Z")
+    );
+    assert_eq!(
+        snapshot.backlog.next_pending_wiki_job_at.as_deref(),
+        Some("2026-06-01T13:00:00Z")
+    );
+    assert_eq!(
+        snapshot.backlog.next_pending_knowledge_job_at.as_deref(),
+        Some("2026-06-05T00:30:00Z")
+    );
     assert_eq!(
         snapshot
             .backlog

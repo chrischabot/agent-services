@@ -721,4 +721,12 @@ pub struct OpsBacklogSummary {
     pub dead_lettered_knowledge_jobs: i64,
     pub pending_knowledge_editorial_jobs: i64,
     pub pending_knowledge_expansion_jobs: i64,
+    pub oldest_pending_memory_candidate_at: Option<String>,
+    pub oldest_pending_digest_candidate_at: Option<String>,
+    pub oldest_ready_digest_candidate_at: Option<String>,
+    pub oldest_approved_digest_candidate_at: Option<String>,
+    pub oldest_pending_wiki_job_at: Option<String>,
+    pub oldest_pending_knowledge_job_at: Option<String>,
+    pub next_pending_wiki_job_at: Option<String>,
+    pub next_pending_knowledge_job_at: Option<String>,
 }

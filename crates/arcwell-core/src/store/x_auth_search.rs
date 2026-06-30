@@ -1089,12 +1089,33 @@ impl Store {
                 Ok(url)
             };
             let url = build_url(previous_cursor.as_deref())?;
+            let mut stale_since_id_retried = false;
             let value = match fetch_x_json(url.as_str(), Some(&token)) {
-                Ok(value) => value,
+                Ok(value) => match x_fail_on_response_errors(&value) {
+                    Ok(()) => value,
+                    Err(error)
+                        if previous_cursor.is_some()
+                            && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
+                    {
+                        stale_since_id_retried = true;
+                        let retry_url = build_url(None)?;
+                        let value = fetch_x_json(retry_url.as_str(), Some(&token)).with_context(
+                            || {
+                                format!(
+                                    "retrying X recent search without stale since_id for query {query:?}"
+                                )
+                            },
+                        )?;
+                        x_fail_on_response_errors(&value)?;
+                        value
+                    }
+                    Err(error) => return Err(error),
+                },
                 Err(error)
                     if previous_cursor.is_some()
                         && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
                 {
+                    stale_since_id_retried = true;
                     let retry_url = build_url(None)?;
                     fetch_x_json(retry_url.as_str(), Some(&token)).with_context(|| {
                         format!(
@@ -1104,7 +1125,6 @@ impl Store {
                 }
                 Err(error) => return Err(error),
             };
-            x_fail_on_response_errors(&value)?;
             let import_value =
                 x_search_response_to_import_items(&value, "recent_search", Some(query))?;
             let report = self.import_x_json_value_without_sync_run(&import_value)?;
@@ -1120,12 +1140,19 @@ impl Store {
                 );
             }
             let newest_id = value.pointer("/meta/newest_id").and_then(Value::as_str);
-            let effective_cursor = x_effective_cursor(previous_cursor.as_deref(), newest_id);
+            let cursor_baseline = if stale_since_id_retried {
+                None
+            } else {
+                previous_cursor.as_deref()
+            };
+            let effective_cursor = x_effective_cursor(cursor_baseline, newest_id);
             new_cursor_for_run = effective_cursor.clone();
             if effective_cursor.as_deref() != previous_cursor.as_deref()
                 && let Some(cursor) = &effective_cursor
             {
                 self.set_cursor(&cursor_key, cursor)?;
+            } else if stale_since_id_retried && effective_cursor.is_none() {
+                self.delete_cursor(&cursor_key)?;
             }
             self.record_source_success(SourceHealthUpdate {
                 key: &source_key,

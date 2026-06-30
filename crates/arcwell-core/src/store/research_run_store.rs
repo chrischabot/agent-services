@@ -106,7 +106,34 @@ impl Store {
             pending_knowledge_expansion_jobs: self.count_query(
                 "SELECT COUNT(*) FROM wiki_jobs WHERE kind IN ('knowledge_cluster_expand', 'knowledge_cluster_investigation_execute', 'knowledge_cluster_model_write') AND status = 'pending'",
             )?,
+            oldest_pending_memory_candidate_at: self.single_string_query(
+                "SELECT MIN(created_at) FROM candidates WHERE status = 'pending'",
+            )?,
+            oldest_pending_digest_candidate_at: self.single_string_query(
+                "SELECT MIN(created_at) FROM digest_candidates WHERE status = 'pending'",
+            )?,
+            oldest_ready_digest_candidate_at: self.single_string_query(
+                "SELECT MIN(created_at) FROM digest_candidates WHERE status = 'ready'",
+            )?,
+            oldest_approved_digest_candidate_at: self.single_string_query(
+                "SELECT MIN(created_at) FROM digest_candidates WHERE status = 'approved'",
+            )?,
+            oldest_pending_wiki_job_at: self
+                .single_string_query("SELECT MIN(created_at) FROM wiki_jobs WHERE status = 'pending'")?,
+            oldest_pending_knowledge_job_at: self.single_string_query(
+                "SELECT MIN(created_at) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' AND status = 'pending'",
+            )?,
+            next_pending_wiki_job_at: self.single_string_query(
+                "SELECT MIN(COALESCE(next_run_at, created_at)) FROM wiki_jobs WHERE status = 'pending'",
+            )?,
+            next_pending_knowledge_job_at: self.single_string_query(
+                "SELECT MIN(COALESCE(next_run_at, created_at)) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' AND status = 'pending'",
+            )?,
         })
+    }
+
+    fn single_string_query(&self, sql: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row(sql, [], |row| row.get(0))?)
     }
 
     pub fn create_research_plan(&self, query: &str, max_sources: usize) -> Result<ResearchPlan> {

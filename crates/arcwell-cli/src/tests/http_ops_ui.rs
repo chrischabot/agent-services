@@ -654,9 +654,13 @@ fn severe_ops_ui_distinguishes_backlog_families() {
         .unwrap();
 
     let html = render_ops_ui(&store.ops_snapshot().unwrap());
+    assert!(html.contains("Backlog Age"), "{html}");
     assert!(html.contains("Knowledge pending jobs"), "{html}");
+    assert!(html.contains("Knowledge jobs pending"), "{html}");
     assert!(html.contains("Digest candidates pending"), "{html}");
     assert!(html.contains("Memory review pending"), "{html}");
+    assert!(html.contains("oldest created"), "{html}");
+    assert!(html.contains("next runnable"), "{html}");
 }
 
 #[test]

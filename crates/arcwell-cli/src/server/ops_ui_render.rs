@@ -194,6 +194,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ));
     }
     html.push_str("</section>");
+    html.push_str(&render_backlog_age_table(snapshot));
     html.push_str(&render_ops_summary(snapshot, &health_score));
     if let Some(detail) = &options.detail {
         html.push_str(&render_ops_detail(snapshot, detail));
@@ -1048,6 +1049,73 @@ code,pre{white-space:pre-wrap;word-break:break-word}
     ));
     html.push_str("</main></body></html>");
     html
+}
+
+fn render_backlog_age_table(snapshot: &OpsSnapshot) -> String {
+    let backlog = &snapshot.backlog;
+    ops_table(
+        "Backlog Age",
+        &["queue", "count", "oldest created", "next runnable"],
+        [
+            vec![
+                "Memory review pending".to_string(),
+                backlog.pending_memory_candidates.to_string(),
+                backlog
+                    .oldest_pending_memory_candidate_at
+                    .clone()
+                    .unwrap_or_default(),
+                String::new(),
+            ],
+            vec![
+                "Digest candidates pending".to_string(),
+                backlog.pending_digest_candidates.to_string(),
+                backlog
+                    .oldest_pending_digest_candidate_at
+                    .clone()
+                    .unwrap_or_default(),
+                String::new(),
+            ],
+            vec![
+                "Digest candidates ready".to_string(),
+                backlog.ready_digest_candidates.to_string(),
+                backlog
+                    .oldest_ready_digest_candidate_at
+                    .clone()
+                    .unwrap_or_default(),
+                String::new(),
+            ],
+            vec![
+                "Digest candidates approved".to_string(),
+                backlog.approved_digest_candidates.to_string(),
+                backlog
+                    .oldest_approved_digest_candidate_at
+                    .clone()
+                    .unwrap_or_default(),
+                String::new(),
+            ],
+            vec![
+                "Wiki jobs pending".to_string(),
+                backlog.pending_wiki_jobs.to_string(),
+                backlog
+                    .oldest_pending_wiki_job_at
+                    .clone()
+                    .unwrap_or_default(),
+                backlog.next_pending_wiki_job_at.clone().unwrap_or_default(),
+            ],
+            vec![
+                "Knowledge jobs pending".to_string(),
+                backlog.pending_knowledge_jobs.to_string(),
+                backlog
+                    .oldest_pending_knowledge_job_at
+                    .clone()
+                    .unwrap_or_default(),
+                backlog
+                    .next_pending_knowledge_job_at
+                    .clone()
+                    .unwrap_or_default(),
+            ],
+        ],
+    )
 }
 
 pub(crate) fn json_cell(value: &Value) -> String {

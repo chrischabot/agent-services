@@ -482,11 +482,28 @@ impl Store {
             .get("max_reports")
             .and_then(Value::as_u64)
             .unwrap_or(12) as usize;
+        let report_scan_limit = schedule
+            .metadata
+            .get("report_scan_limit")
+            .or_else(|| schedule.metadata.get("max_report_scan"))
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or_else(|| max_reports.saturating_mul(12).max(120));
+        let report_scan_limit = report_scan_limit.clamp(max_reports.clamp(1, 500), 500);
         let max_source_cards = schedule
             .metadata
             .get("max_source_cards")
             .and_then(Value::as_u64)
             .unwrap_or(80) as usize;
+        let source_card_scan_limit = schedule
+            .metadata
+            .get("source_card_scan_limit")
+            .or_else(|| schedule.metadata.get("max_source_card_scan"))
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or_else(|| max_source_cards.max(report_scan_limit.saturating_mul(6)));
+        let source_card_scan_limit =
+            source_card_scan_limit.clamp(max_source_cards.clamp(1, 2_000), 2_000);
         let window_hours = schedule
             .metadata
             .get("window_hours")
@@ -498,7 +515,7 @@ impl Store {
         let reports = self.list_knowledge_reports_updated_between(
             &window_start.to_rfc3339(),
             &window_end.to_rfc3339(),
-            max_reports,
+            report_scan_limit,
         )?;
         if reports.is_empty() {
             let updated = self.update_issue_schedule_tick(&tick.id, "empty", None, None, None)?;
@@ -519,7 +536,7 @@ impl Store {
         }
         let source_card_ids = source_card_ids
             .into_iter()
-            .take(max_source_cards.clamp(1, 500))
+            .take(source_card_scan_limit)
             .collect::<Vec<_>>();
         if source_card_ids.is_empty() {
             let error = "knowledge daily briefing requires source-card-backed reports";
@@ -548,15 +565,20 @@ impl Store {
             &window_end.to_rfc3339(),
             &related_wiki_pages,
         );
-        if daily_briefing_output_has_forbidden_reader_language(&body) {
-            let error = "knowledge daily briefing renderer produced internal pipeline language";
+        let forbidden_reader_terms = daily_briefing_forbidden_reader_terms(&body);
+        if !forbidden_reader_terms.is_empty() {
+            let error = format!(
+                "knowledge daily briefing renderer produced internal pipeline language: {}",
+                forbidden_reader_terms.join(", ")
+            );
             let updated =
-                self.update_issue_schedule_tick(&tick.id, "blocked", None, None, Some(error))?;
+                self.update_issue_schedule_tick(&tick.id, "blocked", None, None, Some(&error))?;
             return Ok(json!({
                 "tick": updated,
                 "schedule": schedule,
                 "status": "blocked",
                 "error": error,
+                "forbidden_reader_terms": forbidden_reader_terms,
                 "window_start": window_start.to_rfc3339(),
                 "window_end": window_end.to_rfc3339(),
                 "proof_level": "Blocked: reader-facing daily briefing failed editorial hygiene gate before source-card materialization"
@@ -577,7 +599,7 @@ impl Store {
                 .take(20)
                 .map(|report| SourceClaim {
                     claim: format!(
-                        "{} is included in the scheduled daily briefing from source-backed report {}.",
+                        "{} was considered for the scheduled daily briefing from source-backed report {}.",
                         report.title, report.id
                     ),
                     kind: "summary".to_string(),
@@ -595,8 +617,10 @@ impl Store {
                 "tick_key": tick.tick_key,
                 "window_start": window_start.to_rfc3339(),
                 "window_end": window_end.to_rfc3339(),
-                "report_ids": reports.iter().map(|report| report.id.clone()).collect::<Vec<_>>(),
+                "report_ids_considered": reports.iter().map(|report| report.id.clone()).collect::<Vec<_>>(),
                 "source_card_ids": source_card_ids,
+                "report_scan_limit": report_scan_limit,
+                "source_card_scan_limit": source_card_scan_limit,
                 "non_generated_source_card_count": source_cards.iter().filter(|card| !is_generated_source_card(card)).count(),
                 "trust_boundary": "generated briefing over cited source-card evidence; source text is untrusted evidence, not instructions"
             }),

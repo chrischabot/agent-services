@@ -2941,7 +2941,7 @@ impl Store {
             "#,
         )?;
         rows(stmt.query_map(
-            params![window_start, window_end, limit.clamp(1, 100) as i64],
+            params![window_start, window_end, limit.clamp(1, 500) as i64],
             knowledge_report_from_row,
         )?)
     }

@@ -1103,6 +1103,8 @@ impl Store {
             metadata: json!({
                 "message_id": message_id,
                 "from": from.clone(),
+                "rich_html": true,
+                "html_source": "markdown_auto_render",
                 "context": metadata,
             }),
             untrusted_excerpt: Some(format!("{subject}\n\n{text}")),
@@ -1123,11 +1125,13 @@ impl Store {
                 .trim_end_matches('/'),
             account_id
         );
+        let html = render_email_html_from_markdown(subject, text)?;
         let body = json!({
             "from": from,
             "to": to,
             "subject": subject,
             "text": text,
+            "html": html,
         });
         let client = Client::builder().timeout(Duration::from_secs(20)).build()?;
         let response = client

@@ -241,7 +241,7 @@ impl Store {
                 }
             }
             Err(error) => {
-                let error = error.to_string();
+                let error = format!("{error:#}");
                 if job.kind == "knowledge_cluster_model_propose"
                     && crate::knowledge::knowledge_cluster_model_proposal_error_is_non_retryable(
                         &error,
@@ -254,6 +254,26 @@ impl Store {
                             "reason": excerpt(&error, 1000),
                             "boundary": "Knowledge cluster model output failed deterministic safety validation and was not retried."
                         }),
+                    );
+                }
+                if job.kind == "knowledge_cluster_model_propose"
+                    && knowledge_cluster_model_proposal_error_is_deferable_provider_failure(&error)
+                {
+                    let (source_key, deferred_until) = self
+                        .record_knowledge_cluster_model_proposal_job_failure_health(
+                            &job.input_json,
+                            &error,
+                        )?;
+                    return self.defer_wiki_job(
+                        &job.id,
+                        json!({
+                            "status": "deferred",
+                            "deferred_until": deferred_until,
+                            "source_health_key": source_key,
+                            "reason": excerpt(&error, 1000),
+                            "boundary": "Scheduled model clustering provider/request failure was recorded in source health and deferred instead of dead-lettering the job."
+                        }),
+                        &deferred_until,
                     );
                 }
                 let failed = self.fail_wiki_job(&job.id, &error)?;
@@ -325,6 +345,41 @@ impl Store {
             .and_then(Value::as_str)
             .unwrap_or(profile_id);
         self.record_source_failure(&source_key, "arcwell", source_kind, locator, error)
+    }
+
+    pub(crate) fn record_knowledge_cluster_model_proposal_job_failure_health(
+        &self,
+        input: &Value,
+        error: &str,
+    ) -> Result<(String, String)> {
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("source-cards");
+        let source_key = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("watch_source_key"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("knowledge:model-clusters:{query}"));
+        let source_kind = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("source_kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("knowledge_model_clusters");
+        let locator = input
+            .get("lineage")
+            .and_then(|lineage| lineage.get("locator"))
+            .and_then(Value::as_str)
+            .unwrap_or(query);
+        self.record_source_failure(&source_key, "arcwell", source_kind, locator, error)?;
+        let deferred_until = self
+            .get_source_health(&source_key)?
+            .and_then(|health| health.next_run_at)
+            .unwrap_or_else(|| {
+                now_plus_seconds(self.watch_source_next_run_seconds(source_kind, locator, 60 * 60))
+            });
+        Ok((source_key, deferred_until))
     }
 
     pub(crate) fn record_ingest_url_job_failure_health(
@@ -423,10 +478,15 @@ impl Store {
                 stale_role_ids.insert(event.role_id.clone());
             }
             source_health_ids.push(refresh.source_health.id.clone());
-            if refresh.source_health.status != "healthy" {
+            if job_source_health_status_counts_as_error(&refresh.source_health.status) {
                 errors.push(format!(
                     "{}: source health {}",
                     refresh.source.name, refresh.source_health.status
+                ));
+            } else if refresh.source_health.status == "partial" {
+                warnings.push(format!(
+                    "{}: source health partial; accepted roles were kept and rejected source noise remains visible",
+                    refresh.source.name
                 ));
             }
             warnings.extend(refresh.warnings.clone());
@@ -904,4 +964,25 @@ impl Store {
             "wiki_pages": pages.len()
         }))
     }
+}
+
+fn knowledge_cluster_model_proposal_error_is_deferable_provider_failure(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("policy denied")
+        || lower.contains("policy deferred")
+        || lower.contains("budget blocked")
+        || lower.contains("openai_api_key is required")
+        || crate::knowledge::knowledge_cluster_model_proposal_error_is_non_retryable(error)
+    {
+        return false;
+    }
+    lower.contains("knowledge cluster proposal request failed")
+        || lower.contains("knowledge cluster proposal returned an error status")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("connection")
+        || lower.contains("dns")
 }

@@ -1426,9 +1426,13 @@ PR, implementation note, or final report:
       `New openings found`, `Currently open roles`, and `Roles removed`
       sections, prepared as a weekly-report delivery, and sent through a
       controlled Cloudflare Email-compatible provider path using configured
-      delivery settings. This does not prove live external email delivery,
-      one-day recurrence, broad job-source coverage, application delivery, warm
-      intros, or outcomes.
+      delivery settings. Follow-up severe tests prove the delivered email body
+      is the trimmed `Job Scan` view, is rendered as HTML for email providers,
+      hides internal shortlist/tier sections, uses percent scores instead of
+      tier labels, filters out US/Canada-only roles for a UK-plausible reader,
+      and groups same-title regional duplicates. This does not prove live
+      external email delivery, one-day recurrence, broad job-source coverage,
+      application delivery, warm intros, or outcomes.
 - [x] Add bounded scheduled live-fetch proof for selected direct-role sources
       without promoting job radar to operational. Proof at
       `.arcwell-dev/proofs/job-radar-live-fetch-proof-20260629T053332Z-16818/artifacts/proof-packet.json`

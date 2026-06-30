@@ -1390,7 +1390,7 @@ fn severe_job_weekly_report_preserves_application_status_and_source_health() {
         .compile_job_weekly_report(&profile.id, "London agent platform roles")
         .unwrap();
     assert!(report.body.contains("applied: 1"), "{}", report.body);
-    assert!(report.body.contains("unscored: 1"), "{}", report.body);
+    assert!(!report.body.contains("unscored: 1"), "{}", report.body);
     assert!(!report.body.contains("planned: 1"), "{}", report.body);
     assert!(report.body.contains("## Role Changes"), "{}", report.body);
     assert!(report.body.contains("stale: 1"), "{}", report.body);
@@ -1444,6 +1444,151 @@ fn severe_job_weekly_report_preserves_application_status_and_source_health() {
     assert_eq!(report.metadata["intro_path_count"], 1);
     assert_eq!(report.metadata["role_status_event_count"], 1);
     assert_eq!(report.metadata["source_health_count"], 1);
+}
+
+#[test]
+fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates() {
+    // CLAIM: the reader-facing job scan is a UK-plausible shortlist, not the
+    // raw ledger of every same-title regional posting.
+    // ORACLE: UK/EU duplicates for one role family render as one grouped
+    // entry, while US-only duplicates and separate US-only roles are omitted
+    // from the open-role email sections.
+    // SEVERITY: Severe because a daily scan that floods the email with
+    // location variants makes the scheduled report noisy enough to ignore.
+    let store = test_store("job-weekly-uk-filter-dedupe");
+    let profile = job_fixture_profile(&store);
+    let evidence = job_fixture_evidence(&store, &profile.id);
+    let role_input =
+        |company: &str, canonical: &str, title: &str, location: &str| JobRoleCardInput {
+            company: company.to_string(),
+            role_title: title.to_string(),
+            canonical_url: Some(format!("https://tailscale.com/careers/{canonical}")),
+            source_family: "company".to_string(),
+            source_url: format!("https://tailscale.com/careers/{canonical}"),
+            source_confidence: "canonical_confirmed".to_string(),
+            date_accessed: Some("2026-06-30T10:00:00Z".to_string()),
+            posting_freshness: "same_day".to_string(),
+            location: Some(location.to_string()),
+            work_mode: Some("remote".to_string()),
+            company_stage_or_size: Some("scaleup".to_string()),
+            role_seniority: Some("senior".to_string()),
+            core_requirements: vec!["developer-facing systems".to_string()],
+            implied_business_problem: Some(
+                "Help technical users adopt a complex infrastructure product.".to_string(),
+            ),
+            why_they_might_need_user: Some(
+                "Developer-facing engineering and writing experience maps to the role.".to_string(),
+            ),
+            evidence_card_ids: vec![evidence.id.clone()],
+            gaps_or_blockers: vec![],
+            cluster: Some("developer-tools".to_string()),
+            current_status: "live".to_string(),
+            metadata: json!({}),
+        };
+    let uk_role = store
+        .record_job_role_card(role_input(
+            "Tailscale",
+            "senior-developer-advocate-uk",
+            "Senior Developer Advocate Remote (United Kingdom)",
+            "Remote",
+        ))
+        .unwrap();
+    let eu_role = store
+        .record_job_role_card(role_input(
+            "Tailscale",
+            "senior-developer-advocate-eu",
+            "Senior Developer Advocate Remote (Europe)",
+            "Remote",
+        ))
+        .unwrap();
+    let us_duplicate = store
+        .record_job_role_card(role_input(
+            "Tailscale",
+            "senior-developer-advocate-us",
+            "Senior Developer Advocate Remote (United States)",
+            "Remote",
+        ))
+        .unwrap();
+    let us_only = store
+        .record_job_role_card(role_input(
+            "Tailscale",
+            "senior-infrastructure-engineer-us",
+            "Senior Infrastructure Engineer Remote (United States)",
+            "Remote",
+        ))
+        .unwrap();
+    let mixed_anthropic = store
+        .record_job_role_card(role_input(
+            "Anthropic",
+            "anthropic-fellows-ai-security",
+            "Anthropic Fellows Program, AI Security London, UK; Ontario, CAN; Remote-Friendly, United States; San Francisco, CA",
+            "London",
+        ))
+        .unwrap();
+    let sf_only_anthropic = store
+        .record_job_role_card(role_input(
+            "Anthropic",
+            "product-engineer-computer-use-sf",
+            "Product Engineer, Computer Use San Francisco, CA",
+            "",
+        ))
+        .unwrap();
+    for role in [
+        &uk_role,
+        &eu_role,
+        &us_duplicate,
+        &us_only,
+        &mixed_anthropic,
+        &sf_only_anthropic,
+    ] {
+        store
+            .record_job_fit_score(job_fixture_score_input(&role.id, &profile.id, &evidence.id))
+            .unwrap();
+    }
+
+    let report = store
+        .compile_job_weekly_report(&profile.id, "UK-plausible developer roles")
+        .unwrap();
+    assert_eq!(
+        report
+            .body
+            .matches("Senior Developer Advocate at Tailscale")
+            .count(),
+        1,
+        "{}",
+        report.body
+    );
+    assert!(
+        report
+            .body
+            .contains("Locations: Europe; remote, United Kingdom; remote."),
+        "{}",
+        report.body
+    );
+    assert!(
+        report.body.contains("Grouped 2 location postings."),
+        "{}",
+        report.body
+    );
+    assert!(report.body.contains("Score: 97%."), "{}", report.body);
+    assert!(
+        report
+            .body
+            .contains("Anthropic Fellows Program, AI Security at Anthropic"),
+        "{}",
+        report.body
+    );
+    assert!(
+        !report.body.contains("United States")
+            && !report.body.contains("Remote (United")
+            && !report.body.contains("Canada")
+            && !report.body.contains("Ontario")
+            && !report.body.contains("San Francisco")
+            && !report.body.contains("Product Engineer, Computer Use")
+            && !report.body.contains("Senior Infrastructure Engineer"),
+        "{}",
+        report.body
+    );
 }
 
 #[test]
@@ -1508,6 +1653,22 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
         })
         .unwrap();
     assert_eq!(prepared.delivery.status, "prepared");
+    let prepared_body = &prepared.channel_message.as_ref().unwrap().body;
+    assert!(prepared_body.starts_with("# Job Scan"), "{prepared_body}");
+    assert!(
+        prepared_body.contains("## New openings found"),
+        "{prepared_body}"
+    );
+    assert!(
+        prepared_body.contains("## Currently open roles"),
+        "{prepared_body}"
+    );
+    assert!(
+        prepared_body.contains("## Roles removed"),
+        "{prepared_body}"
+    );
+    assert!(!prepared_body.contains("## Shortlist"), "{prepared_body}");
+    assert!(!prepared_body.contains("tier_"), "{prepared_body}");
     assert_eq!(
         prepared.privacy_check.as_ref().unwrap().decision,
         "pass",
@@ -1520,7 +1681,7 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
     assert_eq!(message.status, "prepared");
     assert_eq!(message.sender, "email:job-proof@example.com");
     assert_eq!(message.source_event_id.as_deref(), Some(report.id.as_str()));
-    assert!(message.body.contains("# Job Weekly Report"));
+    assert!(message.body.contains("# Job Scan"));
     assert_eq!(store.list_channel_messages().unwrap().len(), 1);
     assert!(
         store
@@ -1548,7 +1709,7 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
 
     store
         .record_job_privacy_rule(JobPrivacyRuleInput {
-            pattern: "# Job Weekly Report".to_string(),
+            pattern: "# Job Scan".to_string(),
             rule_type: "blocked_term".to_string(),
             severity: "block".to_string(),
             replacement_guidance: Some("Do not deliver weekly reports from this home.".to_string()),
@@ -1652,7 +1813,7 @@ fn severe_job_weekly_report_delivery_replay_rechecks_current_gates() {
 
     store
         .record_job_privacy_rule(JobPrivacyRuleInput {
-            pattern: "# Job Weekly Report".to_string(),
+            pattern: "# Job Scan".to_string(),
             rule_type: "blocked_term".to_string(),
             severity: "block".to_string(),
             replacement_guidance: Some("Do not deliver weekly reports from this home.".to_string()),
@@ -1741,12 +1902,12 @@ priority = 10
         .unwrap();
     assert_eq!(prepared.delivery.status, "prepared");
 
-    let api = mock_status_server(
+    let (api, requests) = mock_recording_sequence_server(vec![(
         "200 OK",
         "",
         r#"{"success":true,"result":{"id":"job_weekly_email_ok"}}"#,
         "application/json",
-    );
+    )]);
     let sent = store
         .send_job_weekly_report_delivery(JobWeeklyReportDeliverySendInput {
             delivery_id: prepared.delivery.id.clone(),
@@ -1774,6 +1935,27 @@ priority = 10
     assert_eq!(attempt.channel, "email");
     assert_eq!(attempt.provider_status, 200);
     assert_eq!(store.list_channel_delivery_attempts(None).unwrap().len(), 1);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let request_body = captured[0]
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("provider request body");
+    let body_json: Value = serde_json::from_str(request_body).unwrap();
+    let text = body_json.get("text").and_then(Value::as_str).unwrap();
+    let html = body_json.get("html").and_then(Value::as_str).unwrap();
+    assert!(text.contains("# Job Scan"), "{text}");
+    assert!(!text.contains("## Shortlist"), "{text}");
+    assert!(!text.contains("tier_"), "{text}");
+    assert!(html.contains("<h1"), "{html}");
+    assert!(html.contains("Job Scan"), "{html}");
+    assert!(html.contains("New openings found"), "{html}");
+    assert!(!html.contains("Shortlist"), "{html}");
+    assert!(!html.contains("tier_"), "{html}");
+    assert!(
+        !html.starts_with("# Job Scan"),
+        "html must not be raw Markdown: {html}"
+    );
 
     let replay = store
         .send_job_weekly_report_delivery(JobWeeklyReportDeliverySendInput {
@@ -2023,7 +2205,7 @@ fn severe_job_weekly_report_delivery_send_rechecks_gates_before_provider() {
     let message_id = prepared.delivery.channel_message_id.clone().unwrap();
     store
         .record_job_privacy_rule(JobPrivacyRuleInput {
-            pattern: "# Job Weekly Report".to_string(),
+            pattern: "# Job Scan".to_string(),
             rule_type: "blocked_term".to_string(),
             severity: "block".to_string(),
             replacement_guidance: Some("Do not deliver weekly reports from this home.".to_string()),
@@ -3647,8 +3829,9 @@ fn severe_job_radar_schedule_replay_refreshes_sources_and_reports() {
     // sources from replay snapshots, reconcile observed roles, write a
     // weekly report, and advance source-health scheduling state.
     // ORACLE: one worker pass completes a job_radar_refresh job with a
-    // durable role, job-source-health row, job search run, weekly report,
-    // and healthy generic watch-source health carrying a future next_run.
+    // durable role, partial job-source-health row, job search run, weekly
+    // report, and healthy generic watch-source health carrying a future
+    // next_run.
     // SEVERITY: Severe because scheduled job hunting would otherwise look
     // operational while only manual refresh commands actually work.
     let store = test_store("job-radar-scheduled-replay");
@@ -3716,12 +3899,13 @@ priority = 10
             json!({
                 "fetched_url": "https://example.com/careers",
                 "body": r#"
-                <main>
-                  <h1>Example Careers</h1>
-                  <p>Agent infrastructure and developer tooling roles in London.</p>
-                  <a href="/careers/staff-agent-platform-engineer">Staff Agent Platform Engineer - London hybrid</a>
-                </main>
-                "#
+	                <main>
+	                  <h1>Example Careers</h1>
+	                  <p>Agent infrastructure and developer tooling roles in London.</p>
+	                  <a href="/careers/staff-agent-platform-engineer">Staff Agent Platform Engineer - London hybrid</a>
+	                  <a href="/jobs/role/engineering">Engineering roles</a>
+	                </main>
+	                "#
             }),
         );
     let scheduled = store
@@ -3757,6 +3941,17 @@ priority = 10
     assert_eq!(result["fetch_live"], false);
     assert_eq!(result["proof_level"], "local_proof");
     assert_eq!(result["error_count"], 0);
+    assert!(
+        result["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("source health partial")),
+        "{result:#?}"
+    );
     assert_eq!(result["observed_role_count"], 1);
     assert_eq!(result["delivery"]["status"], "sent");
     assert_eq!(result["delivery"]["sent"], true);
@@ -3771,7 +3966,7 @@ priority = 10
     let job_health = store.list_job_source_health_recent(10).unwrap();
     assert_eq!(job_health.len(), 1);
     assert_eq!(job_health[0].source_id, source.id);
-    assert_eq!(job_health[0].status, "healthy");
+    assert_eq!(job_health[0].status, "partial");
 
     let watch_health = store
         .get_source_health(&format!("job:radar:{}", profile.id))

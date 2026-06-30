@@ -46,6 +46,8 @@ insert("repo-old-pending", "github_repo", "pending", {"owner": "vercel", "repo":
 insert("repo-running", "github_repo", "running", {"owner": "vercel", "repo": "ai", "mode": "releases"}, 4)
 insert("rss-only", "rss_fetch", "deferred", {"url": "https://example.com/feed.xml"}, 5)
 insert("completed-ignored", "github_owner", "completed", {"owner": "openai"}, 6)
+insert("model-old-deferred", "knowledge_cluster_model_propose", "deferred", {"query": "source-cards"}, 7)
+insert("model-new-deferred", "knowledge_cluster_model_propose", "deferred", {"query": "source-cards"}, 8)
 conn.commit()
 PY
 
@@ -58,10 +60,10 @@ import sys
 
 db, summary_path = sys.argv[1:3]
 summary = json.load(open(summary_path, encoding="utf-8"))
-assert summary["active_scanned"] == 5, summary
-assert summary["duplicate_group_count"] == 2, summary
-assert summary["supersede_candidates"] == 2, summary
-assert summary["superseded"] == 2, summary
+assert summary["active_scanned"] == 7, summary
+assert summary["duplicate_group_count"] == 3, summary
+assert summary["supersede_candidates"] == 3, summary
+assert summary["superseded"] == 3, summary
 
 conn = sqlite3.connect(db)
 statuses = dict(conn.execute("SELECT id, status FROM wiki_jobs").fetchall())
@@ -71,6 +73,8 @@ assert statuses["repo-old-pending"] == "superseded", statuses
 assert statuses["repo-running"] == "running", statuses
 assert statuses["rss-only"] == "deferred", statuses
 assert statuses["completed-ignored"] == "completed", statuses
+assert statuses["model-old-deferred"] == "superseded", statuses
+assert statuses["model-new-deferred"] == "deferred", statuses
 
 active_duplicate_groups = conn.execute(
     """

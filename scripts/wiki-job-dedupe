@@ -19,6 +19,7 @@ SUPPORTED_KINDS = {
     "github_owner",
     "github_repo",
     "ingest_url",
+    "knowledge_cluster_model_propose",
     "rss_fetch",
 }
 ACTIVE_STATUSES = {"pending", "deferred", "running"}
@@ -65,6 +66,8 @@ def job_key(kind: str, input_json: str) -> str:
         return str(value.get("query") or "").strip()
     if kind == "ingest_url":
         return str(value.get("url") or "").strip()
+    if kind == "knowledge_cluster_model_propose":
+        return str(value.get("query") or "").strip()
     return ""
 
 

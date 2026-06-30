@@ -825,16 +825,17 @@ pub(crate) fn render_knowledge_daily_briefing(
         format!("# AI Daily Briefing - {day}"),
         String::new(),
         "## Bottom Line".to_string(),
-        daily_briefing_lede_for_titles(
-            &stories
-                .iter()
-                .map(|story| story.title.as_str())
-                .collect::<Vec<_>>(),
-        ),
+        daily_briefing_lede_for_stories(&stories),
         String::new(),
-        "## Today's Stories".to_string(),
     ];
-    for (index, story) in stories.iter().take(10).enumerate() {
+    if stories.is_empty() {
+        lines.push("## No Issue Today".to_string());
+        lines.push("There was activity in the last 24 hours, but nothing I would call news: no clear announcement, no release note that changed the picture, no credible benchmark shift, and no outside reaction worth weighing. A few repo updates can be useful background, but they are not a newsletter item by themselves.".to_string());
+        lines.push(String::new());
+    } else {
+        lines.push("## Today's Stories".to_string());
+    }
+    for (index, story) in stories.iter().take(5).enumerate() {
         let report = story.report;
         let wiki_pages = related_wiki_pages
             .get(&report.id)
@@ -851,7 +852,7 @@ pub(crate) fn render_knowledge_daily_briefing(
             lines.push(String::new());
         }
         lines.push("#### Further Reading".to_string());
-        lines.extend(daily_briefing_key_source_lines(&story.source_cards, 3));
+        lines.extend(daily_briefing_key_source_lines(&story.source_cards, 2));
         lines.push(String::new());
     }
     lines.push("## Editor's Read".to_string());
@@ -888,10 +889,13 @@ fn daily_briefing_reader_stories<'a>(
     window: Option<(DateTime<Utc>, DateTime<Utc>)>,
 ) -> Vec<DailyBriefingReaderStory<'a>> {
     let mut stories = Vec::new();
-    for report in reports.iter().take(20) {
+    for report in reports {
         let story_cards =
             daily_briefing_report_fresh_source_cards(report, source_cards, window.as_ref());
         if story_cards.is_empty() {
+            continue;
+        }
+        if !daily_briefing_report_has_newsletter_story(report, &story_cards) {
             continue;
         }
         let title = daily_briefing_story_title(report, &story_cards);
@@ -907,31 +911,65 @@ fn daily_briefing_reader_stories<'a>(
             body,
             source_cards: story_cards,
         });
-        if stories.len() >= 10 {
+        if stories.len() >= 5 {
             break;
         }
     }
     stories
 }
 
+fn daily_briefing_lede_for_stories(stories: &[DailyBriefingReaderStory<'_>]) -> String {
+    if stories.is_empty() {
+        return daily_briefing_lede_for_titles(&[]);
+    }
+    let titles = stories
+        .iter()
+        .map(|story| story.title.as_str())
+        .collect::<Vec<_>>();
+    daily_briefing_lede_for_titles(&titles)
+}
+
+pub(crate) fn daily_briefing_report_has_newsletter_story(
+    report: &KnowledgeReport,
+    source_cards: &[&SourceCard],
+) -> bool {
+    if source_cards.is_empty() {
+        return false;
+    }
+    if daily_briefing_report_is_generated_storying_artifact(report)
+        && daily_briefing_source_cards_are_github_repo_only(source_cards)
+    {
+        return false;
+    }
+    true
+}
+
+pub(crate) fn daily_briefing_source_cards_are_github_repo_only(
+    source_cards: &[&SourceCard],
+) -> bool {
+    source_cards.iter().all(|card| {
+        card.provider.eq_ignore_ascii_case("github")
+            && card.source_type.eq_ignore_ascii_case("github_repo")
+    })
+}
+
 fn daily_briefing_issue_read(stories: &[DailyBriefingReaderStory<'_>]) -> String {
     if stories.is_empty() {
-        return "The honest read is that the latest run did not produce a clean newsletter item."
-            .to_string();
+        return "The right call is to hold the issue rather than pad it.".to_string();
     }
     "The useful read is whether the primary links are backed by docs, releases, benchmarks, or credible developer use.".to_string()
 }
 
 fn daily_briefing_watch_next(stories: &[DailyBriefingReaderStory<'_>]) -> String {
     if stories.is_empty() {
-        return "Wait for fresh primary links or credible independent reaction before sending a stronger issue.".to_string();
+        return "For the next issue, look for primary announcements, release notes, benchmarks, shipping details, or credible developer reaction from the last 24 hours.".to_string();
     }
     "Check official release notes or docs first, then look for independent developer use before promoting any item into a trend.".to_string()
 }
 
 pub(crate) fn daily_briefing_lede_for_titles(titles: &[&str]) -> String {
     match titles {
-        [] => "No clean AI story cleared the freshness and evidence filter for this issue. That is a valid result: stale repository backlogs and generated notes should not be dressed up as news.".to_string(),
+        [] => "No issue today. I scanned the last 24 hours and did not find a clean AI story worth sending as news.".to_string(),
         [lead] => format!(
             "The clearest item today is {lead}. Treat it as a concrete signal to check, not as a launch claim unless the linked source actually says so."
         ),
@@ -999,9 +1037,8 @@ pub(crate) fn daily_briefing_story_title(
             .collect::<Vec<_>>();
         if !repo_names.is_empty() {
             if let Some(entity) = daily_briefing_title_entity(&topic) {
-                return format!("{entity} repo activity: {}", repo_names.join(", "));
+                return entity;
             }
-            return format!("GitHub activity: {}", repo_names.join(", "));
         }
     }
     daily_briefing_title_entity(&topic).unwrap_or(topic)
@@ -1180,6 +1217,8 @@ pub(crate) fn daily_briefing_report_is_generated_storying_artifact(
         "knowledge_cluster_editor_v1"
             | "knowledge_cluster_model_writer_v1"
             | "deterministic_source_card_projection_v1"
+            | "source_card_backlog"
+            | "source_card_backlog_clustering"
     )
 }
 
@@ -1205,6 +1244,11 @@ pub(crate) fn daily_briefing_report_body_is_projection_boilerplate(markdown: &st
         "provider family buckets",
         "stored as source-card ids",
         "stored as source references",
+        "worth keeping on the working map because",
+        "official or primary-style sources give the topic a factual starting point",
+        "official or primary-style source give the topic a factual starting point",
+        "independent reaction still needs to be checked",
+        "this page is a working note",
         "first bridge between the existing live/captured ingestion machinery",
         "source-agnostic knowledge substrate",
         "primary-source-style rows",
@@ -1227,8 +1271,16 @@ pub(crate) fn daily_briefing_source_card_story(
     }
     let source_summary = daily_briefing_source_summary_clause(source_cards);
     let angle = daily_briefing_interpretive_angle(report, source_cards);
+    if source_cards
+        .iter()
+        .all(|card| card.provider.eq_ignore_ascii_case("github"))
+    {
+        return format!(
+            "The GitHub links point to {source_summary}. Read that narrowly: they show code movement, not a launch, benchmark result, or adoption trend. The next test is whether docs, release notes, or developers connect it to a shipped change. My read for now: {angle}."
+        );
+    }
     format!(
-        "The useful signal around {topic} is {source_summary}. Read this as {angle}, not as a confirmed launch, benchmark result, or adoption claim. The evidence is still narrow, so the next useful check is whether official docs, release notes, benchmarks, or credible developer usage confirm the same direction."
+        "{topic} is showing up through {source_summary}. Read this as {angle}, not as a confirmed launch, benchmark result, or adoption claim. The evidence is still narrow, so the next check is whether official docs, release notes, benchmarks, or credible developer usage confirm the same direction."
     )
 }
 
@@ -1238,11 +1290,11 @@ pub(crate) fn daily_briefing_source_summary_clause(source_cards: &[&SourceCard])
         .take(3)
         .map(|card| {
             let label = daily_briefing_source_label(card);
-            let summary = daily_briefing_source_takeaway_text(card, 120);
+            let summary = daily_briefing_source_takeaway_text(card, 90);
             if summary.is_empty() {
                 label
             } else {
-                format!("{label} ({summary})")
+                format!("{label}: {summary}")
             }
         })
         .collect::<Vec<_>>();
@@ -1252,12 +1304,9 @@ pub(crate) fn daily_briefing_source_summary_clause(source_cards: &[&SourceCard])
         .iter()
         .all(|card| card.provider.eq_ignore_ascii_case("github"))
     {
-        format!(
-            "visible in GitHub repository activity for {}",
-            human_join_strings(&names)
-        )
+        format!("GitHub links for {}", human_join_strings(&names))
     } else {
-        format!("visible in {}", human_join_strings(&names))
+        format!("activity around {}", human_join_strings(&names))
     }
 }
 
@@ -1423,6 +1472,9 @@ pub(crate) fn daily_briefing_source_takeaway_text(card: &SourceCard, max_chars: 
             || candidate
                 .to_ascii_lowercase()
                 .ends_with("is a public github repository.")
+            || candidate
+                .to_ascii_lowercase()
+                .starts_with("no repository description")
         {
             continue;
         }
@@ -1664,12 +1716,24 @@ pub(crate) fn daily_briefing_rewrite_reader_language(text: &str) -> String {
 }
 
 pub(crate) fn daily_briefing_output_has_forbidden_reader_language(text: &str) -> bool {
-    daily_briefing_contains_forbidden_reader_language(text)
+    !daily_briefing_forbidden_reader_terms(text).is_empty()
 }
 
 pub(crate) fn daily_briefing_contains_forbidden_reader_language(text: &str) -> bool {
+    !daily_briefing_forbidden_reader_terms(text).is_empty()
+}
+
+pub(crate) fn daily_briefing_forbidden_reader_terms(text: &str) -> Vec<&'static str> {
     let lower = text.to_ascii_lowercase();
-    [
+    daily_briefing_forbidden_reader_language_terms()
+        .iter()
+        .copied()
+        .filter(|term| lower.contains(term))
+        .collect()
+}
+
+pub(crate) fn daily_briefing_forbidden_reader_language_terms() -> &'static [&'static str] {
+    &[
         "arcwell",
         "local corpus",
         "local record",
@@ -1706,8 +1770,6 @@ pub(crate) fn daily_briefing_contains_forbidden_reader_language(text: &str) -> b
         "candidate id",
         "cluster id",
     ]
-    .iter()
-    .any(|term| lower.contains(term))
 }
 
 pub(crate) fn human_join_strings(items: &[String]) -> String {

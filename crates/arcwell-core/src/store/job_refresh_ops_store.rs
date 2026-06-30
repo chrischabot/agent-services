@@ -240,7 +240,7 @@ impl Store {
             .len();
         let error_count = source_health
             .iter()
-            .filter(|health| health.status != "healthy")
+            .filter(|health| job_source_health_status_counts_as_error(&health.status))
             .count();
         let stale_total = stale_role_count + closed_role_count;
         let run = self.record_job_search_run(JobSearchRunInput {
@@ -273,7 +273,15 @@ impl Store {
         ];
         if error_count > 0 {
             warnings.push(
-                "One or more source-health rows were not healthy and must remain visible in reports."
+                "One or more source-health rows failed and must remain visible in reports."
+                    .to_string(),
+            );
+        } else if source_health
+            .iter()
+            .any(|health| health.status == "partial")
+        {
+            warnings.push(
+                "One or more source-health rows were partial; accepted roles are usable, but rejected source noise remains visible in reports."
                     .to_string(),
             );
         }

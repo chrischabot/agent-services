@@ -464,9 +464,20 @@ pub(crate) fn openai_knowledge_cluster_proposal_response(
             "store": false
         }))
         .send()
-        .context("openai knowledge cluster proposal request failed")?
-        .error_for_status()
-        .context("openai knowledge cluster proposal returned an error status")?
+        .context("openai knowledge cluster proposal request failed")
+        .and_then(|response| {
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            let body = response
+                .text()
+                .unwrap_or_else(|error| format!("failed to read provider error body: {error}"));
+            let body = excerpt(&redact_secret_like_text(&body), 1_000);
+            bail!(
+                "openai knowledge cluster proposal returned an error status {status}: {body}"
+            );
+        })?
         .json()
         .context("openai knowledge cluster proposal returned invalid JSON")
 }

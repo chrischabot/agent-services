@@ -493,13 +493,12 @@ fn severe_native_daily_briefing_worker_sends_human_readable_html_email_once() {
 }
 
 #[test]
-fn severe_daily_briefing_projection_ledger_becomes_reader_story() {
+fn severe_daily_briefing_projection_ledger_does_not_become_fake_story() {
     // CLAIM: deterministic projection reports are not themselves newsletter
-    // prose. The daily briefing must turn them into a reader-facing story
-    // from the linked sources rather than leaking pipeline accounting.
-    // ORACLE: the exact June 30 failure language is absent, the title no
-    // longer says "Knowledge Report", and the linked GitHub sources are
-    // rendered as useful links with concrete takeaways.
+    // prose. If the only fresh evidence is repo rows from a generated cluster,
+    // the daily briefing must not manufacture a story.
+    // ORACLE: the exact June 30 failure language is absent, no Databricks repo
+    // story is promoted, and the issue honestly says nothing cleared.
     // SEVERITY: Severe because this is the difference between a useful
     // morning briefing and an internal receipt dump.
     let schedule = IssueSchedule {
@@ -604,17 +603,21 @@ fn severe_daily_briefing_projection_ledger_becomes_reader_story() {
         &BTreeMap::new(),
     );
 
-    assert!(text.contains("Today's Stories"), "{text}");
-    assert!(text.contains("Databricks repo activity: sdk-js"), "{text}");
+    assert!(text.contains("No Issue Today"), "{text}");
+    assert!(text.contains("No issue today"), "{text}");
+    assert!(text.contains("last 24 hours"), "{text}");
     assert!(
-        text.contains("visible in GitHub repository activity"),
+        text.contains("not a newsletter item by themselves"),
         "{text}"
     );
+    assert!(!text.contains("Today's Stories"), "{text}");
+    assert!(!text.contains("Databricks repo activity"), "{text}");
+    assert!(!text.contains("GitHub activity around"), "{text}");
     assert!(
-        text.contains("[databricks/sdk-js](https://github.com/databricks/sdk-js)"),
+        !text.contains("[databricks/sdk-js](https://github.com/databricks/sdk-js)"),
         "{text}"
     );
-    assert!(text.contains("Last pushed 2026-06-30"), "{text}");
+    assert!(!text.contains("Last pushed 2026-06-30"), "{text}");
     assert!(!text.contains("spark-csv"), "{text}");
     for forbidden in [
         "Knowledge Report",
@@ -634,6 +637,9 @@ fn severe_daily_briefing_projection_ledger_becomes_reader_story() {
         "source references",
         "is a public GitHub repository",
         "Verify official primary sources",
+        "freshness and evidence filter",
+        "generated notes",
+        "repository churn",
     ] {
         assert!(
             !text
@@ -642,6 +648,201 @@ fn severe_daily_briefing_projection_ledger_becomes_reader_story() {
             "reader briefing leaked forbidden term {forbidden:?}:\n{text}"
         );
     }
+}
+
+#[test]
+fn severe_daily_briefing_scans_past_generated_repo_backlog_for_today_story() {
+    // CLAIM: a rerun is a last-24-hours briefing, not a delta over the newest
+    // generated report rows. Repo-only working notes at the top of the update
+    // order must not hide a real reader story from earlier in the same day.
+    // ORACLE: with max_reports below the generated-note count, the worker
+    // still scans enough of the 24-hour pool to include the real story and
+    // omit the generated repo clusters from the rendered issue.
+    // SEVERITY: Severe because otherwise every cleanup/rerun can degrade the
+    // daily email into either fake repo analysis or a useless "no issue" note.
+    let store = test_store("daily-briefing-scans-past-generated-backlog");
+    let (story_card, _story_cluster, story_report) = seed_daily_knowledge_report(
+        &store,
+        "real-story",
+        "OpenAI package and developer reaction",
+        "OpenAI published a package and developer reaction connected it to agent workflows.",
+        false,
+    );
+    force_knowledge_report_body(
+        &store,
+        &story_report.id,
+        "# OpenAI package and developer reaction\n\nIn the last 24 hours, OpenAI package activity and developer reaction pointed in the same direction: agent tooling is becoming distribution, not just documentation.\n\nThe useful tension is whether the package becomes a maintained workflow surface or stays a narrow developer artifact.",
+    );
+    force_knowledge_report_updated_at(
+        &store,
+        &story_report.id,
+        &(Utc::now() - ChronoDuration::hours(3)).to_rfc3339(),
+    );
+
+    for index in 0..25 {
+        let card = store
+            .add_source_card(SourceCardInput {
+                title: format!("GitHub repo noise-org/noise-repo-{index:02}"),
+                url: format!("https://github.com/noise-org/noise-repo-{index:02}"),
+                source_type: "github_repo".to_string(),
+                provider: "github".to_string(),
+                summary: "No repository description.".to_string(),
+                claims: vec![SourceClaim {
+                    claim: "noise repo is a public GitHub repository.".to_string(),
+                    kind: "fact".to_string(),
+                    confidence: 0.9,
+                }],
+                retrieved_at: Some((Utc::now() - ChronoDuration::minutes(10)).to_rfc3339()),
+                metadata: json!({
+                    "raw": {
+                        "pushed_at": (Utc::now() - ChronoDuration::minutes(10)).to_rfc3339(),
+                        "stargazers_count": 1
+                    }
+                }),
+            })
+            .unwrap();
+        let cluster = store
+            .create_knowledge_cluster(KnowledgeClusterInput {
+                topic: format!("Noise Org {index:02}: release and launch activity"),
+                status: "active".to_string(),
+                event_ids: Vec::new(),
+                source_card_ids: vec![card.id.clone()],
+                first_seen_at: None,
+                last_seen_at: None,
+                novelty_score: 0.2,
+                momentum_score: 0.1,
+                stale_score: 0.0,
+                reason: "Generated repo-only backlog fixture.".to_string(),
+                duplicate_groups: json!({}),
+                metadata: json!({ "fixture": "daily_generated_repo_backlog" }),
+            })
+            .unwrap();
+        let report = store
+            .record_knowledge_report(KnowledgeReportInput {
+                cluster_id: cluster.id,
+                title: format!("Noise Org {index:02}: release and launch activity"),
+                body_markdown: format!(
+                    "# Noise Org {index:02}: release and launch activity\n\n## Executive Read\nNoise Org {index:02}: release and launch activity is worth tracking because 1 linked source points at the same subject. 1 official or primary-style source gives the topic a factual starting point, while independent reaction still needs to be checked. This page is a working note, not a reader-ready story. Source-card evidence: {source_id}.\n\n## Why it matters\nThis generated backlog fixture has enough prose to pass the report quality gate, but it is still only a repo row. It should not hide a real story from the same daily window, and it should not be promoted as a launch, benchmark, adoption trend, or competitive shift. Source-card evidence: {source_id}.\n\n## Next Investigation\n- Verify official release notes, documentation, and credible developer reaction before treating this as news.\n- Corroborate the repo row with a primary source or independent developer use before it enters the daily issue.\n\n## Confidence and uncertainty\nConfidence is low because the only linked evidence is a GitHub repository row. Uncertainty remains around whether anything actually shipped, changed for users, or drew meaningful developer attention. Source-card evidence: {source_id}.",
+                    source_id = card.id
+                ),
+                status: "draft".to_string(),
+                source_card_ids: vec![card.id],
+                metadata: json!({ "origin": "source_card_backlog" }),
+            })
+            .unwrap();
+        force_knowledge_report_updated_at(
+            &store,
+            &report.id,
+            &(Utc::now() - ChronoDuration::minutes(2)).to_rfc3339(),
+        );
+    }
+
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-wide-scan-source-write"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "arcwell"
+source = "source_card_add"
+reason = "allow daily briefing candidate materialization for wide scan regression"
+priority = 15
+"#,
+    );
+    let (input, _, _) = due_utc_schedule_input(
+        "Wide scan daily briefing",
+        "email:friend@example.com",
+        json!({ "window_hours": 24, "max_reports": 5, "max_source_cards": 10 }),
+    );
+    let schedule = store.upsert_issue_schedule(input).unwrap();
+    let due_at = Utc::now().to_rfc3339();
+    let tick_key = issue_schedule_tick_key(&schedule.id, &due_at, &schedule);
+    let tick = store
+        .create_issue_schedule_tick(&schedule.id, &tick_key, &due_at)
+        .unwrap();
+
+    let result = store
+        .execute_knowledge_daily_briefing(&json!({ "tick_id": tick.id }))
+        .unwrap();
+    assert_eq!(
+        result.get("status").and_then(Value::as_str),
+        Some("blocked"),
+        "auto-approval is intentionally absent; the candidate body is still materialized: {result:#?}"
+    );
+    let candidates = store.list_digest_candidates().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(
+        candidates[0]
+            .source_card_ids
+            .iter()
+            .any(|id| id == &story_card.id),
+        "the real story evidence must survive the widened scan"
+    );
+    let cards = store
+        .read_source_cards_by_ids(&candidates[0].source_card_ids)
+        .unwrap();
+    let briefing = cards
+        .iter()
+        .find(|card| digest_source_card_is_knowledge_daily_briefing(card))
+        .expect("daily briefing source card should be materialized");
+    let text = &briefing.summary;
+    let reread_story = store
+        .list_knowledge_reports(100)
+        .unwrap()
+        .into_iter()
+        .find(|report| report.id == story_report.id)
+        .unwrap();
+    let debug_window = daily_briefing_window(
+        &(Utc::now() - ChronoDuration::hours(24)).to_rfc3339(),
+        &Utc::now().to_rfc3339(),
+    );
+    let reread_story_card = cards
+        .iter()
+        .find(|card| card.id == story_card.id)
+        .expect("candidate should include reread story card");
+    let reread_story_cards =
+        daily_briefing_report_fresh_source_cards(&reread_story, &cards, debug_window.as_ref());
+    let story_body = daily_briefing_story_body(&reread_story, &reread_story_cards);
+    assert_eq!(reread_story_cards.len(), 1);
+    assert!(
+        daily_briefing_report_has_newsletter_story(&reread_story, &reread_story_cards),
+        "{story_body}"
+    );
+    assert!(
+        daily_briefing_source_card_is_in_window(reread_story_card, debug_window.as_ref()),
+        "{:?}",
+        reread_story_card.retrieved_at
+    );
+    assert!(
+        !daily_briefing_output_has_forbidden_reader_language(&daily_briefing_story_title(
+            &reread_story,
+            &reread_story_cards
+        )),
+        "{story_body}"
+    );
+    assert!(
+        !daily_briefing_output_has_forbidden_reader_language(&story_body),
+        "{story_body}"
+    );
+    assert!(text.contains("Today's Stories"), "{text}");
+    assert!(
+        text.contains("OpenAI package and developer reaction"),
+        "{text}"
+    );
+    assert!(text.contains("last 24 hours"), "{text}");
+    assert!(!text.contains("No Issue Today"), "{text}");
+    assert!(!text.contains("noise-org"), "{text}");
+    assert!(!text.contains("GitHub activity around"), "{text}");
+    assert!(
+        !text.contains("not a newsletter item by themselves"),
+        "{text}"
+    );
+    assert!(
+        !daily_briefing_output_has_forbidden_reader_language(text),
+        "{text}"
+    );
 }
 
 #[test]

@@ -727,6 +727,112 @@ reason = "scheduled model cluster proposals disabled"
 }
 
 #[test]
+fn severe_model_cluster_worker_provider_outage_defers_with_source_health() {
+    // CLAIM: transient/provider failures from scheduled model clustering are
+    // visible source-health failures with bounded retry timing, not dead
+    // letters and not partial cluster writes.
+    // ORACLE: a mocked OpenAI 500 response leaves the worker job deferred,
+    // records failed knowledge_model_clusters source health with a next run,
+    // and creates no clusters, reports, wiki pages, or digest candidates.
+    // SEVERITY: Severe because a live OpenAI request outage previously
+    // exhausted retries and made Arcwell health red despite no durable data
+    // corruption.
+    let store = test_store("knowledge-model-cluster-worker-provider-outage");
+    store
+        .set_secret_value("OPENAI_API_KEY", "test-openai-key", "openai")
+        .unwrap();
+    seed_knowledge_source_card(
+        &store,
+        "worker-provider-outage",
+        "Worker provider outage model clustering evidence should match a source card.",
+    );
+    let cluster_count_before = store.list_knowledge_clusters(10).unwrap().len();
+    let report_count_before = store.list_knowledge_reports(10).unwrap().len();
+    let wiki_count_before = store.list_wiki_pages().unwrap().len();
+    let digest_count_before = store.list_digest_candidates().unwrap().len();
+    let api = mock_status_server(
+        "500 Internal Server Error",
+        "",
+        r#"{"error":{"message":"temporary model outage"}}"#,
+        "application/json",
+    );
+    store
+        .enqueue_knowledge_cluster_model_proposal_job_with_lineage(
+            "Worker provider outage model clustering evidence",
+            "openai",
+            Some("gpt-4.1-mini"),
+            Some(api.as_str()),
+            Some(5),
+            12,
+            6,
+            Some(json!({
+                "watch_source_key": "knowledge:model-clusters:provider-outage",
+                "source_kind": "knowledge_model_clusters",
+                "locator": "provider-outage",
+            })),
+        )
+        .unwrap();
+    let worker = store.run_worker_once(1).unwrap();
+    assert_eq!(worker.processed, 1);
+    assert_eq!(worker.jobs[0].kind, "knowledge_cluster_model_propose");
+    assert_eq!(worker.jobs[0].status, "deferred");
+    assert_eq!(worker.jobs[0].attempts, 0);
+    assert!(worker.jobs[0].dead_lettered_at.is_none());
+    let result = worker.jobs[0].result_json.as_ref().unwrap();
+    assert_eq!(
+        result.get("status").and_then(Value::as_str),
+        Some("deferred")
+    );
+    assert_eq!(
+        result.get("source_health_key").and_then(Value::as_str),
+        Some("knowledge:model-clusters:provider-outage")
+    );
+    assert!(
+        result
+            .get("deferred_until")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+    let reason = result
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        reason.contains("openai knowledge cluster proposal returned an error status 500"),
+        "{result:#?}"
+    );
+    assert!(reason.contains("temporary model outage"), "{result:#?}");
+    assert!(!reason.contains("test-openai-key"), "{result:#?}");
+    let health = store
+        .get_source_health("knowledge:model-clusters:provider-outage")
+        .unwrap()
+        .expect("source health");
+    assert_eq!(health.source_kind, "knowledge_model_clusters");
+    assert_ne!(health.status, "healthy");
+    assert!(health.next_run_at.is_some());
+    let health_error = health.last_error.as_deref().unwrap_or_default();
+    assert!(
+        health_error.contains("openai knowledge cluster proposal returned an error status 500"),
+        "{health:?}"
+    );
+    assert!(health_error.contains("temporary model outage"), "{health:?}");
+    assert!(!health_error.contains("test-openai-key"), "{health:?}");
+    assert_eq!(
+        store.list_knowledge_clusters(10).unwrap().len(),
+        cluster_count_before
+    );
+    assert_eq!(
+        store.list_knowledge_reports(10).unwrap().len(),
+        report_count_before
+    );
+    assert_eq!(store.list_wiki_pages().unwrap().len(), wiki_count_before);
+    assert_eq!(
+        store.list_digest_candidates().unwrap().len(),
+        digest_count_before
+    );
+}
+
+#[test]
 fn severe_model_cluster_worker_rejects_invalid_enqueue_input_without_job() {
     // CLAIM: model-cluster worker enqueue validates query/provider shape
     // before a durable job exists.

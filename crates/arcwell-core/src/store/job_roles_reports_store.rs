@@ -1704,10 +1704,11 @@ impl Store {
         self.conn
             .execute_batch("SAVEPOINT job_weekly_report_delivery_prepare")?;
         let prepared_result = (|| -> Result<JobWeeklyReportDeliveryReport> {
+            let delivery_body = render_job_weekly_report_delivery_body(&weekly_report.body);
             let privacy_check = self.check_job_privacy_text(
                 "job_weekly_report_delivery",
                 Some(&weekly_report.id),
-                &weekly_report.body,
+                &delivery_body,
                 &[],
             )?;
             if privacy_check.decision == "block" {
@@ -1754,7 +1755,7 @@ impl Store {
                 &input.channel,
                 "outgoing",
                 &input.target,
-                &weekly_report.body,
+                &delivery_body,
                 "prepared",
                 None,
                 Some(&weekly_report.id),
@@ -1860,10 +1861,11 @@ impl Store {
             );
         }
 
+        let delivery_body = render_job_weekly_report_delivery_body(&weekly_report.body);
         let privacy_check = self.check_job_privacy_text(
             "job_weekly_report_provider_delivery",
             Some(&weekly_report.id),
-            &weekly_report.body,
+            &delivery_body,
             &[],
         )?;
         if privacy_check.decision == "block" {
@@ -1915,7 +1917,7 @@ impl Store {
                             "report_id": weekly_report.id,
                             "parse_mode": "MarkdownV2",
                         }),
-                        untrusted_excerpt: Some(weekly_report.body.clone()),
+                        untrusted_excerpt: Some(delivery_body.clone()),
                     })?;
                     self.require_cost_budget(
                         "arcwell-job-hunting",
@@ -1930,7 +1932,7 @@ impl Store {
                         message_id,
                         &token,
                         chat_id,
-                        &weekly_report.body,
+                        &delivery_body,
                         api_base.as_deref(),
                     )?;
                     Ok((report.ok, report.status, report.message, report.delivery))
@@ -1967,7 +1969,7 @@ impl Store {
                         message_id,
                         to,
                         &subject,
-                        &weekly_report.body,
+                        &delivery_body,
                         api_base.as_deref(),
                         "job_weekly_report_delivery",
                         "Job weekly report email delivery",

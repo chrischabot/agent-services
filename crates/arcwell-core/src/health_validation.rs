@@ -2833,21 +2833,18 @@ pub(crate) fn render_job_weekly_report(
     contacts: &[JobContact],
     role_events: &[JobRoleStatusEvent],
 ) -> String {
-    let mut tier_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut role_labels: BTreeMap<String, String> = BTreeMap::new();
     let mut role_entries: BTreeMap<String, &JobShortlistEntry> = BTreeMap::new();
     for entry in &shortlist.entries {
         role_labels.insert(
             entry.role.id.clone(),
-            format!("{} - {}", entry.role.company, entry.role.role_title),
+            format!(
+                "{} - {}",
+                entry.role.company,
+                job_report_display_role_title(&entry.role)
+            ),
         );
         role_entries.insert(entry.role.id.clone(), entry);
-        let tier = entry
-            .score
-            .as_ref()
-            .map(|score| score.tier.clone())
-            .unwrap_or_else(|| "unscored".to_string());
-        *tier_counts.entry(tier).or_insert(0) += 1;
     }
     let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
     for application in applications {
@@ -2861,12 +2858,22 @@ pub(crate) fn render_job_weekly_report(
         .iter()
         .map(|contact| (contact.id.clone(), contact.name.clone()))
         .collect::<BTreeMap<_, _>>();
-    let top_roles = shortlist
-        .entries
+    let grouped_open_roles = job_report_open_role_groups(&shortlist.entries);
+    let mut tier_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for group in &grouped_open_roles {
+        let tier = group
+            .primary
+            .score
+            .as_ref()
+            .map(|score| score.tier.clone())
+            .unwrap_or_else(|| "unscored".to_string());
+        *tier_counts.entry(tier).or_insert(0) += 1;
+    }
+    let top_roles = grouped_open_roles
         .iter()
-        .filter(|entry| entry.score.is_some())
         .take(10)
-        .map(|entry| {
+        .map(|group| {
+            let entry = group.primary;
             let score = entry
                 .score
                 .as_ref()
@@ -2879,7 +2886,9 @@ pub(crate) fn render_job_weekly_report(
             };
             format!(
                 "- {} - {}: {}",
-                entry.role.company, entry.role.role_title, score
+                entry.role.company,
+                job_report_display_role_title(&entry.role),
+                score
             ) + &outcome_warnings
         })
         .collect::<Vec<_>>()
@@ -2890,7 +2899,7 @@ pub(crate) fn render_job_weekly_report(
     let role_changes = render_job_weekly_role_changes(role_events, &role_labels);
     let new_openings =
         render_job_opening_events(role_events, &role_entries, &role_labels, &["new"]);
-    let open_roles = render_job_current_open_roles(&shortlist.entries);
+    let open_roles = render_job_current_open_roles_from_groups(&grouped_open_roles);
     let removed_roles = render_job_opening_events(
         role_events,
         &role_entries,
@@ -2918,20 +2927,45 @@ pub(crate) fn render_job_weekly_report(
     )
 }
 
-pub(crate) fn render_job_current_open_roles(entries: &[JobShortlistEntry]) -> String {
-    let roles = entries
-        .iter()
-        .filter(|entry| entry.role.current_status == "live")
-        .filter(|entry| entry.score.is_some())
-        .filter(|entry| {
-            entry
+pub(crate) fn render_job_weekly_report_delivery_body(body: &str) -> String {
+    let mut delivery_body = body.to_string();
+    if let Some(index) = delivery_body.find("\n\n## Shortlist\n") {
+        delivery_body.truncate(index);
+    }
+    delivery_body.replacen("# Job Weekly Report", "# Job Scan", 1)
+}
+
+struct JobReportRoleGroup<'a> {
+    primary: &'a JobShortlistEntry,
+    role_ids: BTreeSet<String>,
+    location_labels: BTreeSet<String>,
+}
+
+struct JobReportRoleEventGroup<'a> {
+    primary: &'a JobShortlistEntry,
+    role_ids: BTreeSet<String>,
+    statuses: BTreeSet<String>,
+    location_labels: BTreeSet<String>,
+}
+
+fn job_report_open_role_groups(entries: &[JobShortlistEntry]) -> Vec<JobReportRoleGroup<'_>> {
+    collect_job_report_role_groups(entries.iter().filter(|entry| {
+        entry.role.current_status == "live"
+            && entry.score.is_some()
+            && entry
                 .score
                 .as_ref()
                 .map(|score| !matches!(score.tier.as_str(), "pass" | "blocked"))
                 .unwrap_or(true)
-        })
+            && job_report_role_is_uk_plausible(&entry.role)
+    }))
+}
+
+fn render_job_current_open_roles_from_groups(groups: &[JobReportRoleGroup<'_>]) -> String {
+    let roles = groups
+        .iter()
         .take(25)
-        .map(render_job_role_digest_entry)
+        .map(render_job_role_group_digest_entry)
         .collect::<Vec<_>>();
     if roles.is_empty() {
         "- none".to_string()
@@ -2946,35 +2980,65 @@ pub(crate) fn render_job_opening_events(
     role_labels: &BTreeMap<String, String>,
     statuses: &[&str],
 ) -> String {
-    let mut seen = BTreeSet::new();
-    let mut lines = Vec::new();
+    let mut seen_role_status = BTreeSet::new();
+    let mut groups = Vec::<JobReportRoleEventGroup<'_>>::new();
+    let mut group_indexes = BTreeMap::<String, usize>::new();
+    let mut fallback_lines = Vec::new();
     for event in role_events {
-        if lines.len() >= 25 {
+        if groups.len() + fallback_lines.len() >= 25 {
             break;
         }
         if !statuses.iter().any(|status| *status == event.status) {
             continue;
         }
-        if !seen.insert((event.role_id.clone(), event.status.clone())) {
+        if !seen_role_status.insert((event.role_id.clone(), event.status.clone())) {
             continue;
         }
         if let Some(entry) = role_entries.get(&event.role_id) {
-            if event.status == "new" {
-                lines.push(render_job_role_digest_entry(entry));
+            if !job_report_role_is_uk_plausible(&entry.role) {
+                continue;
+            }
+            let key = job_report_role_family_key(&entry.role);
+            if let Some(index) = group_indexes.get(&key).copied() {
+                let group = &mut groups[index];
+                group.role_ids.insert(entry.role.id.clone());
+                group.statuses.insert(event.status.clone());
+                if let Some(label) = job_report_location_label(&entry.role) {
+                    group.location_labels.insert(label);
+                }
+                if job_report_entry_score(entry) > job_report_entry_score(group.primary) {
+                    group.primary = entry;
+                }
             } else {
-                lines.push(format!(
-                    "- {} at {} ({})",
-                    entry.role.role_title, entry.role.company, event.status
-                ));
+                let mut role_ids = BTreeSet::new();
+                role_ids.insert(entry.role.id.clone());
+                let mut status_set = BTreeSet::new();
+                status_set.insert(event.status.clone());
+                let mut location_labels = BTreeSet::new();
+                if let Some(label) = job_report_location_label(&entry.role) {
+                    location_labels.insert(label);
+                }
+                group_indexes.insert(key, groups.len());
+                groups.push(JobReportRoleEventGroup {
+                    primary: entry,
+                    role_ids,
+                    statuses: status_set,
+                    location_labels,
+                });
             }
         } else {
             let label = role_labels
                 .get(&event.role_id)
                 .cloned()
                 .unwrap_or_else(|| event.role_id.clone());
-            lines.push(format!("- {label} ({})", event.status));
+            fallback_lines.push(format!("- {label} ({})", event.status));
         }
     }
+    let mut lines = groups
+        .iter()
+        .map(render_job_role_event_group)
+        .collect::<Vec<_>>();
+    lines.extend(fallback_lines);
     if lines.is_empty() {
         "- none".to_string()
     } else {
@@ -2982,14 +3046,68 @@ pub(crate) fn render_job_opening_events(
     }
 }
 
-pub(crate) fn render_job_role_digest_entry(entry: &JobShortlistEntry) -> String {
+fn render_job_role_group_digest_entry(group: &JobReportRoleGroup<'_>) -> String {
+    render_job_role_digest_entry_with_locations(
+        group.primary,
+        Some(&group.location_labels),
+        group.role_ids.len(),
+    )
+}
+
+fn render_job_role_event_group(group: &JobReportRoleEventGroup<'_>) -> String {
+    if group.statuses.len() == 1 && group.statuses.contains("new") {
+        return render_job_role_digest_entry_with_locations(
+            group.primary,
+            Some(&group.location_labels),
+            group.role_ids.len(),
+        );
+    }
+    let statuses = group
+        .statuses
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let locations = if group.location_labels.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; locations: {}",
+            group
+                .location_labels
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let grouped = if group.role_ids.len() > 1 {
+        format!("; grouped {} postings", group.role_ids.len())
+    } else {
+        String::new()
+    };
+    format!(
+        "- {} at {} ({}{locations}{grouped})",
+        job_report_display_role_title(&group.primary.role),
+        group.primary.role.company,
+        statuses
+    )
+}
+
+fn render_job_role_digest_entry_with_locations(
+    entry: &JobShortlistEntry,
+    location_labels: Option<&BTreeSet<String>>,
+    grouped_count: usize,
+) -> String {
     let role = &entry.role;
     let mut details = Vec::new();
-    match (&role.location, &role.work_mode) {
-        (Some(location), Some(work_mode)) => details.push(format!("{location}; {work_mode}")),
-        (Some(location), None) => details.push(location.clone()),
-        (None, Some(work_mode)) => details.push(work_mode.clone()),
-        (None, None) => {}
+    if let Some(labels) = location_labels.filter(|labels| !labels.is_empty()) {
+        details.push(format!(
+            "Locations: {}.",
+            labels.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    } else if let Some(label) = job_report_location_label(role) {
+        details.push(label);
     }
     if let Some(stage) = role
         .company_stage_or_size
@@ -3014,17 +3132,388 @@ pub(crate) fn render_job_role_digest_entry(entry: &JobShortlistEntry) -> String 
         details.push(requirement.clone());
     }
     if let Some(score) = &entry.score {
-        details.push(format!(
-            "Fit: {} ({:.1}).",
-            score.tier, score.weighted_score
-        ));
+        details.push(format!("Score: {:.0}%.", score.weighted_score));
+    }
+    if grouped_count > 1 {
+        details.push(format!("Grouped {grouped_count} location postings."));
     }
     let details = if details.is_empty() {
         "No brief description recorded yet.".to_string()
     } else {
         details.join(" ")
     };
-    format!("- {} at {}\n  {}", role.role_title, role.company, details)
+    format!(
+        "- {} at {}\n  {}",
+        job_report_display_role_title(role),
+        role.company,
+        details
+    )
+}
+
+fn collect_job_report_role_groups<'a, I>(entries: I) -> Vec<JobReportRoleGroup<'a>>
+where
+    I: IntoIterator<Item = &'a JobShortlistEntry>,
+{
+    let mut groups = Vec::<JobReportRoleGroup<'a>>::new();
+    let mut indexes = BTreeMap::<String, usize>::new();
+    for entry in entries {
+        let key = job_report_role_family_key(&entry.role);
+        if let Some(index) = indexes.get(&key).copied() {
+            let group = &mut groups[index];
+            group.role_ids.insert(entry.role.id.clone());
+            if let Some(label) = job_report_location_label(&entry.role) {
+                group.location_labels.insert(label);
+            }
+            if job_report_entry_score(entry) > job_report_entry_score(group.primary) {
+                group.primary = entry;
+            }
+            continue;
+        }
+        let mut role_ids = BTreeSet::new();
+        role_ids.insert(entry.role.id.clone());
+        let mut location_labels = BTreeSet::new();
+        if let Some(label) = job_report_location_label(&entry.role) {
+            location_labels.insert(label);
+        }
+        indexes.insert(key, groups.len());
+        groups.push(JobReportRoleGroup {
+            primary: entry,
+            role_ids,
+            location_labels,
+        });
+    }
+    groups
+}
+
+fn job_report_entry_score(entry: &JobShortlistEntry) -> f64 {
+    entry
+        .score
+        .as_ref()
+        .map(|score| score.weighted_score)
+        .unwrap_or(f64::NEG_INFINITY)
+}
+
+fn job_report_location_label(role: &JobRoleCard) -> Option<String> {
+    let mut locations = job_report_positive_geo_labels(&role.role_title);
+    if let Some(location) = role.location.as_deref().filter(|value| !value.is_empty()) {
+        let location_labels = job_report_positive_geo_labels(location);
+        if location_labels.is_empty() && !location.eq_ignore_ascii_case("remote") {
+            locations.push(location.to_string());
+        } else {
+            locations.extend(location_labels);
+        }
+    }
+    locations.sort();
+    locations.dedup();
+    let work_mode = role.work_mode.as_deref().filter(|value| !value.is_empty());
+    if locations.is_empty() {
+        match (role.location.as_deref(), work_mode) {
+            (Some(location), Some(work_mode)) if !location.is_empty() => {
+                Some(format!("{location}; {work_mode}"))
+            }
+            (Some(location), _) if !location.is_empty() => Some(location.to_string()),
+            (_, Some(work_mode)) => Some(work_mode.to_string()),
+            _ => None,
+        }
+    } else {
+        let location = locations.join("/");
+        Some(match work_mode {
+            Some(work_mode) => format!("{location}; {work_mode}"),
+            None => location,
+        })
+    }
+}
+
+fn job_report_role_family_key(role: &JobRoleCard) -> String {
+    format!(
+        "{}::{}",
+        job_report_canonical_key_text(&role.company),
+        job_report_canonical_key_text(&job_report_display_role_title(role))
+    )
+}
+
+fn job_report_display_role_title(role: &JobRoleCard) -> String {
+    let title = job_report_strip_trailing_geo_suffix(&role.role_title);
+    if title.is_empty() {
+        role.role_title.clone()
+    } else {
+        title
+    }
+}
+
+fn job_report_strip_trailing_geo_suffix(title: &str) -> String {
+    let mut current = title.trim().to_string();
+    loop {
+        let mut changed = false;
+        if let Some((first, _rest)) = current.split_once(';') {
+            let stripped = job_report_strip_trailing_geo_suffix(first);
+            if !stripped.is_empty() {
+                current = stripped;
+                changed = true;
+            }
+        }
+        if let Some(start) = current.rfind(" (") {
+            if current.ends_with(')') {
+                let suffix = current[start + 2..current.len() - 1].trim();
+                if job_report_geo_suffix_is_location(suffix) {
+                    current.truncate(start);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            for suffix in [
+                " Remote-Friendly",
+                " Remote-friendly",
+                " remote-friendly",
+                " Remote First",
+                " Remote-First",
+                " Remote",
+                " remote",
+                " London, UK",
+                " London, United Kingdom",
+                " London",
+                " United Kingdom",
+                " Ontario, CAN",
+                " Ontario",
+                " Toronto, Canada",
+                " Toronto",
+                " Vancouver, Canada",
+                " Vancouver",
+                " San Francisco, CA",
+                " San Francisco",
+                " New York, NY",
+                " New York",
+                " Seattle, WA",
+                " Seattle",
+                " United States",
+                " Canada",
+                " Europe",
+                " EMEA",
+                " Global",
+                " Worldwide",
+            ] {
+                if current.ends_with(suffix) {
+                    current.truncate(current.len().saturating_sub(suffix.len()));
+                    current = current.trim().to_string();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            for separator in [" - ", " | ", " / ", ", "] {
+                if let Some((prefix, suffix)) = current.rsplit_once(separator) {
+                    if !prefix.trim().is_empty() && job_report_geo_suffix_is_location(suffix) {
+                        current = prefix.trim().to_string();
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    current.trim().to_string()
+}
+
+fn job_report_canonical_key_text(text: &str) -> String {
+    let mut out = String::new();
+    let mut previous_space = false;
+    for ch in text.to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            previous_space = false;
+        } else if !previous_space {
+            out.push(' ');
+            previous_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+pub(crate) fn job_report_role_is_uk_plausible(role: &JobRoleCard) -> bool {
+    let geo_text = [
+        Some(role.role_title.as_str()),
+        role.location.as_deref(),
+        role.work_mode.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
+    if geo_text.trim().is_empty() {
+        return true;
+    }
+    let normalized = job_report_normalized_geo_text(&geo_text);
+    if job_report_geo_text_has_positive_uk_relevance(&normalized) {
+        return true;
+    }
+    if job_report_geo_text_has_excluded_region(&normalized) {
+        return false;
+    }
+    if job_report_geo_text_mentions_remote(&normalized) {
+        return true;
+    }
+    !job_report_geo_text_has_any_geo_signal(&normalized)
+}
+
+fn job_report_geo_suffix_is_location(text: &str) -> bool {
+    let normalized = job_report_normalized_geo_text(text);
+    job_report_geo_text_has_positive_uk_relevance(&normalized)
+        || job_report_geo_text_has_excluded_region(&normalized)
+        || job_report_geo_text_mentions_remote(&normalized)
+}
+
+fn job_report_normalized_geo_text(text: &str) -> String {
+    let mut out = String::from(" ");
+    let mut previous_space = true;
+    for ch in text.to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            previous_space = false;
+        } else if !previous_space {
+            out.push(' ');
+            previous_space = true;
+        }
+    }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
+}
+
+fn job_report_geo_text_mentions_remote(text: &str) -> bool {
+    text.contains(" remote ") || text.contains(" remote first ") || text.contains(" distributed ")
+}
+
+fn job_report_geo_text_has_positive_uk_relevance(text: &str) -> bool {
+    [
+        " london ",
+        " united kingdom ",
+        " uk ",
+        " england ",
+        " scotland ",
+        " wales ",
+        " ireland ",
+        " europe ",
+        " european ",
+        " eu ",
+        " emea ",
+        " global ",
+        " worldwide ",
+        " anywhere ",
+        " gmt ",
+        " utc ",
+        " cet ",
+        " berlin ",
+        " amsterdam ",
+        " paris ",
+        " dublin ",
+        " lisbon ",
+        " madrid ",
+        " barcelona ",
+        " stockholm ",
+        " copenhagen ",
+        " helsinki ",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn job_report_positive_geo_labels(text: &str) -> Vec<String> {
+    let normalized = job_report_normalized_geo_text(text);
+    let mut labels = Vec::new();
+    for (needle, label) in [
+        (" london ", "London"),
+        (" united kingdom ", "United Kingdom"),
+        (" uk ", "United Kingdom"),
+        (" england ", "United Kingdom"),
+        (" scotland ", "United Kingdom"),
+        (" wales ", "United Kingdom"),
+        (" ireland ", "Ireland"),
+        (" europe ", "Europe"),
+        (" european ", "Europe"),
+        (" eu ", "Europe"),
+        (" emea ", "EMEA"),
+        (" global ", "Global"),
+        (" worldwide ", "Worldwide"),
+        (" anywhere ", "Global"),
+        (" berlin ", "Europe"),
+        (" amsterdam ", "Europe"),
+        (" paris ", "Europe"),
+        (" dublin ", "Ireland"),
+        (" lisbon ", "Europe"),
+        (" madrid ", "Europe"),
+        (" barcelona ", "Europe"),
+        (" stockholm ", "Europe"),
+        (" copenhagen ", "Europe"),
+        (" helsinki ", "Europe"),
+    ] {
+        if normalized.contains(needle) {
+            labels.push(label.to_string());
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn job_report_geo_text_has_excluded_region(text: &str) -> bool {
+    [
+        " united states ",
+        " usa ",
+        " u s ",
+        " us only ",
+        " north america ",
+        " canada ",
+        " can ",
+        " ontario ",
+        " americas ",
+        " latin america ",
+        " australia ",
+        " new zealand ",
+        " india ",
+        " singapore ",
+        " japan ",
+        " san francisco ",
+        " new york ",
+        " nyc ",
+        " seattle ",
+        " austin ",
+        " boston ",
+        " chicago ",
+        " denver ",
+        " los angeles ",
+        " miami ",
+        " portland ",
+        " washington dc ",
+        " washington d c ",
+        " district of columbia ",
+        " california ",
+        " texas ",
+        " massachusetts ",
+        " illinois ",
+        " colorado ",
+        " oregon ",
+        " washington state ",
+        " toronto ",
+        " vancouver ",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn job_report_geo_text_has_any_geo_signal(text: &str) -> bool {
+    job_report_geo_text_has_positive_uk_relevance(text)
+        || job_report_geo_text_has_excluded_region(text)
+        || job_report_geo_text_mentions_remote(text)
+}
+
+pub(crate) fn job_source_health_status_counts_as_error(status: &str) -> bool {
+    !matches!(status, "healthy" | "partial")
 }
 
 pub(crate) fn render_job_count_map(counts: &BTreeMap<String, usize>) -> String {

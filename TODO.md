@@ -236,8 +236,14 @@ PR, implementation note, or final report:
       Trash. A later 2026-06-30 job-scan delivery
       attempt `6c681db5-1bde-4406-9ed9-e65fa18e28b1` was host-observed in
       Gmail Inbox with Gmail id `19f19b743b9ce433`, leaving
-      `email verification-gaps` empty again. Missing Gmail verifier credentials
-      for ready gaps now write `email:gmail-mailbox-verifier` source health
+      `email verification-gaps` empty again. Follow-up host-Gmail connector
+      repair moved the 25 historical Trash-placed Arcwell messages back to
+      Inbox by adding `INBOX` and removing `TRASH`, then recorded 25
+      `gmail_host_connector_repair` Inbox observations; `email
+      verification-gaps` is now empty, the active 7am scheduled tick is
+      `mailbox_observed_inbox`, and Gmail OAuth secret-health warnings are gone
+      because no active mailbox gaps remain. Missing Gmail verifier credentials
+      for future ready gaps now write `email:gmail-mailbox-verifier` source health
       instead of requiring a manual verifier run to expose the blocker.
       Mailbox observations for not-observed, unknown, Trash, and Spam
       placements now write per-delivery source-health alerts, while Inbox
@@ -251,12 +257,14 @@ PR, implementation note, or final report:
       throttled resident-worker-visible `email_delivery_mailbox_repair` jobs;
       absent Gmail modify credentials, the job records
       `email:gmail-mailbox-repair` source health and leaves the gap open. The
-      2026-06-30 09:37 UTC catch-up briefing is mailbox-observed in Gmail with
-      `TRASH`/`CATEGORY_UPDATES` labels, so the user-visible failure was
-      mailbox placement rather than scheduler catch-up. Live real-home Gmail
-      OAuth mailbox proof and live real-home repair execution are still open;
-      the repair path and managed Gmail refresh path are local/mock proven and
-      require an initial explicit Gmail OAuth grant with modify scope. A broader
+      2026-06-30 09:37 UTC catch-up briefing was originally mailbox-observed in
+      Gmail with `TRASH`/`CATEGORY_UPDATES` labels, so the user-visible failure
+      was mailbox placement rather than scheduler catch-up; host-Gmail repair
+      moved it to Inbox and recorded fresh Inbox proof. Live real-home Arcwell
+      Gmail OAuth mailbox proof and Arcwell-owned Gmail repair execution are
+      still open; the OAuth repair path and managed Gmail refresh path are
+      local/mock proven and require an initial explicit Gmail OAuth grant with
+      modify scope. A broader
       automatic retry policy for unobserved/trash/spam sends is still open. The
       older June 29 oversized tick remains a historical blocked
       row. 2026-06-30 follow-up:

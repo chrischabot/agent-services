@@ -377,6 +377,35 @@ pub struct IssueScheduleEnqueueReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailDeliveryVerificationEnqueueReport {
+    pub inspected: usize,
+    pub enqueued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<String>,
+    pub errors: Vec<String>,
+    pub gap_count: usize,
+    pub request_count: usize,
+    pub active_job_id: Option<String>,
+    pub recent_job_id: Option<String>,
+    pub minimum_age_seconds: i64,
+    pub throttle_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailMailboxPlacementRepairEnqueueReport {
+    pub inspected: usize,
+    pub enqueued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<String>,
+    pub errors: Vec<String>,
+    pub gap_count: usize,
+    pub repairable_count: usize,
+    pub active_job_id: Option<String>,
+    pub recent_job_id: Option<String>,
+    pub throttle_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadarAuditFinding {
     pub severity: String,
     pub code: String,
@@ -618,6 +647,8 @@ pub struct WorkerRunReport {
     pub radar_schedule: Option<RadarScheduleEnqueueReport>,
     pub digest_alert_schedule: Option<DigestAlertScheduleEnqueueReport>,
     pub issue_schedule: Option<IssueScheduleEnqueueReport>,
+    pub email_delivery_verification: Option<EmailDeliveryVerificationEnqueueReport>,
+    pub email_mailbox_placement_repair: Option<EmailMailboxPlacementRepairEnqueueReport>,
     pub knowledge_cluster_model_writer: Option<KnowledgeClusterModelWriterEnqueueReport>,
     pub knowledge_entity_resolution: Option<KnowledgeEntityResolutionEnqueueReport>,
     pub knowledge_cluster_editorial_decision:

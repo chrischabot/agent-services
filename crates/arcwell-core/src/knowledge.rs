@@ -1831,7 +1831,7 @@ pub(crate) fn knowledge_github_owner_key(card: &SourceCard) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|owner| !owner.is_empty())
-        .map(|owner| format!("github:owner:{owner}"))
+        .map(|owner| format!("github:owner:{}", owner.to_ascii_lowercase()))
 }
 
 pub(crate) fn knowledge_github_owner_entity_input(
@@ -1880,7 +1880,7 @@ pub(crate) fn knowledge_github_repo_key(card: &SourceCard) -> Option<String> {
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    Some(format!("github:{owner}/{repo}"))
+    Some(format!("github:{}/{repo}", owner.to_ascii_lowercase()))
 }
 
 pub(crate) fn knowledge_github_repo_entity_input(

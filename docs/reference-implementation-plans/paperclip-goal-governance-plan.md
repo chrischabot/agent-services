@@ -305,3 +305,77 @@ existing Arcwell risky operation, preferably an outbound channel send or future
 social publish. The watchdog is the highest-upside follow-up, but it should not
 land until scoped mutation enforcement is real.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has several governance primitives that did not exist when this plan
+was written:
+
+- Generic proof ledger tables and CLI exist for packets, claims, artifacts,
+  checks, promotion, and verification.
+- Policy approvals exist and are surfaced through CLI/MCP/ops.
+- Cost policy is strong for current local scope, including kill switches,
+  reservations, budget blocking, retry-storm prevention, and scheduled
+  provider/network gates.
+- `arcwell-guard` captures goals and runs cross-model stop reviews over the
+  actual diff.
+- Project status snapshots, controller runs/events/actions, work runs, channel
+  deliveries, digest/radar/job delivery ledgers, and email observations provide
+  concrete governance subjects.
+
+The Paperclip lesson should now become Arcwell proof/governance cohesion:
+goals, approvals, budgets, watchdogs, portability, and package import/export
+must bind to existing proof, policy, project, channel, and ops rows.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can govern risky or claim-promoting work by binding goals, approvals,
+> cost/policy decisions, proof packets, guard reviews, and delivery observations
+> to the exact durable rows they authorize or promote.
+
+Refutations:
+
+- An approval authorizes prose but not the exact payload/action hash.
+- A proof packet is promoted with unresolved claims or missing checks.
+- Guard blocks are bypassed without an audit trail.
+- Budget hard-stop blocks work but the controller/worker keeps running.
+- A portable export includes secret values, local absolute paths, or transient
+  database IDs.
+- A watchdog can mutate outside the watched scope.
+
+Revised implementation slices:
+
+1. Use proof packets as the primary promotion ledger; do not create a separate
+   Paperclip-style governance database for claims.
+2. Extend policy approvals with payload hashes where current approvals do not
+   already bind enough action state.
+3. Add `guard` and proof status into project/controller/work-run status
+   reports.
+4. Build a scoped watchdog on top of project/controller/proof rows: it reviews
+   stopped/blocked work as claims and can only comment/reopen within scope.
+5. Define portable Arcwell bundles for projects/wiki/source-card/proof packets
+   with secret/path/transient-id stripping.
+
+Keep from Paperclip:
+
+- approval state machine;
+- budget incidents and hard-stop semantics;
+- watchdog stop fingerprints;
+- markdown-first portable packages with source refs and license attribution;
+- secret declarations instead of secret values.
+
+Do not copy:
+
+- the "agent company" metaphor as a core Arcwell abstraction;
+- org-chart-first governance;
+- runtime workspace sync unless Arcwell has a concrete remote-runner need.
+
+Next proof gate:
+
+- Local Proof: fixtures prove payload-hash approval, proof promotion refusal,
+  guard-bypass audit, budget hard-stop propagation, portable export redaction,
+  and watchdog scope boundaries.
+- Production Data Proof: one real Arcwell risky action is blocked, approved
+  with an exact payload/proof binding, executed once, observed in ops, and
+  recorded in a proof packet.

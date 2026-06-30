@@ -1626,6 +1626,192 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
             let message_id = arguments.get("message_id").and_then(Value::as_str);
             Ok(json!(store.list_channel_delivery_attempts(message_id)?))
         }
+        "channel_delivery_observation_add" => {
+            let delivery_attempt_id = required_string(&arguments, "delivery_attempt_id")?;
+            let observation_source = arguments
+                .get("observation_source")
+                .and_then(Value::as_str)
+                .unwrap_or("gmail");
+            let observation_status = arguments
+                .get("observation_status")
+                .and_then(Value::as_str)
+                .unwrap_or("mailbox_observed");
+            let mailbox_message_id = arguments.get("mailbox_message_id").and_then(Value::as_str);
+            let provider_message_id = arguments.get("provider_message_id").and_then(Value::as_str);
+            let observed_at = arguments.get("observed_at").and_then(Value::as_str);
+            let evidence = arguments
+                .get("evidence")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            Ok(json!(store.record_channel_delivery_observation(
+                &delivery_attempt_id,
+                observation_source,
+                observation_status,
+                mailbox_message_id,
+                provider_message_id,
+                observed_at,
+                &evidence,
+            )?))
+        }
+        "channel_delivery_observations" => {
+            let delivery_attempt_id = arguments.get("delivery_attempt_id").and_then(Value::as_str);
+            Ok(json!(
+                store.list_channel_delivery_observations(delivery_attempt_id)?
+            ))
+        }
+        "email_delivery_verification_gaps" => {
+            Ok(json!(store.list_email_delivery_verification_gaps()?))
+        }
+        "email_delivery_verification_requests" => {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let verification_state = arguments
+                .get("verification_state")
+                .or_else(|| arguments.get("state"))
+                .and_then(Value::as_str);
+            let destination = arguments.get("destination").and_then(Value::as_str);
+            Ok(json!(store.build_email_delivery_verification_requests(
+                limit,
+                verification_state,
+                destination,
+            )?))
+        }
+        "email_delivery_verification_enqueue" => {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let verification_state = arguments
+                .get("verification_state")
+                .or_else(|| arguments.get("state"))
+                .and_then(Value::as_str);
+            let destination = arguments.get("destination").and_then(Value::as_str);
+            Ok(json!(
+                store.enqueue_email_delivery_verification_request_job(
+                    limit,
+                    verification_state,
+                    destination,
+                )?
+            ))
+        }
+        "email_delivery_mailbox_verify" => {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let verification_state = arguments
+                .get("verification_state")
+                .or_else(|| arguments.get("state"))
+                .and_then(Value::as_str);
+            let destination = arguments.get("destination").and_then(Value::as_str);
+            let api_base = arguments.get("api_base").and_then(Value::as_str);
+            Ok(json!(store.verify_email_delivery_mailbox_with_gmail(
+                limit,
+                verification_state,
+                destination,
+                None,
+                api_base,
+            )?))
+        }
+        "email_delivery_mailbox_repair" => {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let verification_state = arguments
+                .get("verification_state")
+                .or_else(|| arguments.get("state"))
+                .and_then(Value::as_str);
+            let destination = arguments.get("destination").and_then(Value::as_str);
+            let api_base = arguments.get("api_base").and_then(Value::as_str);
+            Ok(json!(
+                store.repair_email_delivery_mailbox_placement_with_gmail(
+                    limit,
+                    verification_state,
+                    destination,
+                    None,
+                    api_base,
+                )?
+            ))
+        }
+        "gmail_oauth_authorize_url" => {
+            let client_id = store.resolve_gmail_oauth_client_id(
+                arguments.get("client_id").and_then(Value::as_str),
+            )?;
+            let redirect_uri = store.resolve_gmail_oauth_redirect_uri(
+                arguments.get("redirect_uri").and_then(Value::as_str),
+            )?;
+            let scopes = arguments
+                .get("scopes")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Ok(json!(store.gmail_oauth_authorize_url(
+                &client_id,
+                &redirect_uri,
+                &scopes,
+            )?))
+        }
+        "gmail_oauth_exchange_code" => {
+            let client_id = store.resolve_gmail_oauth_client_id(
+                arguments.get("client_id").and_then(Value::as_str),
+            )?;
+            let redirect_uri = store.resolve_gmail_oauth_redirect_uri(
+                arguments.get("redirect_uri").and_then(Value::as_str),
+            )?;
+            let code = required_string(&arguments, "code")?;
+            let code_verifier = required_string(&arguments, "code_verifier")?;
+            let client_secret = arguments.get("client_secret").and_then(Value::as_str);
+            Ok(json!(store.gmail_oauth_exchange_code(
+                &client_id,
+                &redirect_uri,
+                &code,
+                &code_verifier,
+                client_secret,
+            )?))
+        }
+        "gmail_oauth_refresh" => {
+            let client_id = store.resolve_gmail_oauth_client_id(
+                arguments.get("client_id").and_then(Value::as_str),
+            )?;
+            let client_secret = arguments.get("client_secret").and_then(Value::as_str);
+            Ok(json!(store.gmail_oauth_refresh(&client_id, client_secret)?))
+        }
+        "email_delivery_observation_batch_add" => {
+            let results = arguments
+                .get("results")
+                .and_then(Value::as_array)
+                .context("missing results array")?;
+            let default_source = arguments
+                .get("observation_source")
+                .and_then(Value::as_str)
+                .unwrap_or("gmail");
+            let mut observations = Vec::new();
+            for result in results {
+                let delivery_attempt_id = result
+                    .get("delivery_attempt_id")
+                    .and_then(Value::as_str)
+                    .context("batch result missing delivery_attempt_id")?;
+                let observation_status = result
+                    .get("observation_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mailbox_observed");
+                let observation_source = result
+                    .get("observation_source")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_source);
+                let mailbox_message_id = result.get("mailbox_message_id").and_then(Value::as_str);
+                let provider_message_id = result.get("provider_message_id").and_then(Value::as_str);
+                let observed_at = result.get("observed_at").and_then(Value::as_str);
+                let evidence = result.get("evidence").cloned().unwrap_or_else(|| json!({}));
+                observations.push(store.record_channel_delivery_observation(
+                    delivery_attempt_id,
+                    observation_source,
+                    observation_status,
+                    mailbox_message_id,
+                    provider_message_id,
+                    observed_at,
+                    &evidence,
+                )?);
+            }
+            Ok(json!(observations))
+        }
         "telegram_drain_edge_events" => {
             let max_events = arguments
                 .get("max_events")
@@ -2029,7 +2215,7 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
             let topic = required_string(&arguments, "topic")?;
             Ok(json!({ "page_id": store.librarian_expand_topic(&topic)? }))
         }
-        "ops_snapshot" => Ok(json!(store.ops_snapshot()?)),
+        "ops_snapshot" => store.compact_ops_snapshot(),
         "secret_value_set" => {
             let name = required_string(&arguments, "name")?;
             let value = required_string(&arguments, "value")?;
@@ -2273,7 +2459,12 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 .get("max_results")
                 .and_then(Value::as_u64)
                 .unwrap_or(10) as usize;
-            Ok(json!(store.x_recent_search(&query, max_results)?))
+            let transport = arguments.get("transport").and_then(Value::as_str);
+            Ok(json!(store.x_recent_search_with_transport(
+                &query,
+                max_results,
+                transport,
+            )?))
         }
         "x_enqueue_recent_search" => {
             let query = required_string(&arguments, "query")?;
@@ -2294,9 +2485,12 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 .get("max_bookmarks")
                 .and_then(Value::as_u64)
                 .unwrap_or(100) as usize;
-            Ok(json!(
-                store.x_import_bookmarks(bookmark_days, max_bookmarks)?
-            ))
+            let transport = arguments.get("transport").and_then(Value::as_str);
+            Ok(json!(store.x_import_bookmarks_with_transport(
+                bookmark_days,
+                max_bookmarks,
+                transport,
+            )?))
         }
         "x_schedule_bookmarks" => {
             let bookmark_days = arguments

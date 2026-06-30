@@ -19,6 +19,9 @@ pub(crate) fn mcp_compact_ops_snapshot(value: Value) -> Value {
     let Some(object) = value.as_object() else {
         return value;
     };
+    if object.get("counts").is_some() && object.get("source_cards").is_none() {
+        return value;
+    }
     let counts = object
         .iter()
         .filter_map(|(key, value)| {

@@ -1,5 +1,126 @@
 use super::*;
 
+fn x_mcp_initialize_response() -> &'static str {
+    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"x-mcp-mock","version":"test"}}}"#
+}
+
+fn x_mcp_tools_list_response(
+    tool_name: &str,
+    description: &str,
+    properties: &[&str],
+) -> &'static str {
+    let mut props = serde_json::Map::new();
+    for property in properties {
+        props.insert((*property).to_string(), json!({}));
+    }
+    Box::leak(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {
+                        "name": tool_name,
+                        "description": description,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": props
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string()
+        .into_boxed_str(),
+    )
+}
+
+fn x_mcp_tool_call_content_response(text: &str) -> &'static str {
+    Box::leak(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": text
+                    }
+                ]
+            }
+        })
+        .to_string()
+        .into_boxed_str(),
+    )
+}
+
+fn x_mcp_response_sequence(
+    tools_list_response: &'static str,
+    tool_call_response: &'static str,
+) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    x_mcp_response_sequence_for_calls(tools_list_response, vec![tool_call_response])
+}
+
+fn x_mcp_response_sequence_for_calls(
+    tools_list_response: &'static str,
+    tool_call_responses: Vec<&'static str>,
+) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    let mut responses = vec![
+        (
+            "200 OK",
+            "mcp-session-id: arcwell-mcp-tools\r\n",
+            x_mcp_initialize_response(),
+            "application/json",
+        ),
+        ("200 OK", "", "", "application/json"),
+        ("200 OK", "", tools_list_response, "application/json"),
+    ];
+    for tool_call_response in tool_call_responses {
+        responses.extend([
+            (
+                "200 OK",
+                "mcp-session-id: arcwell-mcp-call\r\n",
+                x_mcp_initialize_response(),
+                "application/json",
+            ),
+            ("200 OK", "", "", "application/json"),
+            ("200 OK", "", tool_call_response, "application/json"),
+        ]);
+    }
+    responses
+}
+
+fn x_mcp_tools_list_response_for_tools(tools: Vec<(&str, &str, Vec<&str>)>) -> &'static str {
+    let tools = tools
+        .into_iter()
+        .map(|(tool_name, description, properties)| {
+            let mut props = serde_json::Map::new();
+            for property in properties {
+                props.insert(property.to_string(), json!({}));
+            }
+            json!({
+                "name": tool_name,
+                "description": description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": props
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    Box::leak(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": tools
+            }
+        })
+        .to_string()
+        .into_boxed_str(),
+    )
+}
+
 #[test]
 fn x_recent_search_uses_sqlite_secret_and_updates_cursor() {
     let store = test_store("x-live-mock");
@@ -356,6 +477,335 @@ fn severe_x_recent_search_refreshes_expired_bearer_before_provider_fetch() {
     assert_eq!(stats.latest_sync_runs[0].new_cursor.as_deref(), Some("220"));
 }
 
+#[cfg(unix)]
+#[test]
+fn severe_x_recent_search_xurl_token_transport_keeps_arcwell_write_path() {
+    // CLAIM: xurl-token-api only replaces token acquisition; Arcwell still owns
+    // provider policy, canonical import, source-card projection, cursor safety,
+    // source health, and sync-run accounting.
+    // ORACLE: fake xurl invocation, provider Authorization header, source card,
+    // cursor, and sync-run transport.
+    // SEVERITY: Severe because calling xurl successfully without durable
+    // Arcwell evidence would create a convincing but hollow integration.
+    clear_x_bearer_env();
+    let store = test_store("x-recent-xurl-token-transport");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-xurl-token-recent-test"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "xurl_token"
+reason = "allow fake xurl token acquisition in recent-search transport test"
+priority = 20
+
+[[rules]]
+id = "allow-xurl-token-recent-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_recent_search"
+reason = "allow fake provider fetch in recent-search transport test"
+priority = 20
+
+[[rules]]
+id = "allow-xurl-token-recent-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in recent-search transport test"
+priority = 20
+"#,
+    );
+    let fake_xurl = fake_xurl_token_script("x-recent-xurl-token-transport", "xurl-access-token");
+    let search_body = r#"{
+          "data": [
+            {
+              "id": "240",
+              "author_id": "u1",
+              "text": "Recent search through xurl token transport.",
+              "created_at": "2026-06-30T00:00:00Z"
+            }
+          ],
+          "includes": { "users": [{ "id": "u1", "username": "openai", "name": "OpenAI" }] },
+          "meta": { "newest_id": "240" }
+        }"#;
+    let (base, requests) =
+        mock_recording_sequence_server(vec![("200 OK", "", search_body, "application/json")]);
+
+    let report = with_xurl_bin(&fake_xurl, || {
+        store
+            .x_recent_search_with_base_transport_and_job_id(
+                "agents",
+                10,
+                &base,
+                XProviderTransport::XurlTokenApi,
+                None,
+            )
+            .unwrap()
+    });
+
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.items[0].source_card_id.is_some(), true);
+    assert_eq!(
+        store
+            .get_cursor("x:recent-search:agents")
+            .unwrap()
+            .unwrap()
+            .value,
+        "240"
+    );
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].contains("authorization: Bearer xurl-access-token")
+            || captured[0].contains("Authorization: Bearer xurl-access-token"),
+        "{}",
+        captured[0]
+    );
+    let stats = store.x_stats().unwrap();
+    assert_eq!(stats.latest_sync_runs[0].stream, "recent_search");
+    assert_eq!(stats.latest_sync_runs[0].transport, "xurl_token_api");
+    assert_eq!(stats.latest_sync_runs[0].status, "completed");
+    let xurl_health = store
+        .get_source_health("x:xurl-token")
+        .unwrap()
+        .expect("xurl token acquisition should be visible in source health");
+    assert_eq!(xurl_health.status, "healthy");
+}
+
+#[test]
+fn severe_x_recent_search_x_api_mcp_transport_keeps_arcwell_write_path() {
+    // CLAIM: x-api-mcp is a real hosted-MCP transport for recent search, not a
+    // relabeled direct REST request.
+    // ORACLE: captured JSON-RPC requests, provider Authorization header,
+    // canonical source card/cursor, source metadata, edge transport, and sync run.
+    // SEVERITY: Severe because a hollow MCP label would contaminate source
+    // accounting while leaving the old endpoint path in control.
+    without_x_mcp_env(|| {
+        clear_x_bearer_env();
+        let store = test_store("x-recent-x-api-mcp-transport");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "mcp-access-token", "x")
+            .unwrap();
+        store
+            .set_secret_value("TWITTER_BEARER_TOKEN", "mcp-app-token", "x")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-x-mcp-recent-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_recent_search"
+reason = "allow hosted MCP recent-search transport test"
+priority = 20
+
+[[rules]]
+id = "allow-x-mcp-recent-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in hosted MCP recent-search transport test"
+priority = 20
+"#,
+        );
+        let api_response = json!({
+            "data": [
+                {
+                    "id": "260",
+                    "author_id": "u1",
+                    "text": "Recent search through X MCP transport.",
+                    "created_at": "2026-06-30T00:00:00Z"
+                }
+            ],
+            "includes": {
+                "users": [
+                    { "id": "u1", "username": "openai", "name": "OpenAI" }
+                ]
+            },
+            "meta": { "newest_id": "260" }
+        });
+        let tools = x_mcp_tools_list_response_for_tools(vec![
+            (
+                "search_news",
+                "Search News",
+                vec!["query", "max_results", "news.fields"],
+            ),
+            (
+                "search_posts_all",
+                "Search Posts All",
+                vec![
+                    "query",
+                    "max_results",
+                    "since_id",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            ),
+        ]);
+        let call = x_mcp_tool_call_content_response(&api_response.to_string());
+        let (base, requests) = mock_recording_sequence_server(x_mcp_response_sequence(tools, call));
+
+        let report = store
+            .x_recent_search_with_base_transport_and_job_id(
+                "agents",
+                10,
+                &base,
+                XProviderTransport::XApiMcp,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(report.imported, 1);
+        assert!(report.items[0].source_card_id.is_some());
+        assert_eq!(
+            store
+                .get_cursor("x:recent-search:agents")
+                .unwrap()
+                .unwrap()
+                .value,
+            "260"
+        );
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 6);
+        assert!(
+            captured
+                .iter()
+                .all(|request| request.contains("POST /mcp ")),
+            "{captured:#?}"
+        );
+        assert!(
+            captured.iter().all(|request| {
+                request.contains("authorization: Bearer mcp-app-token")
+                    || request.contains("Authorization: Bearer mcp-app-token")
+            }),
+            "{captured:#?}"
+        );
+        assert!(
+            captured[5].contains(r#""method":"tools/call""#)
+                && captured[5].contains(r#""name":"search_posts_all""#)
+                && captured[5].contains(r#""query":"agents""#),
+            "{}",
+            captured[5]
+        );
+        let item = store
+            .list_x_items(Some("X MCP transport"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(item.sources[0].metadata["imported_from"], "x_api_mcp");
+        assert_eq!(item.sources[0].metadata["x_mcp_tool"], "search_posts_all");
+        let edge_transport: String = store
+            .conn
+            .query_row(
+                "SELECT transport FROM x_tweet_edges WHERE tweet_x_id = '260'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_transport, "x_api_mcp");
+        let sync_metadata: Value = store
+            .conn
+            .query_row(
+                "SELECT metadata_json FROM x_sync_runs ORDER BY started_at DESC LIMIT 1",
+                [],
+                |row| {
+                    let raw: String = row.get(0)?;
+                    parse_json_column(&raw, 0)
+                },
+            )
+            .unwrap();
+        assert_eq!(sync_metadata["mcp_tool"], "search_posts_all");
+        let stats = store.x_stats().unwrap();
+        assert_eq!(stats.latest_sync_runs[0].stream, "recent_search");
+        assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+        assert_eq!(stats.latest_sync_runs[0].status, "completed");
+    });
+}
+
+#[test]
+fn severe_x_recent_search_x_api_mcp_rejects_prose_without_cursor_advance() {
+    // CLAIM: MCP tool success is not enough; Arcwell requires X API-shaped JSON
+    // before importing rows or advancing cursors.
+    // ORACLE: failed sync run, preserved cursor absence, source-health failure,
+    // and zero durable X rows after a prose-only MCP result.
+    // SEVERITY: Severe because hosted tools may return assistant text that looks
+    // plausible but is not durable source evidence.
+    without_x_mcp_env(|| {
+        clear_x_bearer_env();
+        let store = test_store("x-recent-x-api-mcp-prose-failure");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "mcp-access-token", "x")
+            .unwrap();
+        store
+            .set_secret_value("TWITTER_BEARER_TOKEN", "mcp-app-token", "x")
+            .unwrap();
+        let tools = x_mcp_tools_list_response(
+            "search_posts_all",
+            "Search Posts All",
+            &["query", "max_results"],
+        );
+        let call = x_mcp_tool_call_content_response("Here are a few posts about agents.");
+        let (base, _requests) =
+            mock_recording_sequence_server(x_mcp_response_sequence(tools, call));
+
+        let error = store
+            .x_recent_search_with_base_transport_and_job_id(
+                "agents",
+                10,
+                &base,
+                XProviderTransport::XApiMcp,
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("X MCP tool result did not contain an X API-shaped JSON response"),
+            "{error}"
+        );
+        assert!(
+            store
+                .get_cursor("x:recent-search:agents")
+                .unwrap()
+                .is_none()
+        );
+        let row_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM x_tweets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 0);
+        let health = store
+            .get_source_health("x:recent-search:agents")
+            .unwrap()
+            .expect("failed MCP import should record source health");
+        assert_eq!(health.status, "failed");
+        assert!(
+            health
+                .last_error
+                .unwrap_or_default()
+                .contains("X MCP tool result")
+        );
+        let stats = store.x_stats().unwrap();
+        assert_eq!(stats.latest_sync_runs[0].stream, "recent_search");
+        assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+        assert_eq!(stats.latest_sync_runs[0].status, "failed");
+    });
+}
+
 #[test]
 fn severe_x_recent_search_accepts_numeric_leading_handles() {
     // CLAIM: valid X handles that start with digits, such as 0x-style
@@ -636,6 +1086,302 @@ fn x_import_bookmarks_preserves_body_metrics_and_source() {
     assert_eq!(stats.latest_sync_runs[0].account_id.as_deref(), Some("me"));
     assert_eq!(stats.latest_sync_runs[0].seen, 2);
     assert_eq!(stats.latest_sync_runs[0].inserted, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn severe_x_import_bookmarks_xurl_token_transport_keeps_canonical_collections() {
+    // CLAIM: xurl-token-api works for user-context bookmark import without
+    // bypassing Arcwell's canonical collection/source-card path.
+    // ORACLE: fake xurl invocation, provider Authorization headers, canonical
+    // x_collections row, and xurl_token_api sync-run transport.
+    // SEVERITY: Severe because bookmarks seed watch-source rebuilds and
+    // downstream digest/report pipelines.
+    clear_x_bearer_env();
+    let store = test_store("x-bookmarks-xurl-token-transport");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-xurl-token-bookmarks-test"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "xurl_token"
+reason = "allow fake xurl token acquisition in bookmark transport test"
+priority = 20
+
+[[rules]]
+id = "allow-xurl-token-bookmarks-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow fake provider fetch in bookmark transport test"
+priority = 20
+
+[[rules]]
+id = "allow-xurl-token-bookmarks-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in bookmark transport test"
+priority = 20
+"#,
+    );
+    let fake_xurl =
+        fake_xurl_token_script("x-bookmarks-xurl-token-transport", "xurl-bookmark-token");
+    let recent =
+        (Utc::now() - chrono::Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let bookmarks_body = Box::leak(
+        format!(
+            r#"{{
+                  "data": [
+                    {{
+                      "id": "bxurl1",
+                      "author_id": "u1",
+                      "text": "Bookmarked through xurl token transport.",
+                      "created_at": "{recent}",
+                      "public_metrics": {{ "like_count": 11, "bookmark_count": 12 }}
+                    }}
+                  ],
+                  "includes": {{
+                    "users": [
+                      {{ "id": "u1", "username": "openai", "name": "OpenAI" }}
+                    ]
+                  }},
+                  "meta": {{}}
+                }}"#
+        )
+        .into_boxed_str(),
+    );
+    let (base, requests) = mock_recording_sequence_server(vec![
+        (
+            "200 OK",
+            "",
+            r#"{"data":{"id":"me","username":"me","name":"Me"}}"#,
+            "application/json",
+        ),
+        ("200 OK", "", bookmarks_body, "application/json"),
+    ]);
+
+    let report = with_xurl_bin(&fake_xurl, || {
+        store
+            .x_import_bookmarks_with_base_and_transport(
+                92,
+                10,
+                &base,
+                XProviderTransport::XurlTokenApi,
+            )
+            .unwrap()
+    });
+
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.source_card_projections, Some(1));
+    let collection_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_collections WHERE tweet_x_id = 'bxurl1' AND collection_kind = 'bookmark' AND account_id = 'acct_default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(collection_count, 1);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    for request in captured.iter() {
+        assert!(
+            request.contains("authorization: Bearer xurl-bookmark-token")
+                || request.contains("Authorization: Bearer xurl-bookmark-token"),
+            "{request}"
+        );
+    }
+    let stats = store.x_stats().unwrap();
+    assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+    assert_eq!(stats.latest_sync_runs[0].transport, "xurl_token_api");
+    assert_eq!(stats.latest_sync_runs[0].inserted, 1);
+}
+
+#[test]
+fn severe_x_import_bookmarks_x_api_mcp_transport_keeps_canonical_collections() {
+    // CLAIM: x-api-mcp bookmark import calls hosted MCP and still uses Arcwell's
+    // canonical bookmark item/collection/source-card path.
+    // ORACLE: no direct /2/users/me or /bookmarks REST requests, canonical
+    // collection/edge rows, source metadata, sync-run account id and completeness
+    // marker.
+    // SEVERITY: Severe because bookmark imports feed watch-source rebuilds and
+    // knowledge digests; a mislabeled REST fallback would poison transport proof.
+    without_x_mcp_env(|| {
+        clear_x_bearer_env();
+        let store = test_store("x-bookmarks-x-api-mcp-transport");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "mcp-bookmark-token", "x")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-x-mcp-bookmarks-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow hosted MCP bookmark transport test"
+priority = 20
+
+[[rules]]
+id = "allow-x-mcp-bookmarks-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in hosted MCP bookmark transport test"
+priority = 20
+"#,
+        );
+        let recent = (Utc::now() - chrono::Duration::days(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let api_response = json!({
+            "data": [
+                {
+                    "id": "bmcp1",
+                    "author_id": "u1",
+                    "text": "Bookmarked through hosted X MCP transport.",
+                    "created_at": recent,
+                    "public_metrics": { "like_count": 14, "bookmark_count": 15 }
+                }
+            ],
+            "includes": {
+                "users": [
+                    { "id": "u1", "username": "openai", "name": "OpenAI" }
+                ]
+            },
+            "meta": {
+                "account_id": "me",
+                "next_token": "MCP_NEXT"
+            }
+        });
+        let tools = x_mcp_tools_list_response_for_tools(vec![
+            (
+                "get_users_by_usernames",
+                "Get Users by Usernames",
+                vec!["usernames", "user.fields", "post.fields", "expansions"],
+            ),
+            (
+                "get_users_me",
+                "Get Users Me",
+                vec!["user.fields", "post.fields", "expansions"],
+            ),
+            (
+                "get_users_bookmarks",
+                "Get Users Bookmarks",
+                vec![
+                    "id",
+                    "max_results",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            ),
+        ]);
+        let me_response = x_mcp_tool_call_content_response(
+            &json!({
+                "data": {
+                    "id": "me",
+                    "username": "me",
+                    "name": "Me"
+                }
+            })
+            .to_string(),
+        );
+        let call = x_mcp_tool_call_content_response(&api_response.to_string());
+        let (base, requests) = mock_recording_sequence_server(x_mcp_response_sequence_for_calls(
+            tools,
+            vec![me_response, call],
+        ));
+
+        let report = store
+            .x_import_bookmarks_with_base_and_transport(92, 10, &base, XProviderTransport::XApiMcp)
+            .unwrap();
+
+        assert_eq!(report.seen, 1);
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.source_card_projections, Some(1));
+        assert_eq!(report.pages_fetched, Some(1));
+        assert_eq!(report.exhausted, Some(false));
+        assert_eq!(
+            report.stop_reason.as_deref(),
+            Some("mcp_single_page_next_token_unverified")
+        );
+        assert_eq!(report.next_token.as_deref(), Some("MCP_NEXT"));
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 9);
+        assert!(
+            captured
+                .iter()
+                .all(|request| request.contains("POST /mcp ")),
+            "{captured:#?}"
+        );
+        assert!(
+            captured
+                .iter()
+                .all(|request| !request.contains("GET /2/users/")),
+            "{captured:#?}"
+        );
+        assert!(
+            captured[5].contains(r#""method":"tools/call""#)
+                && captured[5].contains(r#""name":"get_users_me""#),
+            "{}",
+            captured[5]
+        );
+        assert!(
+            captured[8].contains(r#""method":"tools/call""#)
+                && captured[8].contains(r#""name":"get_users_bookmarks""#)
+                && captured[8].contains(r#""id":"me""#)
+                && captured[8].contains(r#""max_results":10"#),
+            "{}",
+            captured[8]
+        );
+        let collection_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_collections WHERE tweet_x_id = 'bmcp1' AND collection_kind = 'bookmark' AND account_id = 'acct_default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(collection_count, 1);
+        let item = store
+            .list_x_items(Some("hosted X MCP"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(item.sources[0].metadata["imported_from"], "x_api_mcp");
+        assert_eq!(
+            item.sources[0].metadata["x_mcp_tool"],
+            "get_users_bookmarks"
+        );
+        let edge_transport: String = store
+            .conn
+            .query_row(
+                "SELECT transport FROM x_tweet_edges WHERE tweet_x_id = 'bmcp1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_transport, "x_api_mcp");
+        let stats = store.x_stats().unwrap();
+        assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+        assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+        assert_eq!(stats.latest_sync_runs[0].account_id.as_deref(), Some("me"));
+        assert_eq!(stats.latest_sync_runs[0].inserted, 1);
+    });
 }
 
 #[test]

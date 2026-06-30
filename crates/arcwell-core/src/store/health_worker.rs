@@ -2,6 +2,11 @@ use super::*;
 
 impl Store {
     pub fn health(&self) -> Result<HealthReport> {
+        let (health, _) = self.health_with_x_stats()?;
+        Ok(health)
+    }
+
+    pub(crate) fn health_with_x_stats(&self) -> Result<(HealthReport, XStatsReport)> {
         let profile_items = self.count("profile_items")?;
         let memories = self.count("memories")?;
         let wiki_pages = self.count("wiki_pages")?;
@@ -73,33 +78,36 @@ impl Store {
                 "Radar delivery: {non_successful_radar_deliveries} failed or blocked delivery attempt(s)"
             ));
         }
-        Ok(HealthReport {
-            ok: warnings.is_empty(),
-            home: self.paths.home.clone(),
-            db: self.paths.db.clone(),
-            schema_version: self.stored_schema_version()?,
-            profile_items,
-            memories,
-            wiki_pages,
-            source_cards,
-            watch_sources,
-            wiki_jobs,
-            x_items,
-            x_tweets,
-            x_profiles,
-            pending_jobs,
-            cursors,
-            research_runs,
-            pending_candidates,
-            work_runs,
-            failed_jobs,
-            dead_lettered_jobs,
-            latest_backup,
-            latest_worker_heartbeat,
-            latest_worker_heartbeat_events,
-            secret_health,
-            warnings,
-        })
+        Ok((
+            HealthReport {
+                ok: warnings.is_empty(),
+                home: self.paths.home.clone(),
+                db: self.paths.db.clone(),
+                schema_version: self.stored_schema_version()?,
+                profile_items,
+                memories,
+                wiki_pages,
+                source_cards,
+                watch_sources,
+                wiki_jobs,
+                x_items,
+                x_tweets,
+                x_profiles,
+                pending_jobs,
+                cursors,
+                research_runs,
+                pending_candidates,
+                work_runs,
+                failed_jobs,
+                dead_lettered_jobs,
+                latest_backup,
+                latest_worker_heartbeat,
+                latest_worker_heartbeat_events,
+                secret_health,
+                warnings,
+            },
+            x_stats,
+        ))
     }
 
     pub fn doctor(&self, options: DoctorOptions) -> Result<DoctorReport> {

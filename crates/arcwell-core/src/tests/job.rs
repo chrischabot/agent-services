@@ -1416,7 +1416,11 @@ fn severe_job_weekly_report_preserves_application_status_and_source_health() {
         "{}",
         report.body
     );
-    assert!(currently_open.contains("Needs scoring."), "{}", report.body);
+    assert!(
+        currently_open.contains("Score: 55% estimated."),
+        "{}",
+        report.body
+    );
     assert!(
         report.body.contains("warm_intro_ready: 0"),
         "{}",
@@ -1607,7 +1611,11 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
         "{}",
         report.body
     );
-    assert!(report.body.contains("Needs scoring."), "{}", report.body);
+    assert!(
+        report.body.contains("Score: 84% estimated."),
+        "{}",
+        report.body
+    );
     assert!(
         report
             .body
@@ -1628,6 +1636,105 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
         "{}",
         report.body
     );
+}
+
+#[test]
+fn severe_job_weekly_report_delivery_keeps_full_open_inventory_over_note_limit() {
+    // CLAIM: daily job-scan email preparation preserves the full plausible
+    // open-role inventory even when the body is larger than the generic notes
+    // limit.
+    // ORACLE: more than 25 distinct open roles appear in the current-open
+    // section, the prepared email body exceeds 20k characters, the last role is
+    // still present, and HTML rendering keeps apply links.
+    // SEVERITY: Severe because truncating the current-open inventory directly
+    // prevents the user from finding matching jobs.
+    let store = test_store("job-weekly-full-open-inventory");
+    let profile = job_fixture_profile(&store);
+    let evidence = job_fixture_evidence(&store, &profile.id);
+    for index in 0..90 {
+        store
+            .record_job_role_card(JobRoleCardInput {
+                company: format!("Full Inventory AI {index:03}"),
+                role_title: format!("Developer Advocate {index:03}"),
+                canonical_url: Some(format!("https://jobs.example.com/full-{index:03}")),
+                source_family: "company_ats".to_string(),
+                source_url: format!("https://jobs.example.com/full-{index:03}"),
+                source_confidence: "canonical_confirmed".to_string(),
+                date_accessed: Some("2026-06-30T00:00:00Z".to_string()),
+                posting_freshness: "same_day".to_string(),
+                location: Some("Europe or remote".to_string()),
+                work_mode: Some("remote".to_string()),
+                company_stage_or_size: Some("startup".to_string()),
+                role_seniority: Some("senior".to_string()),
+                core_requirements: vec![
+                    "developer relations".to_string(),
+                    "developer tools".to_string(),
+                    "technical writing".to_string(),
+                ],
+                implied_business_problem: Some(
+                    "Help developers understand, adopt, and trust AI developer tooling."
+                        .to_string(),
+                ),
+                why_they_might_need_user: Some(
+                    "The role maps to senior developer-facing engineering, platform, and writing work."
+                        .to_string(),
+                ),
+                evidence_card_ids: vec![evidence.id.clone()],
+                gaps_or_blockers: Vec::new(),
+                cluster: Some("developer-tools".to_string()),
+                current_status: "live".to_string(),
+                metadata: json!({}),
+            })
+            .unwrap();
+    }
+
+    let report = store
+        .compile_job_weekly_report(&profile.id, "Full open developer-facing roles")
+        .unwrap();
+    let currently_open = report
+        .body
+        .split("## Currently open roles")
+        .nth(1)
+        .and_then(|tail| tail.split("## Roles removed").next())
+        .unwrap();
+    assert!(
+        currently_open.contains("Developer Advocate 000 at Full Inventory AI 000"),
+        "{}",
+        currently_open
+    );
+    assert!(
+        currently_open.contains("Developer Advocate 089 at Full Inventory AI 089"),
+        "{}",
+        currently_open
+    );
+    assert!(
+        currently_open.matches("Developer Advocate ").count() >= 90,
+        "{}",
+        currently_open
+    );
+
+    store
+        .authorize_channel_subject("email", "email:job-proof@example.com", false, false, true)
+        .unwrap();
+    let prepared = store
+        .prepare_job_weekly_report_delivery(JobWeeklyReportDeliveryInput {
+            report_id: report.id.clone(),
+            channel: "email".to_string(),
+            subject: "job-proof@example.com".to_string(),
+            target: "job-proof@example.com".to_string(),
+            idempotency_key: Some("job-weekly-full-open-inventory".to_string()),
+        })
+        .unwrap();
+    assert_eq!(prepared.delivery.status, "prepared");
+    let body = &prepared.channel_message.as_ref().unwrap().body;
+    assert!(body.len() > 20_000, "{}", body.len());
+    assert!(
+        body.contains("Developer Advocate 089 at Full Inventory AI 089"),
+        "{body}"
+    );
+    assert!(!body.contains("Profile:"), "{body}");
+    let html = render_email_html_from_markdown("Arcwell job scan", body).unwrap();
+    assert!(html.contains("https://jobs.example.com/full-089"), "{html}");
 }
 
 #[test]
@@ -1712,10 +1819,6 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
     assert!(!prepared_body.contains("tier_"), "{prepared_body}");
     assert!(
         prepared_body.contains("**[Staff Agent Platform Engineer at Example AI](https://example.com/careers/staff-agent-platform-engineer)**"),
-        "{prepared_body}"
-    );
-    assert!(
-        prepared_body.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
         "{prepared_body}"
     );
     assert!(prepared_body.contains("Score: 97%."), "{prepared_body}");
@@ -2002,7 +2105,9 @@ priority = 10
     assert!(!text.contains("## Shortlist"), "{text}");
     assert!(!text.contains("tier_"), "{text}");
     assert!(
-        text.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
+        text.contains(
+            "**[Staff Agent Platform Engineer at Example AI](https://example.com/careers/staff-agent-platform-engineer)**"
+        ),
         "{text}"
     );
     assert!(html.contains("<h1"), "{html}");
@@ -2017,10 +2122,6 @@ priority = 10
         html.contains(
             "<strong><a href=\"https://example.com/careers/staff-agent-platform-engineer\""
         ),
-        "{html}"
-    );
-    assert!(
-        html.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
         "{html}"
     );
     assert!(
@@ -3506,6 +3607,334 @@ fn severe_job_source_refresh_extracts_direct_role_title_without_html_noise() {
         refresh.roles[0].canonical_url.as_deref(),
         Some("https://jobs.ashbyhq.com/encord/role-123")
     );
+}
+
+#[test]
+fn severe_job_source_refresh_parses_lever_api_for_mistral_developer_advocate() {
+    // CLAIM: Lever source refresh uses the structured posting payload, not
+    // the public app shell, so a direct Mistral role with London in
+    // allLocations becomes a useful canonical role card.
+    // ORACLE: the Mistral AI Developer Advocate posting imports with
+    // London/Paris location, hybrid mode, hosted/apply URLs, and concrete
+    // DevRel requirements instead of a manual-review placeholder.
+    // SEVERITY: Severe because missing this exact class of role makes the
+    // daily job email look operational while excluding obvious matches.
+    let store = test_store("job-source-refresh-lever-mistral");
+    let source = store
+        .record_job_source(JobSourceInput {
+            source_family: "company_ats".to_string(),
+            name: "Mistral Lever".to_string(),
+            url: "https://jobs.lever.co/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725".to_string(),
+            market_scope: "europe_remote".to_string(),
+            refresh_policy: "daily_live_monitor".to_string(),
+            metadata: json!({}),
+        })
+        .unwrap();
+
+    assert_eq!(
+        job_source_refresh_live_fetch_url(&source.url).unwrap(),
+        "https://api.lever.co/v0/postings/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725"
+    );
+    assert!(job_refresh_url_looks_like_job_detail(&source.url));
+
+    let refresh = store
+        .run_job_source_refresh(JobSourceRefreshInput {
+            source_id: source.id,
+            fetched_url: Some(
+                "https://jobs.lever.co/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725"
+                    .to_string(),
+            ),
+            body: Some(
+                r#"
+                {
+                  "id": "fd865fe4-7344-43b0-9d8d-600e8b366725",
+                  "text": "AI Developer Advocate",
+                  "hostedUrl": "https://jobs.lever.co/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725",
+                  "applyUrl": "https://jobs.lever.co/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725/apply",
+                  "workplaceType": "hybrid",
+                  "categories": {
+                    "team": "Marketing",
+                    "location": "Paris",
+                    "allLocations": ["Paris", "London"],
+                    "commitment": "Full-time"
+                  },
+                  "descriptionPlain": "Senior/Staff AI Developer Advocate leading developer relations, developer education, demos, sample code, technical writing, open-source AI ecosystem projects, Python examples, workshops, and enterprise developer adoption."
+                }
+                "#
+                .to_string(),
+            ),
+            fetch_live: false,
+        })
+        .unwrap();
+
+    assert_eq!(refresh.source_health.status, "healthy", "{refresh:#?}");
+    assert_eq!(refresh.roles.len(), 1, "{:#?}", refresh.roles);
+    assert_eq!(refresh.roles[0].company, "Mistral");
+    assert_eq!(refresh.roles[0].role_title, "AI Developer Advocate");
+    assert_eq!(
+        refresh.roles[0].canonical_url.as_deref(),
+        Some("https://jobs.lever.co/mistral/fd865fe4-7344-43b0-9d8d-600e8b366725")
+    );
+    assert!(
+        refresh.roles[0]
+            .metadata
+            .get("apply_url")
+            .and_then(Value::as_str)
+            .unwrap()
+            .ends_with("/apply")
+    );
+    let location = refresh.roles[0].location.as_deref().unwrap();
+    assert!(location.contains("London"));
+    assert!(location.contains("Paris"));
+    assert_eq!(refresh.roles[0].work_mode.as_deref(), Some("hybrid"));
+    assert!(
+        refresh.roles[0]
+            .core_requirements
+            .iter()
+            .any(|requirement| requirement == "developer advocacy")
+    );
+    assert!(
+        refresh.roles[0]
+            .core_requirements
+            .iter()
+            .any(|requirement| requirement == "python")
+    );
+    assert!(
+        !refresh.roles[0]
+            .core_requirements
+            .iter()
+            .any(|requirement| requirement.contains("manual review"))
+    );
+}
+
+#[test]
+fn severe_job_source_refresh_parses_ashby_board_api_jobs() {
+    // CLAIM: Ashby board refresh reads the posting API instead of accepting
+    // only the rendered company shell.
+    // ORACLE: a Langfuse-style board payload creates a canonical role with
+    // Europe/London location and remote mode.
+    // SEVERITY: Severe because several configured daily sources were
+    // marked healthy while yielding zero roles.
+    let store = test_store("job-source-refresh-ashby-api");
+    let source = store
+        .record_job_source(JobSourceInput {
+            source_family: "company_ats".to_string(),
+            name: "Langfuse Ashby".to_string(),
+            url: "https://jobs.ashbyhq.com/langfuse".to_string(),
+            market_scope: "europe_remote".to_string(),
+            refresh_policy: "daily_live_monitor".to_string(),
+            metadata: json!({}),
+        })
+        .unwrap();
+
+    assert_eq!(
+        job_source_refresh_live_fetch_url(&source.url).unwrap(),
+        "https://api.ashbyhq.com/posting-api/job-board/langfuse"
+    );
+
+    let refresh = store
+        .run_job_source_refresh(JobSourceRefreshInput {
+            source_id: source.id,
+            fetched_url: Some("https://jobs.ashbyhq.com/langfuse".to_string()),
+            body: Some(
+                r#"
+                {
+                  "jobs": [
+                    {
+                      "id": "job-1",
+                      "title": "Senior Backend Engineer (Data Infrastructure)",
+                      "jobUrl": "https://jobs.ashbyhq.com/langfuse/job-1",
+                      "applyUrl": "https://jobs.ashbyhq.com/langfuse/job-1/application",
+                      "isListed": true,
+                      "isRemote": true,
+                      "workplaceType": "Remote",
+                      "location": {"name": "Europe"},
+                      "secondaryLocations": [{"name": "London"}, {"name": "Berlin"}],
+                      "descriptionHtml": "<p>Build data infrastructure, APIs, SDKs, developer-facing observability and open source systems for AI teams.</p>"
+                    }
+                  ]
+                }
+                "#
+                .to_string(),
+            ),
+            fetch_live: false,
+        })
+        .unwrap();
+
+    assert_eq!(refresh.source_health.status, "healthy");
+    assert_eq!(refresh.roles.len(), 1, "{:#?}", refresh.roles);
+    assert_eq!(
+        refresh.roles[0].role_title,
+        "Senior Backend Engineer (Data Infrastructure)"
+    );
+    let location = refresh.roles[0].location.as_deref().unwrap();
+    assert!(location.contains("Europe"));
+    assert!(location.contains("London"));
+    assert_eq!(refresh.roles[0].work_mode.as_deref(), Some("remote"));
+    assert!(
+        refresh.roles[0]
+            .core_requirements
+            .iter()
+            .any(|requirement| requirement == "APIs")
+    );
+}
+
+#[test]
+fn severe_job_source_refresh_zero_role_canonical_source_is_not_healthy() {
+    // CLAIM: a canonical job source that yields only a self company card
+    // cannot be called healthy unless it explicitly says there are no
+    // openings.
+    // ORACLE: a sparse ATS shell with no role links records partial health.
+    // SEVERITY: Severe because company-only success hid a live indexing
+    // outage in the daily job scan.
+    let store = test_store("job-source-refresh-company-only-not-healthy");
+    let source = store
+        .record_job_source(JobSourceInput {
+            source_family: "company_ats".to_string(),
+            name: "Sparse Ashby".to_string(),
+            url: "https://jobs.ashbyhq.com/sparse".to_string(),
+            market_scope: "europe_remote".to_string(),
+            refresh_policy: "daily_live_monitor".to_string(),
+            metadata: json!({}),
+        })
+        .unwrap();
+
+    let refresh = store
+        .run_job_source_refresh(JobSourceRefreshInput {
+            source_id: source.id,
+            fetched_url: Some("https://jobs.ashbyhq.com/sparse".to_string()),
+            body: Some(
+                "<html><main><h1>Sparse careers</h1><p>Careers page shell.</p></main></html>"
+                    .to_string(),
+            ),
+            fetch_live: false,
+        })
+        .unwrap();
+
+    assert_eq!(refresh.roles.len(), 0);
+    assert_eq!(refresh.companies.len(), 1);
+    assert_eq!(refresh.source_health.status, "partial");
+    assert!(
+        refresh
+            .source_health
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("accepted 0 roles and 1 companies")
+    );
+}
+
+#[test]
+fn severe_job_report_geo_filter_hides_us_only_and_keeps_uncertain_locations() {
+    // CLAIM: reader-facing job reports keep UK/EU/global/no-location/remote
+    // roles, and keep uncertain locations rather than silently dropping a
+    // possible match.
+    // ORACLE: clear US-only/Americas and known impossible locations are
+    // rejected, while London, EU, global, blank location, generic remote, and
+    // unknown named-location roles pass.
+    // SEVERITY: Severe because bad geography filtering makes the daily scan
+    // noisy even when source parsing is correct.
+    let store = test_store("job-report-geo-filter");
+    let make_role = |title: &str, location: Option<&str>, work_mode: Option<&str>| {
+        store
+            .record_job_role_card(JobRoleCardInput {
+                company: "Geo Test".to_string(),
+                role_title: title.to_string(),
+                canonical_url: Some(format!(
+                    "https://jobs.example.com/{}",
+                    title.to_ascii_lowercase().replace(' ', "-")
+                )),
+                source_family: "company_ats".to_string(),
+                source_url: format!(
+                    "https://jobs.example.com/{}",
+                    title.to_ascii_lowercase().replace(' ', "-")
+                ),
+                source_confidence: "canonical_confirmed".to_string(),
+                date_accessed: Some("2026-06-30T00:00:00Z".to_string()),
+                posting_freshness: "same_day".to_string(),
+                location: location.map(ToOwned::to_owned),
+                work_mode: work_mode.map(ToOwned::to_owned),
+                company_stage_or_size: None,
+                role_seniority: None,
+                core_requirements: vec!["developer relations".to_string()],
+                implied_business_problem: Some(
+                    "Grow developer adoption through technical education.".to_string(),
+                ),
+                why_they_might_need_user: None,
+                evidence_card_ids: Vec::new(),
+                gaps_or_blockers: Vec::new(),
+                cluster: Some("developer-tools".to_string()),
+                current_status: "live".to_string(),
+                metadata: json!({}),
+            })
+            .unwrap()
+    };
+
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate London",
+        Some("London"),
+        Some("hybrid"),
+    )));
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Europe",
+        Some("Munich, Germany"),
+        Some("onsite"),
+    )));
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Global",
+        Some("Global"),
+        None,
+    )));
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Remote",
+        None,
+        Some("remote"),
+    )));
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate No Location",
+        None,
+        None,
+    )));
+    assert!(job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Unclear City",
+        Some("Borealis City"),
+        Some("hybrid"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate US",
+        Some("US/Remote"),
+        Some("remote"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate AMER",
+        Some("AMER"),
+        Some("remote"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Dallas",
+        Some("Dallas, TX"),
+        Some("remote"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Charlotte",
+        Some("Charlotte, NC"),
+        Some("remote"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate APAC",
+        Some("APAC"),
+        Some("remote"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Seoul",
+        Some("Seoul"),
+        Some("hybrid"),
+    )));
+    assert!(!job_report_role_is_uk_plausible(&make_role(
+        "Developer Advocate Casablanca",
+        Some("Casablanca"),
+        Some("onsite"),
+    )));
 }
 
 #[test]

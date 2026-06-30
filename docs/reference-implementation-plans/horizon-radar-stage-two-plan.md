@@ -260,3 +260,81 @@ and `radar_stage_read` expose the run, items, scores, and dedupe groups, with
 source-card/wiki links preserved. Remaining first-slice work is to add any
 missing explicit skipped/error stage records only where the current run counts,
 metadata, source-health rows, and audit findings are too indirect.
+
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+This plan is now mostly about refinement and promotion discipline, not basic
+stage visibility. Arcwell radar currently has:
+
+- radar profiles, runs, items, FTS, score overlays, summaries, stage reads, and
+  delivery rows;
+- live-fetch opt-in through existing RSS/GitHub/arXiv/Hacker News/Reddit/X
+  adapters with source-health and adapter-job state;
+- source-quality windows and source-quality trends;
+- deterministic summaries and manual delivery through authorized Telegram/email
+  paths;
+- model-score overlays that are non-authorizing and separated from heuristic
+  selection;
+- audit tools for FTS drift, missing provenance, unscored items,
+  source-quality windows, dedupe groups, empty output, and unsupported
+  selectors;
+- proof scripts for radar balance, category balance, semantic dedupe,
+  model-score, ranking review, scheduled delivery, source-quality
+  decay/trends, worker production, and X production.
+
+The refreshed value from Horizon is therefore balanced, source-quality-aware,
+human-readable editorial output that can survive real recurring delivery
+without stale/internal language.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell radar can produce source-balanced, provenance-linked, reader-facing
+> digests from real configured sources, and delivery/recurrence claims remain
+> separated from local summary generation.
+
+Refutations:
+
+- Radar summary exists but delivery row is missing.
+- Delivery row exists but mailbox/channel observation is missing and hidden.
+- Source-quality windows are absent or stale for selected sources.
+- Model-score overlay silently changes the authorizing selection.
+- The digest contains internal pipeline language or stale source-card bodies.
+- Scheduled proof is a replay or one-shot worker drain but docs claim
+  wall-clock recurrence.
+
+Revised implementation slices:
+
+1. Promote "stage artifacts" to "stage truth plus editorial gate": fetch,
+   score, dedupe, balance, summarize, audit, deliver, observe.
+2. Make source-quality windows part of selection and ops, not a post-hoc chart.
+3. Add a digest text gate that rejects internal ledger/reporting language before
+   provider send.
+4. Tie radar delivery rows to channel delivery observations wherever the
+   channel supports independent observation.
+5. Record proof packets for any scheduled radar recurrence claim, including
+   worker heartbeat span and restart/sleep recovery.
+
+Keep from Horizon:
+
+- staged pipeline operations;
+- balanced digest quotas;
+- deterministic final rendering;
+- semantic dedupe fallback behavior;
+- source recommendation as candidates, not activation.
+
+Do not copy:
+
+- file-based run store where Arcwell has SQLite/source cards/proof ledger;
+- model-generated final report structure;
+- single opaque `run_pipeline` success as a delivery claim.
+
+Next proof gate:
+
+- Local Proof: fixture radar runs prove category/source balance, bad model JSON
+  fallback, stale/internal-language rejection, delivery gap visibility, and
+  model-score non-authorization.
+- Production Data Proof: a controlled live run over multiple source families
+  writes source cards, source-quality windows, balanced summary, delivery
+  attempt, and observation or explicit observation gap.

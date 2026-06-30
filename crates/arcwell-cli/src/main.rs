@@ -70,6 +70,8 @@ mod import_policy_cli;
 pub(crate) use import_policy_cli::*;
 mod proof_cli;
 pub(crate) use proof_cli::*;
+mod guard_cli;
+pub(crate) use guard_cli::*;
 
 fn main() -> Result<()> {
     let args = std::env::args_os().collect::<Vec<_>>();

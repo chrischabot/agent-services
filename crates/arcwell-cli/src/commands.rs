@@ -14,7 +14,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Command {
     Health,
-    Ops,
+    Ops(OpsArgs),
     Provider(ProviderCommand),
     Doctor(DoctorArgs),
     Service(ServiceCommand),
@@ -46,6 +46,51 @@ pub(crate) enum Command {
     Secrets(SecretsCommand),
     Cursors(CursorCommand),
     Proof(ProofCommand),
+    Guard(GuardCommand),
+}
+
+#[derive(Args)]
+pub(crate) struct GuardCommand {
+    #[command(subcommand)]
+    pub(crate) command: GuardSubcommand,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum GuardSubcommand {
+    /// Capture the user's stated goal / definition-of-done for this session
+    /// (wired to the SessionStart / UserPromptSubmit hooks).
+    CaptureGoal {
+        #[arg(long, default_value = "user-prompt-submit")]
+        event: String,
+        #[arg(long)]
+        goal: Option<String>,
+    },
+    /// Cross-model stop-gate review (Stop hook): an independent model reviews the
+    /// work against the captured goal and blocks finishing if it is incomplete,
+    /// incorrect, or a workaround. Emits a `{"decision":"block",...}` line when it blocks.
+    StopReview {
+        /// Override the reviewing model ("claude" or "codex"); defaults to the
+        /// opposite of whichever runtime is executing the hook.
+        #[arg(long)]
+        reviewer: Option<String>,
+    },
+    /// Show recent captured goals and review verdicts.
+    Status {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+    /// Enable the stop-gate (persisted).
+    Enable,
+    /// Disable the stop-gate (persisted kill switch; also `ARCWELL_GUARD_DISABLE=1` per-shell).
+    Disable,
+}
+
+#[derive(Args)]
+pub(crate) struct OpsArgs {
+    #[arg(long)]
+    pub(crate) compact: bool,
 }
 
 #[derive(Args)]
@@ -2791,6 +2836,114 @@ pub(crate) enum EmailSubcommand {
         #[arg(long)]
         api_base: Option<String>,
     },
+    ObserveDelivery {
+        delivery_attempt_id: String,
+        #[arg(long, default_value = "gmail")]
+        source: String,
+        #[arg(long, default_value = "mailbox_observed")]
+        status: String,
+        #[arg(long)]
+        mailbox_message_id: Option<String>,
+        #[arg(long)]
+        provider_message_id: Option<String>,
+        #[arg(long)]
+        observed_at: Option<String>,
+        #[arg(long, default_value = "{}")]
+        evidence_json: String,
+    },
+    Observations {
+        #[arg(long)]
+        delivery_attempt_id: Option<String>,
+    },
+    VerificationGaps,
+    VerificationRequests {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+    },
+    EnqueueVerification {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+    },
+    VerifyMailbox {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        api_base: Option<String>,
+    },
+    RepairMailboxPlacement {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        api_base: Option<String>,
+    },
+    OauthUrl {
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        redirect_uri: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        scopes: Vec<String>,
+    },
+    OauthExchange {
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        redirect_uri: Option<String>,
+        #[arg(long)]
+        code: String,
+        #[arg(long)]
+        code_verifier: String,
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
+    OauthReauthorize {
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        redirect_uri: Option<String>,
+        #[arg(long)]
+        client_secret: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        scopes: Vec<String>,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 10)]
+        verify_limit: usize,
+        #[arg(long)]
+        no_open_browser: bool,
+    },
+    OauthRefresh {
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
+    ObserveDeliveryBatch {
+        #[arg(long, default_value = "gmail")]
+        source: String,
+        #[arg(long)]
+        results_json: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2837,6 +2990,8 @@ pub(crate) enum XSubcommand {
         query: String,
         #[arg(long, default_value_t = 10)]
         max_results: usize,
+        #[arg(long)]
+        transport: Option<String>,
     },
     EnqueueRecentSearch {
         query: String,
@@ -2848,6 +3003,8 @@ pub(crate) enum XSubcommand {
         bookmark_days: i64,
         #[arg(long, default_value_t = 100)]
         max_bookmarks: usize,
+        #[arg(long)]
+        transport: Option<String>,
     },
     ScheduleBookmarks {
         #[arg(long, default_value_t = 92)]

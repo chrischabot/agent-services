@@ -765,7 +765,7 @@ impl Store {
                     "SELECT COUNT(*) FROM x_tweets t LEFT JOIN x_items i ON i.x_id = t.x_id WHERE i.x_id IS NULL",
                 )?,
                 tweets_without_fts: self.count_query(
-                    "SELECT COUNT(*) FROM x_tweets t LEFT JOIN x_tweets_fts f ON f.x_id = t.x_id WHERE f.x_id IS NULL",
+                    "SELECT COUNT(*) FROM x_tweets WHERE x_id NOT IN (SELECT x_id FROM x_tweets_fts)",
                 )?,
                 fts_without_tweets: self.count_query(
                     "SELECT COUNT(*) FROM x_tweets_fts f LEFT JOIN x_tweets t ON t.x_id = f.x_id WHERE t.x_id IS NULL",

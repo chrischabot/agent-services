@@ -355,6 +355,47 @@ pub struct XItemSource {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XProviderTransport {
+    DirectApi,
+    XurlTokenApi,
+    XApiMcp,
+}
+
+impl XProviderTransport {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
+        let value = value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| std::env::var("ARCWELL_X_TRANSPORT").ok())
+            .unwrap_or_else(|| "direct-api".to_string());
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "direct-api" | "x-api" | "api" => Ok(Self::DirectApi),
+            "xurl-token-api" | "xurl-token" | "xurl" => Ok(Self::XurlTokenApi),
+            "x-api-mcp" | "x-mcp" | "mcp" => Ok(Self::XApiMcp),
+            _ => bail!("unsupported X provider transport: {value}"),
+        }
+    }
+
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            Self::DirectApi => "direct-api",
+            Self::XurlTokenApi => "xurl-token-api",
+            Self::XApiMcp => "x-api-mcp",
+        }
+    }
+
+    pub fn sync_transport(self) -> &'static str {
+        match self {
+            Self::DirectApi => "x_api",
+            Self::XurlTokenApi => "xurl_token_api",
+            Self::XApiMcp => "x_api_mcp",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XImportReport {
     pub seen: usize,

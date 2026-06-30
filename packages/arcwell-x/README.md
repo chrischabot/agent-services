@@ -23,6 +23,9 @@ arcwell x oauth-probe --search-query "from:openai"
 arcwell x oauth-revoke --name X_BEARER_TOKEN --token-type-hint access_token --delete-local
 arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 1000 --max-recent-follows 100
 arcwell x recent-search "from:openai" --max-results 25
+arcwell x recent-search "from:openai" --max-results 25 --transport xurl-token-api
+arcwell x recent-search "from:openai" --max-results 25 --transport x-api-mcp
+arcwell x import-bookmarks --max-bookmarks 100 --transport x-api-mcp
 arcwell x enqueue-recent-search "from:openai" --max-results 25
 arcwell x monitor-watch-sources --max-sources 25 --max-results-per-source 10
 arcwell x repair-health --defer-rate-limited-hours 24 --limit 10000
@@ -151,6 +154,43 @@ Boundary:
   monitor polls write `x_sync_runs` ledger rows with stream, transport, status,
   counts, cursor fields where relevant, account id where known, and redacted
   failure text.
+- Recent search and bookmark import accept an optional provider transport:
+  `direct-api` (default) uses Arcwell's stored/env OAuth bearer and canonical X
+  API fetch path; `xurl-token-api` delegates only token acquisition to
+  `xurl token`, then keeps Arcwell-owned policy, cost, source-card/wiki
+  projection, cursor, source-health, and sync-run writes. `x-api-mcp` calls the
+  hosted X MCP server at `https://api.x.com/mcp` by default, discovers tools
+  with `tools/list`, and imports only X API-shaped JSON responses through the
+  same canonical Arcwell import path. MCP recent search uses the hosted
+  `search_posts_all` tool and prefers app-only bearer aliases
+  `ARCWELL_X_MCP_APP_BEARER_TOKEN`, `X_APP_BEARER_TOKEN`, or
+  `TWITTER_BEARER_TOKEN`; MCP bookmarks use user-context `X_BEARER_TOKEN` /
+  refresh material through hosted `get_users_me` and `get_users_bookmarks`.
+  Prose-only or non-X-shaped MCP tool output fails without advancing cursors.
+  Bookmark MCP import is deliberately one tool-call page until hosted pagination
+  arguments are proven; if a `next_token` is returned, the report preserves it
+  and marks `mcp_single_page_next_token_unverified` rather than claiming
+  exhaustion. `scripts/x-mcp-xurl-proof` records a redacted xurl/MCP discovery
+  packet, and `scripts/x-transport-comparison-proof` compares direct API,
+  xurl-token, and x-api-mcp recent-search transports in copied homes.
+- Current xurl proof status: local severe tests prove `xurl-token-api` for
+  recent search and bookmark import with a fake `xurl` token command while
+  preserving Arcwell writes. The fresh live probe
+  `.arcwell-dev/proofs/x-mcp-xurl-proof-20260630T182334Z-9284/artifacts/proof-packet.json`
+  found `xurl 1.0.3` via `npx:@xdevplatform/xurl`, but stopped at
+  `blocked_auth` because no official X MCP bridge `CLIENT_ID`/`CLIENT_SECRET`
+  env or cached xurl OAuth token was available. Current hosted-MCP proof status:
+  local severe tests prove recent-search success, prose failure without cursor
+  advance, bookmark `get_users_me`/`get_users_bookmarks` chaining, canonical
+  edge/source metadata, and selector resistance to misleading `search_news` and
+  username tools. Copied-home live comparison
+  `.arcwell-dev/proofs/x-transport-comparison-20260630T190356Z-72790/artifacts/proof-packet.json`
+  rates `x-api-mcp` 8.0, `direct-api` 7.4, and `xurl-token-api` 2.6 for recent
+  search. Copied-home live bookmark proof
+  `.arcwell-dev/proofs/x-api-mcp-bookmarks-live-20260630T190104Z-62057/artifacts/proof-packet.json`
+  passed one hosted MCP bookmark page with 5 seen/5 duplicate local rows and a
+  preserved `next_token`; it does not prove hosted bookmark pagination
+  exhaustion.
 - OAuth tokens are stored in local SQLite secret values. Normal list/report surfaces return secret names and metadata only, not token values.
 - `X_BEARER_TOKEN` can also be supplied as an environment variable; environment wins over SQLite for live search.
 - `X_CLIENT_SECRET` can be supplied as an environment variable, SQLite secret value, or explicit CLI/MCP argument for confidential clients.

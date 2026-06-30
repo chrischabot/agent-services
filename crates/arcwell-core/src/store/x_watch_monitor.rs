@@ -782,6 +782,92 @@ impl Store {
         }
     }
 
+    pub(crate) fn x_bearer_token_for_transport(
+        &self,
+        endpoint: &str,
+        transport: XProviderTransport,
+    ) -> Result<String> {
+        match transport {
+            XProviderTransport::DirectApi => self.x_bearer_token_for_endpoint(endpoint),
+            XProviderTransport::XurlTokenApi => self.xurl_bearer_token(endpoint),
+            XProviderTransport::XApiMcp => self.x_bearer_token_for_endpoint(endpoint),
+        }
+    }
+
+    pub(crate) fn x_mcp_app_bearer_token_for_endpoint(&self, endpoint: &str) -> Result<String> {
+        for name in [
+            "ARCWELL_X_MCP_APP_BEARER_TOKEN",
+            "X_APP_BEARER_TOKEN",
+            "TWITTER_BEARER_TOKEN",
+        ] {
+            if let Ok(token) = std::env::var(name)
+                && !token.trim().is_empty()
+            {
+                validate_oauth_param(token.trim(), name)?;
+                return Ok(token.trim().to_string());
+            }
+        }
+        for name in [
+            "X_MCP_APP_BEARER_TOKEN",
+            "X_APP_BEARER_TOKEN",
+            "TWITTER_BEARER_TOKEN",
+        ] {
+            if let Some(token) = self.get_usable_secret_value(name)? {
+                validate_oauth_param(&token, name)?;
+                return Ok(token);
+            }
+        }
+        self.x_bearer_token_for_endpoint(endpoint)
+    }
+
+    pub(crate) fn xurl_bearer_token(&self, endpoint: &str) -> Result<String> {
+        self.policy_guard(PolicyRequest {
+            action: "provider.oauth".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("xurl_token".to_string()),
+            channel: None,
+            subject: None,
+            target: Some(excerpt(endpoint, 240)),
+            projected_usd: Some(estimated_network_fetch_cost(1)),
+            metadata: json!({
+                "operation": "xurl_token",
+                "transport": XProviderTransport::XurlTokenApi.cli_value(),
+                "xurl_app": std::env::var("ARCWELL_XURL_APP").ok(),
+                "xurl_username": std::env::var("ARCWELL_XURL_USERNAME").ok(),
+            }),
+            untrusted_excerpt: None,
+        })?;
+        self.require_cost_budget(
+            "arcwell-x",
+            "xurl_token",
+            "x",
+            "oauth_token",
+            Some("xurl_token"),
+            estimated_network_fetch_cost(1),
+            "X xurl token acquisition",
+        )?;
+        let (token, spec) = run_xurl_token_command().map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                redact_secret_like_text(&error.to_string())
+                    .replace("Bearer ", "Bearer [REDACTED] ")
+            )
+        })?;
+        self.record_source_success(SourceHealthUpdate {
+            key: "x:xurl-token",
+            provider: "x",
+            source_kind: "xurl_token",
+            locator: &spec.source,
+            last_item_id: None,
+            last_item_date: None,
+            cursor_key: None,
+            cursor_value: None,
+            next_run_at: Some(&now_plus_seconds(6 * 60 * 60)),
+        })?;
+        Ok(token)
+    }
+
     pub(crate) fn refresh_x_bearer_token_for_endpoint(&self, endpoint: &str) -> Result<String> {
         let client_id = self
             .resolve_x_client_id()?

@@ -61,19 +61,88 @@ pub(crate) fn channel_delivery_attempt_from_row(
 ) -> rusqlite::Result<ChannelDeliveryAttempt> {
     let response_json: String = row.get(7)?;
     let response = parse_json_column(&response_json, 7)?;
+    let channel: String = row.get(2)?;
+    let ok = row.get::<_, i64>(5)? != 0;
+    let provider_message_id = provider_message_id_from_response(&response);
+    let outbound_message_id = outbound_message_id_from_response(&response);
+    let delivery_proof = delivery_proof_from_attempt(&channel, ok, &response);
     Ok(ChannelDeliveryAttempt {
         id: row.get(0)?,
         message_id: row.get(1)?,
-        channel: row.get(2)?,
+        channel,
         destination: row.get(3)?,
         attempt: row.get(4)?,
-        ok: row.get::<_, i64>(5)? != 0,
+        ok,
         provider_status: row.get(6)?,
         response,
+        provider_message_id,
+        outbound_message_id,
+        delivery_proof,
         error: row.get(8)?,
         retry_at: row.get(9)?,
         created_at: row.get(10)?,
     })
+}
+
+pub(crate) fn channel_delivery_observation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ChannelDeliveryObservation> {
+    let evidence_json: String = row.get(10)?;
+    Ok(ChannelDeliveryObservation {
+        id: row.get(0)?,
+        delivery_attempt_id: row.get(1)?,
+        message_id: row.get(2)?,
+        channel: row.get(3)?,
+        destination: row.get(4)?,
+        provider_message_id: row.get(5)?,
+        observation_source: row.get(6)?,
+        observation_status: row.get(7)?,
+        mailbox_message_id: row.get(8)?,
+        observed_at: row.get(9)?,
+        evidence: parse_json_column(&evidence_json, 10)?,
+        created_at: row.get(11)?,
+    })
+}
+
+fn provider_message_id_from_response(response: &Value) -> Option<String> {
+    response
+        .pointer("/result/message_id")
+        .or_else(|| response.pointer("/result/id"))
+        .or_else(|| response.get("message_id"))
+        .or_else(|| response.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn outbound_message_id_from_response(response: &Value) -> Option<String> {
+    response
+        .pointer("/arcwell/outbound_message_id")
+        .or_else(|| response.pointer("/arcwell/message_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn response_array_has_items(response: &Value, pointer: &str) -> bool {
+    response
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn delivery_proof_from_attempt(channel: &str, ok: bool, response: &Value) -> String {
+    if !ok {
+        return "provider_failed".to_string();
+    }
+    if channel != "email" {
+        return "provider_confirmed".to_string();
+    }
+    if response_array_has_items(response, "/result/delivered") {
+        return "provider_reported_delivered".to_string();
+    }
+    if response_array_has_items(response, "/result/queued") {
+        return "provider_queued_mailbox_unverified".to_string();
+    }
+    "provider_accepted_mailbox_unverified".to_string()
 }
 
 pub(crate) fn cost_policy_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostPolicy> {

@@ -741,16 +741,21 @@ impl Store {
             )
         } else if input.fetch_live {
             let fetch_result = (|| -> Result<String> {
-                let url = validate_fetch_url(&source.url)?;
+                let url = job_source_refresh_live_fetch_url(&source.url)?;
                 self.guard_provider_network_policy(
                     "arcwell-job-hunting",
                     "web",
                     "job_source_refresh",
-                    url.as_str(),
+                    &url,
                     estimated_network_fetch_cost(1),
-                    json!({ "source_id": source.id, "source_family": source.source_family }),
+                    json!({
+                        "source_id": source.id,
+                        "source_family": source.source_family,
+                        "source_url": source.url,
+                        "fetch_url": url
+                    }),
                 )?;
-                fetch_text(url.as_str(), None)
+                fetch_text(&url, None)
             })();
             match fetch_result {
                 Ok(body) => (body, source.url.clone(), "live_fetch"),
@@ -886,7 +891,8 @@ impl Store {
 
         let accepted_count = roles.len() + companies.len();
         let status = job_source_refresh_health_status(
-            accepted_count,
+            roles.len(),
+            companies.len(),
             parsed.rejected_count,
             parsed.no_openings_signal,
             stale_role_events.len(),

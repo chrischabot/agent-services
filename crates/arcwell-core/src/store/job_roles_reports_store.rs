@@ -1573,6 +1573,7 @@ impl Store {
     ) -> Result<JobWeeklyReport> {
         self.require_job_profile(profile_id)?;
         let scope = sanitize_required_job_text(scope, "scope", 500)?;
+        let event_since = self.latest_sent_job_weekly_report_generated_at(profile_id, &scope)?;
         let shortlist = self.compile_job_shortlist(profile_id)?;
         let scored_role_ids = shortlist
             .entries
@@ -1598,7 +1599,7 @@ impl Store {
             .iter()
             .map(|event| event.id.clone())
             .collect::<BTreeSet<_>>();
-        for event in self.list_job_source_refresh_new_role_status_events_recent(50)? {
+        for event in self.list_job_source_refresh_new_role_status_events_recent(1000)? {
             if seen_role_events.insert(event.id.clone()) {
                 role_events.push(event);
             }
@@ -1609,7 +1610,7 @@ impl Store {
                 .cmp(&left.created_at)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        role_events.truncate(50);
+        role_events.truncate(1000);
         let body = render_job_weekly_report(
             &shortlist,
             &applications,
@@ -1617,6 +1618,7 @@ impl Store {
             &intro_paths,
             &contacts,
             &role_events,
+            event_since.as_deref(),
         );
         let id = job_weekly_report_id(profile_id, &scope, &body);
         let metadata = json!({
@@ -1644,6 +1646,32 @@ impl Store {
         )?;
         self.read_job_weekly_report(&id)?
             .with_context(|| format!("job weekly report not found: {id}"))
+    }
+
+    fn latest_sent_job_weekly_report_generated_at(
+        &self,
+        profile_id: &str,
+        scope: &str,
+    ) -> Result<Option<String>> {
+        validate_id(profile_id)?;
+        let scope = sanitize_required_job_text(scope, "scope", 500)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT r.generated_at
+                FROM job_weekly_reports r
+                JOIN job_weekly_report_deliveries d ON d.report_id = r.id
+                WHERE r.profile_id = ?1
+                  AND r.scope = ?2
+                  AND d.status = 'sent'
+                ORDER BY r.generated_at DESC, r.id DESC
+                LIMIT 1
+                "#,
+                params![profile_id, scope],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn read_job_weekly_report(&self, id: &str) -> Result<Option<JobWeeklyReport>> {

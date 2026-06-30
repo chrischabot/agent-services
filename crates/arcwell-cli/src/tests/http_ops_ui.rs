@@ -381,7 +381,8 @@ fn mcp_remaining_plan_surfaces_round_trip() {
 
     let ops = call_mcp_tool(&paths, "ops_snapshot", json!({})).unwrap();
     assert!(ops.get("health").is_some());
-    assert!(ops.get("edge_events").is_some());
+    assert!(ops.get("edge_events").is_none());
+    assert_eq!(ops["counts"]["edge_events"].as_i64(), Some(1));
 }
 
 #[test]

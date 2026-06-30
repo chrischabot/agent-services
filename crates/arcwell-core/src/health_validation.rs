@@ -1085,7 +1085,7 @@ pub(crate) fn normalize_job_source_refresh_input(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| sanitize_work_text(value, JOB_MAX_SOURCE_REFRESH_BODY_CHARS))
+        .map(sanitize_job_source_refresh_body_input)
         .transpose()?;
     input.fetched_url = input
         .fetched_url
@@ -1101,6 +1101,25 @@ pub(crate) fn normalize_job_source_refresh_input(
         bail!("job source refresh cannot mix caller-supplied body with fetch_live=true");
     }
     Ok(input)
+}
+
+pub(crate) fn sanitize_job_source_refresh_body_input(input: &str) -> Result<String> {
+    let without_controls = input
+        .chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect::<String>();
+    let mut output = without_controls
+        .chars()
+        .take(JOB_MAX_SOURCE_REFRESH_BODY_CHARS)
+        .collect::<String>();
+    if without_controls.chars().count() > JOB_MAX_SOURCE_REFRESH_BODY_CHARS {
+        output.push_str(" [TRUNCATED]");
+    }
+    if job_source_refresh_body_is_json(&output) {
+        Ok(output)
+    } else {
+        sanitize_work_text(input, JOB_MAX_SOURCE_REFRESH_BODY_CHARS)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1229,6 +1248,11 @@ pub(crate) fn parse_job_source_refresh_body(
     fetched_url: &str,
     proof_level: &str,
 ) -> Result<ParsedJobSourceRefresh> {
+    if let Some(parsed) =
+        parse_job_source_refresh_structured_json(source, body, fetched_url, proof_level)?
+    {
+        return Ok(parsed);
+    }
     let body = sanitize_work_text(body, JOB_MAX_SOURCE_REFRESH_BODY_CHARS)?;
     let html_like = job_source_refresh_body_is_html(&body);
     let readable = if html_like {
@@ -1335,6 +1359,588 @@ pub(crate) fn parse_job_source_refresh_body(
         readable_text: readable,
         direct_role_title,
     })
+}
+
+#[derive(Debug)]
+struct ParsedStructuredJobPayload {
+    roles: Vec<JobRoleCardInput>,
+    fetched_posting_count: usize,
+    rejected_count: usize,
+    warnings: Vec<String>,
+    direct_role_title: Option<String>,
+    no_openings_signal: bool,
+}
+
+pub(crate) fn parse_job_source_refresh_structured_json(
+    source: &JobSource,
+    body: &str,
+    fetched_url: &str,
+    proof_level: &str,
+) -> Result<Option<ParsedJobSourceRefresh>> {
+    if !job_source_refresh_body_is_json(body) {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Ok(None);
+    };
+    let source_url_lower = source.url.to_ascii_lowercase();
+    let payload = if source_url_lower.contains("lever.co") || job_json_looks_like_lever(&value) {
+        parse_lever_job_source_json(source, &value, proof_level)?
+    } else if source_url_lower.contains("ashbyhq.com") || value.get("jobs").is_some() {
+        parse_ashby_job_source_json(source, &value, proof_level)?
+    } else {
+        return Ok(None);
+    };
+    let readable = normalize_readable_text(&job_json_readable_text(&value));
+    let mut warnings = payload.warnings;
+    let mut companies = Vec::new();
+    if let Some(company) = job_source_self_company_card(source, fetched_url, &readable) {
+        companies.push(company);
+    }
+    let no_openings_signal =
+        payload.no_openings_signal || job_refresh_has_no_openings_signal(&readable);
+    if payload.roles.is_empty() && !no_openings_signal {
+        warnings
+            .push("Structured ATS payload did not contain any accepted role postings.".to_string());
+    }
+    let fetched_count = payload.fetched_posting_count + companies.len() + payload.rejected_count;
+    Ok(Some(ParsedJobSourceRefresh {
+        roles: payload.roles,
+        companies,
+        fetched_count,
+        rejected_count: payload.rejected_count,
+        no_openings_signal,
+        warnings,
+        readable_text: readable,
+        direct_role_title: payload.direct_role_title,
+    }))
+}
+
+pub(crate) fn job_source_refresh_body_is_json(body: &str) -> bool {
+    matches!(body.trim_start().chars().next(), Some('{') | Some('['))
+}
+
+pub(crate) fn job_source_refresh_live_fetch_url(raw: &str) -> Result<String> {
+    let url = validate_fetch_url(raw)?;
+    if let Some(api_url) = job_source_refresh_ats_api_url(&url) {
+        validate_fetch_url(&api_url)?;
+        return Ok(api_url);
+    }
+    Ok(url.to_string())
+}
+
+pub(crate) fn job_source_refresh_ats_api_url(url: &Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let segments = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if host == "jobs.lever.co" || host.ends_with(".jobs.lever.co") {
+        let company = segments.first()?;
+        if let Some(posting_id) = segments.get(1) {
+            return Some(format!(
+                "https://api.lever.co/v0/postings/{company}/{posting_id}"
+            ));
+        }
+        return Some(format!(
+            "https://api.lever.co/v0/postings/{company}?mode=json"
+        ));
+    }
+    if host == "jobs.ashbyhq.com" || host.ends_with(".jobs.ashbyhq.com") {
+        let organization = segments.first()?;
+        return Some(format!(
+            "https://api.ashbyhq.com/posting-api/job-board/{organization}"
+        ));
+    }
+    None
+}
+
+fn parse_lever_job_source_json(
+    source: &JobSource,
+    value: &Value,
+    proof_level: &str,
+) -> Result<ParsedStructuredJobPayload> {
+    let Some(postings) = lever_job_postings(value) else {
+        return Ok(ParsedStructuredJobPayload {
+            roles: Vec::new(),
+            fetched_posting_count: 0,
+            rejected_count: 0,
+            warnings: vec!["Lever JSON payload did not contain postings.".to_string()],
+            direct_role_title: None,
+            no_openings_signal: false,
+        });
+    };
+    let mut roles = Vec::new();
+    let mut seen_role_keys = BTreeSet::new();
+    let mut rejected_count = 0usize;
+    let mut direct_role_title = None;
+    for posting in &postings {
+        if job_json_bool_at(posting, &["isListed"]) == Some(false)
+            || matches!(
+                job_json_string_at(posting, &["state"]).as_deref(),
+                Some("closed") | Some("archived")
+            )
+        {
+            rejected_count += 1;
+            continue;
+        }
+        let Some(title) = job_json_string_at(posting, &["text"]) else {
+            rejected_count += 1;
+            continue;
+        };
+        let role_url = job_json_string_at(posting, &["hostedUrl"])
+            .or_else(|| job_json_string_at(posting, &["applyUrl"]))
+            .unwrap_or_else(|| source.url.clone());
+        let apply_url = job_json_string_at(posting, &["applyUrl"]);
+        let mut locations = job_json_string_list_at(posting, &["categories", "allLocations"]);
+        if let Some(location) = job_json_string_at(posting, &["categories", "location"]) {
+            locations.push(location);
+        }
+        let location_text = job_join_unique_strings(locations);
+        let work_mode =
+            job_json_string_at(posting, &["workplaceType"]).map(|value| value.to_ascii_lowercase());
+        let description = job_join_unique_optional_strings([
+            job_json_string_at(posting, &["descriptionPlain"]),
+            job_json_string_at(posting, &["additionalPlain"]),
+            job_lever_lists_text(posting),
+        ])
+        .unwrap_or_default();
+        if let Some(mut role) = job_role_input_from_structured_posting(
+            source,
+            &title,
+            &role_url,
+            apply_url.as_deref(),
+            location_text.as_deref(),
+            work_mode.as_deref(),
+            &description,
+            "lever",
+            proof_level,
+        )? {
+            role.metadata["lever_id"] = posting
+                .get("id")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            if let Some(team) = job_json_string_at(posting, &["categories", "team"]) {
+                role.metadata["team"] = json!(team);
+            }
+            if let Some(commitment) = job_json_string_at(posting, &["categories", "commitment"]) {
+                role.metadata["commitment"] = json!(commitment);
+            }
+            let key = job_role_refresh_key(&role.company, &role.role_title, &role.source_url);
+            if seen_role_keys.insert(key) {
+                roles.push(role);
+            }
+        } else {
+            rejected_count += 1;
+        }
+    }
+    if postings.len() == 1 {
+        direct_role_title = roles.first().map(|role| role.role_title.clone());
+    }
+    Ok(ParsedStructuredJobPayload {
+        roles,
+        fetched_posting_count: postings.len(),
+        rejected_count,
+        warnings: Vec::new(),
+        direct_role_title,
+        no_openings_signal: postings.is_empty(),
+    })
+}
+
+fn parse_ashby_job_source_json(
+    source: &JobSource,
+    value: &Value,
+    proof_level: &str,
+) -> Result<ParsedStructuredJobPayload> {
+    let jobs = value
+        .get("jobs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut roles = Vec::new();
+    let mut seen_role_keys = BTreeSet::new();
+    let mut rejected_count = 0usize;
+    for job in &jobs {
+        if job_json_bool_at(job, &["isListed"]) == Some(false) {
+            rejected_count += 1;
+            continue;
+        }
+        let Some(title) = job_json_string_at(job, &["title"]) else {
+            rejected_count += 1;
+            continue;
+        };
+        let role_url = job_json_string_at(job, &["jobUrl"])
+            .or_else(|| job_json_string_at(job, &["applyUrl"]))
+            .unwrap_or_else(|| source.url.clone());
+        let apply_url = job_json_string_at(job, &["applyUrl"]);
+        let mut locations = Vec::new();
+        if let Some(location) = ashby_location_name(job.get("location")) {
+            locations.push(location);
+        }
+        if let Some(secondary) = job.get("secondaryLocations").and_then(Value::as_array) {
+            for location in secondary {
+                if let Some(name) = ashby_location_name(Some(location)) {
+                    locations.push(name);
+                }
+            }
+        }
+        let location_text = job_join_unique_strings(locations);
+        let work_mode = if job_json_bool_at(job, &["isRemote"]) == Some(true) {
+            Some("remote".to_string())
+        } else {
+            job_json_string_at(job, &["workplaceType"]).map(|value| value.to_ascii_lowercase())
+        };
+        let description = job_json_string_at(job, &["descriptionPlain"])
+            .or_else(|| job_json_string_at(job, &["description"]))
+            .or_else(|| {
+                job_json_string_at(job, &["descriptionHtml"])
+                    .map(|html| html_fragment_to_text(&html))
+            })
+            .unwrap_or_default();
+        if let Some(mut role) = job_role_input_from_structured_posting(
+            source,
+            &title,
+            &role_url,
+            apply_url.as_deref(),
+            location_text.as_deref(),
+            work_mode.as_deref(),
+            &description,
+            "ashby",
+            proof_level,
+        )? {
+            role.metadata["ashby_id"] = job
+                .get("id")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            if let Some(department) = job_json_string_at(job, &["department"]) {
+                role.metadata["department"] = json!(department);
+            }
+            if let Some(team) = job_json_string_at(job, &["team"]) {
+                role.metadata["team"] = json!(team);
+            }
+            let key = job_role_refresh_key(&role.company, &role.role_title, &role.source_url);
+            if seen_role_keys.insert(key) {
+                roles.push(role);
+            }
+        } else {
+            rejected_count += 1;
+        }
+    }
+    let direct_role_title = (jobs.len() == 1)
+        .then(|| roles.first().map(|role| role.role_title.clone()))
+        .flatten();
+    Ok(ParsedStructuredJobPayload {
+        roles,
+        fetched_posting_count: jobs.len(),
+        rejected_count,
+        warnings: Vec::new(),
+        direct_role_title,
+        no_openings_signal: jobs.is_empty(),
+    })
+}
+
+fn lever_job_postings(value: &Value) -> Option<Vec<&Value>> {
+    if let Some(items) = value.as_array() {
+        return Some(items.iter().collect());
+    }
+    if value.get("id").is_some() && value.get("text").is_some() {
+        return Some(vec![value]);
+    }
+    value
+        .get("postings")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+}
+
+fn job_json_looks_like_lever(value: &Value) -> bool {
+    value.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("hostedUrl").is_some() && item.get("text").is_some())
+    }) || (value.get("hostedUrl").is_some() && value.get("text").is_some())
+}
+
+fn job_role_input_from_structured_posting(
+    source: &JobSource,
+    title: &str,
+    role_url: &str,
+    apply_url: Option<&str>,
+    location: Option<&str>,
+    work_mode: Option<&str>,
+    description: &str,
+    ats: &str,
+    proof_level: &str,
+) -> Result<Option<JobRoleCardInput>> {
+    let readable_description = normalize_readable_text(description);
+    let excerpt_text = job_join_unique_optional_strings([
+        Some(title.to_string()),
+        location.map(ToOwned::to_owned),
+        work_mode.map(ToOwned::to_owned),
+        (!readable_description.is_empty()).then(|| excerpt(&readable_description, 2000)),
+    ]);
+    let Some(mut role) = job_role_input_from_observed_title(
+        source,
+        title,
+        role_url,
+        excerpt_text.as_deref(),
+        proof_level,
+    )?
+    else {
+        return Ok(None);
+    };
+    role.canonical_url = Some(role_url.to_string());
+    role.source_url = role_url.to_string();
+    role.location = location
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| excerpt(value, JOB_MAX_SHORT_TEXT))
+        .or_else(|| excerpt_text.as_deref().and_then(job_infer_location));
+    role.work_mode = work_mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| excerpt(&value.to_ascii_lowercase(), JOB_MAX_SHORT_TEXT))
+        .or_else(|| excerpt_text.as_deref().and_then(job_infer_work_mode));
+    role.core_requirements =
+        job_requirements_from_role_description(&role.role_title, &readable_description);
+    role.implied_business_problem =
+        job_implied_business_problem_from_description(&role.role_title, &readable_description);
+    role.why_they_might_need_user =
+        job_why_they_might_need_user_from_description(&role.role_title, &readable_description);
+    role.metadata = json!({
+        "adapter": "job_source_refresh",
+        "ats": ats,
+        "proof_level": proof_level,
+        "source_id": source.id,
+        "source_name": source.name,
+        "source_market_scope": source.market_scope,
+        "apply_url": apply_url,
+        "observed_excerpt": excerpt(excerpt_text.as_deref().unwrap_or(title), 500),
+        "description_excerpt": excerpt(&readable_description, 1500)
+    });
+    Ok(Some(role))
+}
+
+fn job_requirements_from_role_description(title: &str, description: &str) -> Vec<String> {
+    let mut requirements = job_requirements_from_role_title(title)
+        .into_iter()
+        .filter(|requirement| requirement != "role requirements require manual review")
+        .collect::<Vec<_>>();
+    let lower = format!("{} {}", title, description).to_ascii_lowercase();
+    for (keyword, requirement) in [
+        ("developer relations", "developer relations"),
+        ("developer advocacy", "developer advocacy"),
+        ("developer advocate", "developer advocacy"),
+        ("devrel", "developer relations"),
+        ("developer education", "developer education"),
+        ("technical writing", "technical writing"),
+        ("public speaking", "technical talks and workshops"),
+        ("sample code", "sample code and demos"),
+        ("demo", "sample code and demos"),
+        ("python", "python"),
+        ("api", "APIs"),
+        ("sdk", "SDKs"),
+        ("open-source", "open source ecosystems"),
+        ("open source", "open source ecosystems"),
+        ("enterprise", "enterprise developer adoption"),
+        ("llm", "AI systems"),
+        ("model", "AI systems"),
+        ("machine learning", "AI systems"),
+        ("infrastructure", "infrastructure"),
+        ("platform", "platform engineering"),
+    ] {
+        if lower.contains(keyword) {
+            requirements.push(requirement.to_string());
+        }
+    }
+    job_dedupe_strings(&mut requirements);
+    if requirements.is_empty() {
+        requirements.push("role requirements require manual review".to_string());
+    }
+    requirements.truncate(8);
+    requirements
+}
+
+fn job_implied_business_problem_from_description(title: &str, description: &str) -> Option<String> {
+    let lower = format!("{} {}", title, description).to_ascii_lowercase();
+    if lower.contains("developer advocate")
+        || lower.contains("developer advocacy")
+        || lower.contains("developer relations")
+        || lower.contains("devrel")
+    {
+        Some("Grow developer adoption through technical education, demos, sample code, community support, and field feedback while translating AI or platform capabilities into practical developer workflows.".to_string())
+    } else if lower.contains("open source") || lower.contains("community") {
+        Some("Build trust and adoption in a technical ecosystem through open-source collaboration, documentation, examples, and direct developer feedback loops.".to_string())
+    } else if lower.contains("platform") || lower.contains("infrastructure") {
+        Some("Build and operate reliable platform infrastructure for technical users, internal engineering teams, or developer-facing product surfaces.".to_string())
+    } else if lower.contains("ai") || lower.contains("llm") || lower.contains("model") {
+        Some("Turn advanced AI capabilities into dependable products, tools, workflows, or research systems that technical users can trust.".to_string())
+    } else {
+        job_implied_business_problem(title)
+    }
+}
+
+fn job_why_they_might_need_user_from_description(title: &str, description: &str) -> Option<String> {
+    let lower = format!("{} {}", title, description).to_ascii_lowercase();
+    if lower.contains("developer advocate")
+        || lower.contains("developer advocacy")
+        || lower.contains("developer relations")
+        || lower.contains("devrel")
+        || lower.contains("developer education")
+    {
+        Some("The posting emphasizes developer trust, technical communication, demos, ecosystem feedback, and adoption strategy.".to_string())
+    } else if lower.contains("platform") || lower.contains("infrastructure") {
+        Some("The posting emphasizes reliable technical systems and product judgment around engineering workflows.".to_string())
+    } else {
+        None
+    }
+}
+
+fn job_lever_lists_text(posting: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(lists) = posting.get("lists").and_then(Value::as_array) {
+        for list in lists {
+            if let Some(text) = job_json_string_at(list, &["text"]) {
+                parts.push(text);
+            }
+            if let Some(content) = job_json_string_at(list, &["content"]) {
+                parts.push(html_fragment_to_text(&content));
+            }
+        }
+    }
+    job_join_unique_strings(parts)
+}
+
+fn ashby_location_name(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(name) = value.as_str() {
+        return Some(name.to_string());
+    }
+    job_json_string_at(value, &["name"])
+        .or_else(|| job_json_string_at(value, &["city"]))
+        .or_else(|| job_json_string_at(value, &["region"]))
+        .or_else(|| job_json_string_at(value, &["country"]))
+}
+
+fn job_json_string_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn job_json_bool_at(value: &Value, path: &[&str]) -> Option<bool> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_bool()
+}
+
+fn job_json_string_list_at(value: &Value, path: &[&str]) -> Vec<String> {
+    let mut current = value;
+    for key in path {
+        let Some(next) = current.get(*key) else {
+            return Vec::new();
+        };
+        current = next;
+    }
+    current
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn job_json_readable_text(value: &Value) -> String {
+    let mut parts = Vec::new();
+    job_json_collect_strings(value, &mut parts, 300);
+    job_join_unique_strings(parts).unwrap_or_default()
+}
+
+fn job_json_collect_strings(value: &Value, out: &mut Vec<String>, max_parts: usize) {
+    if out.len() >= max_parts {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            if !text.is_empty() {
+                out.push(html_fragment_to_text(text));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                job_json_collect_strings(item, out, max_parts);
+                if out.len() >= max_parts {
+                    break;
+                }
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                job_json_collect_strings(item, out, max_parts);
+                if out.len() >= max_parts {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn job_join_unique_strings<I>(parts: I) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut values = parts
+        .into_iter()
+        .map(|value| normalize_readable_text(&value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    job_dedupe_strings(&mut values);
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join("; "))
+    }
+}
+
+fn job_join_unique_optional_strings<I>(parts: I) -> Option<String>
+where
+    I: IntoIterator<Item = Option<String>>,
+{
+    let mut values = parts
+        .into_iter()
+        .flatten()
+        .map(|value| normalize_readable_text(&value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    job_dedupe_strings(&mut values);
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join("; "))
+    }
+}
+
+fn job_dedupe_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.to_ascii_lowercase()));
 }
 
 pub(crate) fn job_source_refresh_body_is_html(body: &str) -> bool {
@@ -1775,6 +2381,9 @@ pub(crate) fn job_refresh_url_looks_like_job_detail(url: &str) -> bool {
     if host.contains("lever.co") && job_path_has_segment_after(&segments, "jobs") {
         return true;
     }
+    if host.contains("lever.co") && segments.len() >= 2 && last_segment.len() >= 16 {
+        return true;
+    }
     if host.contains("workable.com") && job_path_has_segment_after(&segments, "jobs") {
         return true;
     }
@@ -1939,16 +2548,17 @@ pub(crate) fn job_role_titles_match(left: &str, right: &str) -> bool {
 }
 
 pub(crate) fn job_source_refresh_health_status(
-    accepted_count: usize,
+    role_count: usize,
+    company_count: usize,
     rejected_count: usize,
     no_openings_signal: bool,
     stale_role_count: usize,
 ) -> String {
-    if no_openings_signal || stale_role_count > 0 && accepted_count == 0 {
+    if no_openings_signal || stale_role_count > 0 && role_count == 0 {
         "stale"
-    } else if accepted_count > 0 && rejected_count == 0 {
+    } else if role_count > 0 && rejected_count == 0 && stale_role_count == 0 {
         "healthy"
-    } else if accepted_count > 0 || rejected_count > 0 {
+    } else if role_count > 0 || company_count > 0 || rejected_count > 0 || stale_role_count > 0 {
         "partial"
     } else {
         "unknown"
@@ -2832,6 +3442,7 @@ pub(crate) fn render_job_weekly_report(
     intro_paths: &[JobIntroPath],
     contacts: &[JobContact],
     role_events: &[JobRoleStatusEvent],
+    event_since: Option<&str>,
 ) -> String {
     let mut role_labels: BTreeMap<String, String> = BTreeMap::new();
     let mut role_entries: BTreeMap<String, &JobShortlistEntry> = BTreeMap::new();
@@ -2897,14 +3508,20 @@ pub(crate) fn render_job_weekly_report(
     let next_actions =
         render_job_weekly_next_actions(intro_paths, &contact_names, &role_labels, applications);
     let role_changes = render_job_weekly_role_changes(role_events, &role_labels);
-    let new_openings =
-        render_job_opening_events(role_events, &role_entries, &role_labels, &["new"]);
+    let new_openings = render_job_opening_events(
+        role_events,
+        &role_entries,
+        &role_labels,
+        &["new"],
+        event_since,
+    );
     let open_roles = render_job_current_open_roles_from_groups(&grouped_open_roles);
     let removed_roles = render_job_opening_events(
         role_events,
         &role_entries,
         &role_labels,
         &["closed", "stale"],
+        event_since,
     );
     format!(
         "# Job Weekly Report\n\nProfile: {}\nGenerated: {}\n\n## New openings found\n\n{}\n\n## Currently open roles\n\n{}\n\n## Roles removed\n\n{}\n\n## Shortlist\n\n{}\n\n## Tier Counts\n\n{}\n\n## Role Changes\n\n{}\n\n## Applications\n\n{}\n\n## Intro Status\n\n{}\n\n## Next Actions\n\n{}\n\n## Source Health\n\n{}\n",
@@ -3030,10 +3647,11 @@ fn job_report_latest_role_statuses(role_events: &[JobRoleStatusEvent]) -> BTreeM
 }
 
 fn render_job_current_open_roles_from_groups(groups: &[JobReportRoleGroup<'_>]) -> String {
+    let mut groups = groups.iter().collect::<Vec<_>>();
+    groups.sort_by(|left, right| job_report_group_order(left.primary, right.primary));
     let roles = groups
         .iter()
-        .take(25)
-        .map(render_job_role_group_digest_entry)
+        .map(|group| render_job_role_group_digest_entry(group))
         .collect::<Vec<_>>();
     if roles.is_empty() {
         "- none".to_string()
@@ -3047,16 +3665,17 @@ pub(crate) fn render_job_opening_events(
     role_entries: &BTreeMap<String, &JobShortlistEntry>,
     role_labels: &BTreeMap<String, String>,
     statuses: &[&str],
+    event_since: Option<&str>,
 ) -> String {
     let mut seen_role_status = BTreeSet::new();
     let mut groups = Vec::<JobReportRoleEventGroup<'_>>::new();
     let mut group_indexes = BTreeMap::<String, usize>::new();
     let mut fallback_lines = Vec::new();
     for event in role_events {
-        if groups.len() + fallback_lines.len() >= 25 {
-            break;
-        }
         if !statuses.iter().any(|status| *status == event.status) {
+            continue;
+        }
+        if event_since.is_some_and(|since| event.created_at.as_str() <= since) {
             continue;
         }
         if !seen_role_status.insert((event.role_id.clone(), event.status.clone())) {
@@ -3102,9 +3721,11 @@ pub(crate) fn render_job_opening_events(
             fallback_lines.push(format!("- {label} ({})", event.status));
         }
     }
-    let mut lines = groups
+    let mut lines = groups.iter().collect::<Vec<_>>();
+    lines.sort_by(|left, right| job_report_group_order(left.primary, right.primary));
+    let mut lines = lines
         .iter()
-        .map(render_job_role_event_group)
+        .map(|group| render_job_role_event_group(group))
         .collect::<Vec<_>>();
     lines.extend(fallback_lines);
     if lines.is_empty() {
@@ -3182,13 +3803,13 @@ fn render_job_role_digest_entry_with_locations(
     if let Some(score) = &entry.score {
         status.push(format!("Score: {:.0}%.", score.weighted_score));
     } else {
-        status.push("Needs scoring.".to_string());
+        status.push(format!(
+            "Score: {:.0}% estimated.",
+            job_report_role_heuristic_score(role)
+        ));
     }
     if grouped_count > 1 {
         status.push(format!("Grouped {grouped_count} location postings."));
-    }
-    if let Some(url) = job_report_role_url(role) {
-        status.push(format!("Apply: {url}"));
     }
     format!("{title_line}\n\n{summary}\n\n{}", status.join(" "))
 }
@@ -3226,17 +3847,8 @@ fn job_report_role_summary_paragraph(entry: &JobShortlistEntry) -> String {
         "This is {article} {category} role at {}.",
         role.company
     ));
-    if role.source_confidence == "canonical_confirmed" {
-        sentences.push("The apply link points at a direct company or ATS posting.".to_string());
-    }
     if let Some(signal) = job_report_role_signal(role) {
-        sentences.push(format!("What stands out: {signal}."));
-    }
-    if entry.score.is_none() {
-        sentences.push(
-            "It has not been scored against the profile yet, so treat it as an open lead rather than a recommendation."
-                .to_string(),
-        );
+        sentences.push(format!("Stands out: {signal}."));
     }
     sentences.join(" ")
 }
@@ -3364,7 +3976,105 @@ fn job_report_entry_score(entry: &JobShortlistEntry) -> f64 {
         .score
         .as_ref()
         .map(|score| score.weighted_score)
-        .unwrap_or(f64::NEG_INFINITY)
+        .unwrap_or_else(|| job_report_role_heuristic_score(&entry.role))
+}
+
+fn job_report_group_order(
+    left: &JobShortlistEntry,
+    right: &JobShortlistEntry,
+) -> std::cmp::Ordering {
+    job_report_entry_score(right)
+        .partial_cmp(&job_report_entry_score(left))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.role.company.cmp(&right.role.company))
+        .then_with(|| {
+            job_report_display_role_title(&left.role)
+                .cmp(&job_report_display_role_title(&right.role))
+        })
+}
+
+pub(crate) fn job_report_role_heuristic_score(role: &JobRoleCard) -> f64 {
+    let text = job_report_canonical_key_text(
+        &[
+            role.role_title.as_str(),
+            role.cluster.as_deref().unwrap_or_default(),
+            role.implied_business_problem.as_deref().unwrap_or_default(),
+            role.why_they_might_need_user.as_deref().unwrap_or_default(),
+            &role.core_requirements.join(" "),
+        ]
+        .join(" "),
+    );
+    let mut score: f64 =
+        if text.contains("developer relations") || text.contains("developer advocate") {
+            88.0
+        } else if text.contains("devrel")
+            || text.contains("developer advocacy")
+            || text.contains("developer education")
+            || text.contains("developer marketer")
+            || text.contains("developer marketing")
+            || text.contains("developer who")
+            || text.contains("technical evangelist")
+        {
+            84.0
+        } else if text.contains("solutions architect")
+            || text.contains("solutions engineer")
+            || text.contains("forward deployed")
+            || text.contains("developer experience")
+            || text.contains("devex")
+        {
+            79.0
+        } else if text.contains("research engineer")
+            || text.contains("machine learning")
+            || text.contains(" ai ")
+            || text.contains(" llm ")
+            || text.contains(" model ")
+        {
+            77.0
+        } else if text.contains("platform")
+            || text.contains("infrastructure")
+            || text.contains("distributed systems")
+            || text.contains("backend")
+            || text.contains("sdk")
+            || text.contains("api")
+            || text.contains("open source")
+        {
+            73.0
+        } else if text.contains("security") {
+            66.0
+        } else if text.contains("product manager") {
+            58.0
+        } else {
+            50.0
+        };
+    if text.contains("principal")
+        || text.contains("staff")
+        || text.contains("senior")
+        || text.contains("lead")
+    {
+        score += 3.0;
+    }
+    if text.contains("intern") || text.contains("graduate") {
+        score -= 35.0;
+    }
+    if text.contains("manager") && !text.contains("developer relations") {
+        score -= 5.0;
+    }
+    let geo_text = job_report_normalized_geo_text(
+        &[role.location.as_deref(), role.work_mode.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    if job_report_geo_text_has_positive_uk_relevance(&geo_text)
+        || job_report_geo_text_mentions_remote(&geo_text)
+    {
+        score += 3.0;
+    }
+    if role.source_confidence == "canonical_confirmed" {
+        score += 2.0;
+    }
+    score.clamp(35.0, 92.0)
 }
 
 fn job_report_location_label(role: &JobRoleCard) -> Option<String> {
@@ -3538,7 +4248,7 @@ pub(crate) fn job_report_role_is_uk_plausible(role: &JobRoleCard) -> bool {
     if job_report_geo_text_mentions_remote(&normalized) {
         return true;
     }
-    !job_report_geo_text_has_any_geo_signal(&normalized)
+    true
 }
 
 fn job_report_geo_suffix_is_location(text: &str) -> bool {
@@ -3609,6 +4319,23 @@ fn job_report_geo_text_has_positive_uk_relevance(text: &str) -> bool {
         " stockholm ",
         " copenhagen ",
         " helsinki ",
+        " vienna ",
+        " austria ",
+        " munich ",
+        " germany ",
+        " france ",
+        " spain ",
+        " netherlands ",
+        " poland ",
+        " warsaw ",
+        " belgium ",
+        " brussels ",
+        " luxembourg ",
+        " italy ",
+        " sweden ",
+        " denmark ",
+        " finland ",
+        " norway ",
     ]
     .iter()
     .any(|needle| text.contains(needle))
@@ -3642,6 +4369,23 @@ fn job_report_positive_geo_labels(text: &str) -> Vec<String> {
         (" stockholm ", "Europe"),
         (" copenhagen ", "Europe"),
         (" helsinki ", "Europe"),
+        (" vienna ", "Europe"),
+        (" austria ", "Europe"),
+        (" munich ", "Europe"),
+        (" germany ", "Europe"),
+        (" france ", "Europe"),
+        (" spain ", "Europe"),
+        (" netherlands ", "Europe"),
+        (" poland ", "Europe"),
+        (" warsaw ", "Europe"),
+        (" belgium ", "Europe"),
+        (" brussels ", "Europe"),
+        (" luxembourg ", "Europe"),
+        (" italy ", "Europe"),
+        (" sweden ", "Europe"),
+        (" denmark ", "Europe"),
+        (" finland ", "Europe"),
+        (" norway ", "Europe"),
     ] {
         if normalized.contains(needle) {
             labels.push(label.to_string());
@@ -3655,24 +4399,42 @@ fn job_report_positive_geo_labels(text: &str) -> Vec<String> {
 fn job_report_geo_text_has_excluded_region(text: &str) -> bool {
     [
         " united states ",
+        " us ",
         " usa ",
         " u s ",
         " us only ",
+        " est timezone ",
+        " est time zone ",
+        " eastern time ",
+        " dallas ",
+        " tx ",
+        " utah ",
         " north america ",
         " canada ",
         " can ",
         " ontario ",
+        " montreal ",
+        " amer ",
         " americas ",
         " latin america ",
+        " apac ",
         " australia ",
+        " sydney ",
+        " melbourne ",
+        " canberra ",
         " new zealand ",
         " india ",
         " singapore ",
+        " seoul ",
         " japan ",
+        " tokyo ",
+        " abu dhabi ",
+        " casablanca ",
         " switzerland ",
         " swiss ",
         " zurich ",
         " geneva ",
+        " lausanne ",
         " ch ",
         " san francisco ",
         " new york ",
@@ -3680,14 +4442,20 @@ fn job_report_geo_text_has_excluded_region(text: &str) -> bool {
         " seattle ",
         " austin ",
         " boston ",
+        " charlotte ",
         " chicago ",
         " denver ",
+        " las vegas ",
         " los angeles ",
         " miami ",
+        " phoenix ",
         " portland ",
+        " raleigh ",
+        " salt lake city ",
         " washington dc ",
         " washington d c ",
         " district of columbia ",
+        " atlanta ",
         " california ",
         " texas ",
         " massachusetts ",
@@ -3695,17 +4463,20 @@ fn job_report_geo_text_has_excluded_region(text: &str) -> bool {
         " colorado ",
         " oregon ",
         " washington state ",
+        " nc ",
+        " nv ",
+        " az ",
+        " ut ",
+        " ga ",
+        " pacific timezone ",
+        " pacific time ",
+        " pst ",
+        " pdt ",
         " toronto ",
         " vancouver ",
     ]
     .iter()
     .any(|needle| text.contains(needle))
-}
-
-fn job_report_geo_text_has_any_geo_signal(text: &str) -> bool {
-    job_report_geo_text_has_positive_uk_relevance(text)
-        || job_report_geo_text_has_excluded_region(text)
-        || job_report_geo_text_mentions_remote(text)
 }
 
 pub(crate) fn job_source_health_status_counts_as_error(status: &str) -> bool {

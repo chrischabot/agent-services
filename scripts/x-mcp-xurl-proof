@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Redacted proof packet for X MCP/xurl discovery.
+
+This script proves the local xurl bridge surface separately from Arcwell's
+canonical ingestion paths. It deliberately does not print or store OAuth tokens.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+
+TOKENISH = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}")
+LONG_SECRET = re.compile(r"[A-Za-z0-9._~+/=-]{36,}")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sanitize(value: str) -> str:
+    value = TOKENISH.sub(r"\1[REDACTED]", value)
+    value = LONG_SECRET.sub("[REDACTED]", value)
+    return value
+
+
+def command_base() -> tuple[list[str], str]:
+    configured = os.environ.get("ARCWELL_XURL_BIN", "").strip()
+    if configured:
+        return [configured], "ARCWELL_XURL_BIN"
+    found = shutil.which("xurl")
+    if found:
+        return [found], "PATH:xurl"
+    package = os.environ.get("ARCWELL_XURL_NPX_PACKAGE", "@xdevplatform/xurl")
+    command = ["npx", "-y"]
+    registry = os.environ.get("ARCWELL_XURL_NPX_REGISTRY", "").strip()
+    if registry:
+        command.append(f"--registry={registry}")
+    command.append(package)
+    return command, f"npx:{package}"
+
+
+def run_step(
+    name: str,
+    command: list[str],
+    *,
+    input_text: str | None,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> tuple[dict, str]:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+        status = "passed" if completed.returncode == 0 else "failed"
+        stdout = completed.stdout
+        stderr = completed.stderr
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as error:
+        status = "timeout"
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        returncode = None
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "name": name,
+        "status": status,
+        "returncode": returncode,
+        "duration_ms": elapsed_ms,
+        "command": [sanitize(part) for part in command],
+        "stdout_excerpt": sanitize(stdout)[:4000],
+        "stderr_excerpt": sanitize(stderr)[:4000],
+    }, stdout
+
+
+def parse_mcp_tools(stdout: str) -> tuple[list[dict], list[str]]:
+    tools: list[dict] = []
+    parse_errors: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            parse_errors.append(f"invalid json line: {error}")
+            continue
+        if message.get("id") != 2:
+            continue
+        result = message.get("result") or {}
+        for tool in result.get("tools") or []:
+            name = str(tool.get("name") or "")
+            if not name:
+                continue
+            tools.append(
+                {
+                    "name": name,
+                    "description": sanitize(str(tool.get("description") or ""))[:500],
+                    "has_input_schema": isinstance(tool.get("inputSchema"), dict),
+                }
+            )
+    return tools, parse_errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server-url", default="https://api.x.com/mcp")
+    parser.add_argument("--timeout", type=int, default=45)
+    parser.add_argument(
+        "--allow-browser",
+        action="store_true",
+        help="Allow xurl mcp to open browser if no cached OAuth token exists.",
+    )
+    args = parser.parse_args()
+
+    root = repo_root()
+    proof_dir = (
+        root
+        / ".arcwell-dev"
+        / "proofs"
+        / f"x-mcp-xurl-proof-{utc_stamp()}-{os.getpid()}"
+        / "artifacts"
+    )
+    proof_dir.mkdir(parents=True, exist_ok=True)
+
+    base, source = command_base()
+    steps: list[dict] = []
+
+    help_step, _ = run_step("xurl_help", base + ["--help"], input_text=None, timeout=args.timeout)
+    steps.append(help_step)
+    version_step, _ = run_step("xurl_version", base + ["version"], input_text=None, timeout=args.timeout)
+    steps.append(version_step)
+    auth_step, _ = run_step(
+        "xurl_auth_status",
+        base + ["auth", "status"],
+        input_text=None,
+        timeout=args.timeout,
+    )
+    steps.append(auth_step)
+
+    token_step, _ = run_step(
+        "xurl_token",
+        base + ["token"],
+        input_text=None,
+        timeout=args.timeout,
+    )
+    token_available = token_step["status"] == "passed" and bool(token_step["stdout_excerpt"].strip())
+    token_step["stdout_excerpt"] = (
+        "[REDACTED_TOKEN_OUTPUT]" if token_available else token_step["stdout_excerpt"]
+    )
+    token_step["token_available"] = token_available
+    steps.append(token_step)
+
+    tools: list[dict] = []
+    mcp_parse_errors: list[str] = []
+    has_client_env = bool(os.environ.get("CLIENT_ID") and os.environ.get("CLIENT_SECRET"))
+    if has_client_env or token_available or args.allow_browser:
+        mcp_input = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {
+                                "name": "arcwell-x-mcp-proof",
+                                "version": "0.1",
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list",
+                        "params": {},
+                    }
+                ),
+                "",
+            ]
+        )
+        env = os.environ.copy()
+        mcp_step, mcp_stdout = run_step(
+            "x_mcp_tools_list",
+            base + ["mcp", args.server_url],
+            input_text=mcp_input,
+            timeout=args.timeout,
+            env=env,
+        )
+        mcp_step["client_env_present"] = has_client_env
+        tools, mcp_parse_errors = parse_mcp_tools(mcp_stdout)
+        mcp_step["tool_count"] = len(tools)
+        steps.append(mcp_step)
+    else:
+        steps.append(
+            {
+                "name": "x_mcp_tools_list",
+                "status": "skipped",
+                "reason": "no CLIENT_ID/CLIENT_SECRET env and no cached xurl OAuth token available; rerun with official X MCP bridge credentials or pass --allow-browser for supervised login",
+                "client_env_present": False,
+                "tool_count": 0,
+            }
+        )
+
+    status = "passed" if tools else "partial" if token_available else "blocked_auth"
+    packet = {
+        "feature": "x_mcp_xurl_discovery",
+        "status": status,
+        "proof_level": "local_probe" if status != "passed" else "live_provider_discovery",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "server_url": args.server_url,
+        "xurl_command_source": source,
+        "client_env_present": has_client_env,
+        "steps": steps,
+        "tools_seen": len(tools),
+        "tools": tools,
+        "mcp_parse_errors": mcp_parse_errors,
+        "non_claims": [
+            "This does not prove Arcwell canonical ingestion unless paired with arcwell x recent-search/import-bookmarks transport proof.",
+            "This does not authorize X social writes, Articles, DMs, media import, or scheduled operational status.",
+            "This does not print or store OAuth token values.",
+        ],
+    }
+    path = proof_dir / "proof-packet.json"
+    path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(path)
+    return 0 if status in {"passed", "partial", "blocked_auth"} else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

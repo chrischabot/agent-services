@@ -1,5 +1,7 @@
 use crate::*;
 
+pub(crate) const EMAIL_BODY_MAX_CHARS: usize = 500_000;
+
 pub(crate) fn validate_oauth_param(value: &str, label: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{label} cannot be empty");
@@ -36,10 +38,28 @@ pub(crate) fn sanitize_channel_body(body: &str) -> Result<String> {
     if body.len() > 20_000 {
         bail!("channel body is too long");
     }
-    Ok(body
-        .chars()
+    Ok(sanitize_channel_body_content(body))
+}
+
+pub(crate) fn validate_email_body_text(text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        bail!("email body cannot be empty");
+    }
+    if text.len() > EMAIL_BODY_MAX_CHARS {
+        bail!("email body is too long");
+    }
+    Ok(())
+}
+
+pub(crate) fn sanitize_email_body(body: &str) -> Result<String> {
+    validate_email_body_text(body)?;
+    Ok(sanitize_channel_body_content(body))
+}
+
+fn sanitize_channel_body_content(body: &str) -> String {
+    body.chars()
         .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
-        .collect())
+        .collect()
 }
 
 pub(crate) fn normalize_email_address(value: &str) -> Option<String> {
@@ -101,7 +121,7 @@ pub(crate) fn email_source_card_url(message_id: &str) -> String {
 }
 
 pub(crate) fn validate_email_html(html: &str) -> Result<()> {
-    validate_notes(html)?;
+    validate_email_body_text(html)?;
     let lower = html.to_ascii_lowercase();
     for needle in [
         "<script",
@@ -124,7 +144,7 @@ pub(crate) fn validate_email_html(html: &str) -> Result<()> {
 
 pub(crate) fn render_email_html_from_markdown(subject: &str, markdown: &str) -> Result<String> {
     validate_notes(subject)?;
-    validate_notes(markdown)?;
+    validate_email_body_text(markdown)?;
     let fragment = render_email_markdown_fragment(markdown);
     let html = format!(
         r#"<!doctype html>
@@ -1259,6 +1279,8 @@ pub(crate) fn validate_job_kind(kind: &str) -> Result<()> {
         | "radar_scheduled_delivery"
         | "digest_scheduled_alert"
         | "knowledge_daily_briefing"
+        | "email_delivery_verification_request"
+        | "email_delivery_mailbox_repair"
         | "knowledge_cluster_editorial_decide"
         | "knowledge_cluster_expand"
         | "knowledge_cluster_model_write"

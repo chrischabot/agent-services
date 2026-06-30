@@ -239,6 +239,114 @@ priority = 20
 }
 
 #[test]
+fn severe_secret_health_warns_when_gmail_mailbox_gaps_lack_oauth_material() {
+    // CLAIM: active Gmail mailbox verification/repair gaps create actionable
+    // credential health warnings instead of hiding behind source-health rows
+    // or a completed missing-credential worker job.
+    // ORACLE: secret_health, health, ops, and credential-reminder warning
+    // surfaces name the missing Gmail OAuth material and required readonly /
+    // modify scopes without leaking message bodies or token-like values.
+    // SEVERITY: Severe because a scheduled briefing hidden in Trash needs a
+    // clear reauthorization action, not another invisible background miss.
+    let store = test_store("secret-health-gmail-mailbox-gap");
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "Provider accepted this email but Gmail placed it badly.",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<gmail-health-gap@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_observed",
+            Some("gmail-trash-health"),
+            Some("<gmail-health-gap@example.com>"),
+            None,
+            &json!({
+                "gmail_message_metadata": [{
+                    "id": "gmail-trash-health",
+                    "label_ids": ["TRASH"],
+                    "placement": "trash"
+                }]
+            }),
+        )
+        .unwrap();
+
+    let secret_health = store.secret_health().unwrap();
+    for required in [
+        "GMAIL_ACCESS_TOKEN",
+        "GMAIL_REFRESH_TOKEN",
+        "GMAIL_CLIENT_ID",
+    ] {
+        let item = secret_health
+            .iter()
+            .find(|item| item.name == required)
+            .unwrap_or_else(|| panic!("{required} warning missing"));
+        assert_eq!(item.status, "missing", "{item:#?}");
+        assert!(!item.present, "{item:#?}");
+        assert!(
+            item.warnings.iter().any(|warning| {
+                warning.contains("gmail.readonly")
+                    && warning.contains("gmail.modify")
+                    && warning.contains("Trash/Spam repairable gap")
+            }),
+            "{item:#?}"
+        );
+    }
+    let health = store.health().unwrap();
+    assert!(!health.ok);
+    assert!(
+        health
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GMAIL_ACCESS_TOKEN is missing or expired")),
+        "{:?}",
+        health.warnings
+    );
+    let reminders = store.credential_reminder_secret_warnings().unwrap();
+    assert!(
+        reminders
+            .iter()
+            .any(|(health, warnings)| health.name == "GMAIL_ACCESS_TOKEN"
+                && warnings
+                    .iter()
+                    .any(|warning| warning.contains("gmail.modify"))),
+        "{reminders:#?}"
+    );
+    let serialized = serde_json::to_string(&json!({
+        "secret_health": secret_health,
+        "health": health,
+        "ops": store.ops_snapshot().unwrap(),
+        "reminders": reminders,
+    }))
+    .unwrap();
+    assert!(serialized.contains("GMAIL_ACCESS_TOKEN"));
+    assert!(serialized.contains("gmail.modify"));
+    assert!(!serialized.contains("ya29."));
+    assert!(!serialized.contains("refresh_token="));
+}
+
+#[test]
 fn severe_secret_health_suppresses_refreshable_x_bearer_without_schedule() {
     // CLAIM: X access-token expiry is not a user-action credential problem
     // when Arcwell has refresh material and policy to refresh it.

@@ -1138,6 +1138,24 @@ pub(crate) fn wiki_job_policy_context(
                 .map(|value| excerpt(value, 120)),
             None,
         ),
+        "email_delivery_verification_request" => (
+            "arcwell-knowledge",
+            None,
+            input
+                .get("verification_state")
+                .and_then(Value::as_str)
+                .map(|value| excerpt(value, 120)),
+            None,
+        ),
+        "email_delivery_mailbox_repair" => (
+            "arcwell-knowledge",
+            None,
+            input
+                .get("verification_state")
+                .and_then(Value::as_str)
+                .map(|value| excerpt(value, 120)),
+            None,
+        ),
         "radar_run" => (
             "arcwell-radar",
             None,

@@ -1,5 +1,91 @@
 use crate::*;
 
+#[derive(Debug, Serialize)]
+pub(crate) struct GmailOAuthReauthorizeCliReport {
+    status: String,
+    redirect_uri: String,
+    scopes: Vec<String>,
+    opened_browser: bool,
+    callback_received: bool,
+    token_store: Value,
+    mailbox_verification: Value,
+}
+
+pub(crate) fn gmail_oauth_reauthorize(
+    store: &Store,
+    client_id: Option<&str>,
+    redirect_uri: Option<&str>,
+    client_secret: Option<&str>,
+    scopes: &[String],
+    timeout_seconds: u64,
+    verify_limit: usize,
+    open_browser: bool,
+) -> Result<GmailOAuthReauthorizeCliReport> {
+    let client_id = store.resolve_gmail_oauth_client_id(client_id)?;
+    let redirect_uri = store.resolve_gmail_oauth_redirect_uri(redirect_uri)?;
+    let preflight = store.gmail_oauth_reauthorize_preflight(&redirect_uri, scopes)?;
+    let loopback = parse_loopback_redirect_uri(&redirect_uri)?;
+    let listener = TcpListener::bind(&loopback.bind_addr)
+        .with_context(|| format!("binding OAuth callback listener at {}", loopback.bind_addr))?;
+    listener
+        .set_nonblocking(true)
+        .context("configuring OAuth callback listener")?;
+    let start = store.gmail_oauth_authorize_url(&client_id, &redirect_uri, &preflight.scopes)?;
+    eprintln!(
+        "Arcwell Gmail OAuth reauthorize pending: redirect_uri={} scopes={} authorization_url={}",
+        redirect_uri,
+        preflight.scopes.join(","),
+        start.authorization_url
+    );
+    if open_browser {
+        open_browser_url(&start.authorization_url)?;
+    } else {
+        eprintln!("{}", start.authorization_url);
+    }
+    let callback = wait_for_x_oauth_callback(
+        &listener,
+        &loopback.path,
+        &start.state,
+        timeout_seconds.max(1),
+    )
+    .with_context(|| {
+        format!(
+            "Timed out waiting for Gmail OAuth callback at {redirect_uri}. Open this URL and complete consent, then retry if the browser did not return to Arcwell: {}",
+            start.authorization_url
+        )
+    })?;
+    let token_store = store.gmail_oauth_exchange_code(
+        &client_id,
+        &redirect_uri,
+        &callback.code,
+        &start.code_verifier,
+        client_secret,
+    )?;
+    let mailbox_verification = store.verify_email_delivery_mailbox_with_gmail(
+        verify_limit,
+        Some("mailbox_unverified"),
+        None,
+        None,
+        None,
+    )?;
+    let status = if mailbox_verification.missing_credential {
+        "credential_missing"
+    } else if mailbox_verification.errors.is_empty() {
+        "ready"
+    } else {
+        "partial"
+    };
+    Ok(GmailOAuthReauthorizeCliReport {
+        status: status.to_string(),
+        redirect_uri,
+        scopes: preflight.scopes,
+        opened_browser: open_browser,
+        callback_received: true,
+        token_store: serde_json::to_value(token_store)?,
+        mailbox_verification: serde_json::to_value(mailbox_verification)?,
+    })
+}
+
 pub(crate) fn telegram(store: Store, args: TelegramCommand) -> Result<()> {
     match args.command {
         TelegramSubcommand::Drain { max_events } => {
@@ -189,6 +275,164 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
                 original_message_id.as_deref(),
                 api_base.as_deref(),
             )?)
+        }
+        EmailSubcommand::ObserveDelivery {
+            delivery_attempt_id,
+            source,
+            status,
+            mailbox_message_id,
+            provider_message_id,
+            observed_at,
+            evidence_json,
+        } => {
+            let evidence: Value = serde_json::from_str(&evidence_json)
+                .with_context(|| "parsing --evidence-json as JSON")?;
+            print_json(&store.record_channel_delivery_observation(
+                &delivery_attempt_id,
+                &source,
+                &status,
+                mailbox_message_id.as_deref(),
+                provider_message_id.as_deref(),
+                observed_at.as_deref(),
+                &evidence,
+            )?)
+        }
+        EmailSubcommand::Observations {
+            delivery_attempt_id,
+        } => print_json(&store.list_channel_delivery_observations(delivery_attempt_id.as_deref())?),
+        EmailSubcommand::VerificationGaps => {
+            print_json(&store.list_email_delivery_verification_gaps()?)
+        }
+        EmailSubcommand::VerificationRequests {
+            limit,
+            state,
+            destination,
+        } => print_json(&store.build_email_delivery_verification_requests(
+            limit,
+            state.as_deref(),
+            destination.as_deref(),
+        )?),
+        EmailSubcommand::EnqueueVerification {
+            limit,
+            state,
+            destination,
+        } => print_json(&store.enqueue_email_delivery_verification_request_job(
+            limit,
+            state.as_deref(),
+            destination.as_deref(),
+        )?),
+        EmailSubcommand::VerifyMailbox {
+            limit,
+            state,
+            destination,
+            access_token,
+            api_base,
+        } => print_json(&store.verify_email_delivery_mailbox_with_gmail(
+            limit,
+            state.as_deref(),
+            destination.as_deref(),
+            access_token.as_deref(),
+            api_base.as_deref(),
+        )?),
+        EmailSubcommand::RepairMailboxPlacement {
+            limit,
+            state,
+            destination,
+            access_token,
+            api_base,
+        } => print_json(&store.repair_email_delivery_mailbox_placement_with_gmail(
+            limit,
+            state.as_deref(),
+            destination.as_deref(),
+            access_token.as_deref(),
+            api_base.as_deref(),
+        )?),
+        EmailSubcommand::OauthUrl {
+            client_id,
+            redirect_uri,
+            scopes,
+        } => {
+            let client_id = store.resolve_gmail_oauth_client_id(client_id.as_deref())?;
+            let redirect_uri = store.resolve_gmail_oauth_redirect_uri(redirect_uri.as_deref())?;
+            print_json(&store.gmail_oauth_authorize_url(&client_id, &redirect_uri, &scopes)?)
+        }
+        EmailSubcommand::OauthExchange {
+            client_id,
+            redirect_uri,
+            code,
+            code_verifier,
+            client_secret,
+        } => {
+            let client_id = store.resolve_gmail_oauth_client_id(client_id.as_deref())?;
+            let redirect_uri = store.resolve_gmail_oauth_redirect_uri(redirect_uri.as_deref())?;
+            print_json(&store.gmail_oauth_exchange_code(
+                &client_id,
+                &redirect_uri,
+                &code,
+                &code_verifier,
+                client_secret.as_deref(),
+            )?)
+        }
+        EmailSubcommand::OauthReauthorize {
+            client_id,
+            redirect_uri,
+            client_secret,
+            scopes,
+            timeout_seconds,
+            verify_limit,
+            no_open_browser,
+        } => print_json(&gmail_oauth_reauthorize(
+            &store,
+            client_id.as_deref(),
+            redirect_uri.as_deref(),
+            client_secret.as_deref(),
+            &scopes,
+            timeout_seconds,
+            verify_limit,
+            !no_open_browser,
+        )?),
+        EmailSubcommand::OauthRefresh {
+            client_id,
+            client_secret,
+        } => {
+            let client_id = store.resolve_gmail_oauth_client_id(client_id.as_deref())?;
+            print_json(&store.gmail_oauth_refresh(&client_id, client_secret.as_deref())?)
+        }
+        EmailSubcommand::ObserveDeliveryBatch {
+            source,
+            results_json,
+        } => {
+            let results: Vec<Value> = serde_json::from_str(&results_json)
+                .with_context(|| "parsing --results-json as a JSON array")?;
+            let mut observations = Vec::new();
+            for result in results {
+                let delivery_attempt_id = result
+                    .get("delivery_attempt_id")
+                    .and_then(Value::as_str)
+                    .context("batch result missing delivery_attempt_id")?;
+                let observation_status = result
+                    .get("observation_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mailbox_observed");
+                let observation_source = result
+                    .get("observation_source")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&source);
+                let mailbox_message_id = result.get("mailbox_message_id").and_then(Value::as_str);
+                let provider_message_id = result.get("provider_message_id").and_then(Value::as_str);
+                let observed_at = result.get("observed_at").and_then(Value::as_str);
+                let evidence = result.get("evidence").cloned().unwrap_or_else(|| json!({}));
+                observations.push(store.record_channel_delivery_observation(
+                    delivery_attempt_id,
+                    observation_source,
+                    observation_status,
+                    mailbox_message_id,
+                    provider_message_id,
+                    observed_at,
+                    &evidence,
+                )?);
+            }
+            print_json(&observations)
         }
     }
 }

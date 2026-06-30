@@ -240,3 +240,70 @@ Create an `ops_snapshot` contract that unifies current Arcwell durable state and
 explicitly distinguishes healthy, stale, blocked, failed, partial, and unknown.
 Only after that should Arcwell add a richer cockpit UI.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+The original Mission Control first slice is now implemented well past the
+contract stage:
+
+- `ops_snapshot`, compact ops, and server-rendered `/ops/ui` expose health,
+  backups, worker heartbeat, queues, edge events, source health, radar quality,
+  X, knowledge, job-hunting, cursors, provider/secret health, costs, projects,
+  channels, memory/procedure review, work runs, policy decisions/approvals,
+  delivery failures, email verification, schedules, and project snapshots.
+- Ops UI has authenticated policy-checked controls for selected edge, X, and
+  knowledge actions.
+- Browser smoke scripts cover desktop/detail/mobile rendering, hostile content
+  escaping, X redaction, and job-hunting ops proof.
+- Proof ledger and guard now provide a stronger basis for quality review than a
+  separate Mission-Control-style task eval table would.
+
+The next value is not a new dashboard. It is closing the loop between ops
+state, proof packets, guard reviews, and safe remediation.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell ops can explain each important blocked/stale/failed state, link it to
+> the relevant proof or guard evidence, and offer only policy-checked
+> remediation controls that are proven for that state.
+
+Refutations:
+
+- Ops shows a green summary while stale cursors or delivery gaps remain.
+- A control appears without policy/cost/auth checks and idempotency tests.
+- A proof packet is not linked to the capability status it promotes.
+- A source-health failure is hidden behind a generic worker failure count.
+- Browser UI renders a control whose backend route is missing or scaffold-only.
+
+Revised implementation slices:
+
+1. Add proof-packet links and proof-level badges to ops capability sections.
+2. Add guard-review and proof-check summaries for implementation/change work.
+3. Expand remediation only one action at a time: requeue, retry delivery,
+   verify mailbox, run provider probe, or repair projection.
+4. Require each control to have policy/cost/auth/idempotency tests plus browser
+   smoke.
+5. Add ops "why not promoted" explanations for Partial/hold states.
+
+Keep from Mission Control:
+
+- RBAC/scope discipline;
+- activity/audit trail;
+- quality gates;
+- security scan/fix-safety classification;
+- signed or hashed action receipts where useful.
+
+Do not copy:
+
+- a separate ops product or task board detached from Arcwell durable state;
+- agent eval scores that judge final prose without evidence/proof checks;
+- controls that mutate state without proof-ledger and policy linkage.
+
+Next proof gate:
+
+- Local Proof: fixtures render proof-linked healthy/stale/blocked/failed
+  states and refuse unauthorized/idempotency-breaking controls.
+- Production Data Proof: current real-home ops identifies at least one blocker
+  and one remediation path, runs the policy-checked remediation, and records
+  before/after state plus proof packet.

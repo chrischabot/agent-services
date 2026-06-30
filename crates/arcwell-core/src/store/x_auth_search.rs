@@ -1017,18 +1017,41 @@ impl Store {
     }
 
     pub fn x_recent_search(&self, query: &str, max_results: usize) -> Result<XImportReport> {
-        let endpoint =
-            std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        self.x_recent_search_with_base(query, max_results, &endpoint)
+        self.x_recent_search_with_transport(query, max_results, None)
     }
 
+    pub fn x_recent_search_with_transport(
+        &self,
+        query: &str,
+        max_results: usize,
+        transport: Option<&str>,
+    ) -> Result<XImportReport> {
+        let endpoint =
+            std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
+        let transport = XProviderTransport::parse(transport)?;
+        self.x_recent_search_with_base_transport_and_job_id(
+            query,
+            max_results,
+            &endpoint,
+            transport,
+            None,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn x_recent_search_with_base(
         &self,
         query: &str,
         max_results: usize,
         endpoint: &str,
     ) -> Result<XImportReport> {
-        self.x_recent_search_with_base_and_job_id(query, max_results, endpoint, None)
+        self.x_recent_search_with_base_transport_and_job_id(
+            query,
+            max_results,
+            endpoint,
+            XProviderTransport::DirectApi,
+            None,
+        )
     }
 
     pub(crate) fn x_recent_search_with_base_and_job_id(
@@ -1036,6 +1059,23 @@ impl Store {
         query: &str,
         max_results: usize,
         endpoint: &str,
+        job_id: Option<&str>,
+    ) -> Result<XImportReport> {
+        self.x_recent_search_with_base_transport_and_job_id(
+            query,
+            max_results,
+            endpoint,
+            XProviderTransport::DirectApi,
+            job_id,
+        )
+    }
+
+    pub(crate) fn x_recent_search_with_base_transport_and_job_id(
+        &self,
+        query: &str,
+        max_results: usize,
+        endpoint: &str,
+        transport: XProviderTransport,
         job_id: Option<&str>,
     ) -> Result<XImportReport> {
         validate_query(query)?;
@@ -1052,7 +1092,11 @@ impl Store {
             subject: None,
             target: Some(endpoint.to_string()),
             projected_usd: Some(projected),
-            metadata: json!({ "query": query, "max_results": max_results.clamp(10, 100) }),
+            metadata: json!({
+                "query": query,
+                "max_results": max_results.clamp(10, 100),
+                "transport": transport.cli_value()
+            }),
             untrusted_excerpt: None,
         })?;
         self.require_cost_budget(
@@ -1067,66 +1111,90 @@ impl Store {
         let started_at = now();
         let mut previous_cursor_for_run: Option<String> = None;
         let mut new_cursor_for_run: Option<String> = None;
+        let mut mcp_tool_name_for_run: Option<String> = None;
         let result = (|| -> Result<XImportReport> {
-            let token = self.x_bearer_token_for_endpoint(endpoint)?;
+            let token = if transport == XProviderTransport::XApiMcp {
+                self.x_mcp_app_bearer_token_for_endpoint(endpoint)?
+            } else {
+                self.x_bearer_token_for_transport(endpoint, transport)?
+            };
             let previous_cursor = self.get_cursor(&cursor_key)?.map(|cursor| cursor.value);
             previous_cursor_for_run = previous_cursor.clone();
-            let base = validated_x_api_base(endpoint)?;
-            let build_url = |since_id: Option<&str>| -> Result<url::Url> {
-                let mut url = base.join("/2/tweets/search/recent")?;
-                {
-                    let mut pairs = url.query_pairs_mut();
-                    pairs
-                        .append_pair("query", query)
-                        .append_pair("max_results", &max_results.clamp(10, 100).to_string())
-                        .append_pair("tweet.fields", "created_at,author_id,public_metrics")
-                        .append_pair("expansions", "author_id")
-                        .append_pair("user.fields", "username,name");
-                    if let Some(since_id) = since_id {
-                        pairs.append_pair("since_id", since_id);
+            let mut mcp_tool_name: Option<String> = None;
+            let (value, stale_since_id_retried) = if transport == XProviderTransport::XApiMcp {
+                let (value, tool_name) = self.x_mcp_recent_search_api_response(
+                    endpoint,
+                    &token,
+                    query,
+                    max_results,
+                    previous_cursor.as_deref(),
+                )?;
+                mcp_tool_name = Some(tool_name);
+                mcp_tool_name_for_run = mcp_tool_name.clone();
+                (value, false)
+            } else {
+                let base = validated_x_api_base(endpoint)?;
+                let build_url = |since_id: Option<&str>| -> Result<url::Url> {
+                    let mut url = base.join("/2/tweets/search/recent")?;
+                    {
+                        let mut pairs = url.query_pairs_mut();
+                        pairs
+                            .append_pair("query", query)
+                            .append_pair("max_results", &max_results.clamp(10, 100).to_string())
+                            .append_pair("tweet.fields", "created_at,author_id,public_metrics")
+                            .append_pair("expansions", "author_id")
+                            .append_pair("user.fields", "username,name");
+                        if let Some(since_id) = since_id {
+                            pairs.append_pair("since_id", since_id);
+                        }
                     }
-                }
-                Ok(url)
-            };
-            let url = build_url(previous_cursor.as_deref())?;
-            let mut stale_since_id_retried = false;
-            let value = match fetch_x_json(url.as_str(), Some(&token)) {
-                Ok(value) => match x_fail_on_response_errors(&value) {
-                    Ok(()) => value,
+                    Ok(url)
+                };
+                let url = build_url(previous_cursor.as_deref())?;
+                let mut stale_since_id_retried = false;
+                let value = match fetch_x_json(url.as_str(), Some(&token)) {
+                    Ok(value) => match x_fail_on_response_errors(&value) {
+                        Ok(()) => value,
+                        Err(error)
+                            if previous_cursor.is_some()
+                                && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
+                        {
+                            stale_since_id_retried = true;
+                            let retry_url = build_url(None)?;
+                            let value = fetch_x_json(retry_url.as_str(), Some(&token)).with_context(
+                                || {
+                                    format!(
+                                        "retrying X recent search without stale since_id for query {query:?}"
+                                    )
+                                },
+                            )?;
+                            x_fail_on_response_errors(&value)?;
+                            value
+                        }
+                        Err(error) => return Err(error),
+                    },
                     Err(error)
                         if previous_cursor.is_some()
                             && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
                     {
                         stale_since_id_retried = true;
                         let retry_url = build_url(None)?;
-                        let value = fetch_x_json(retry_url.as_str(), Some(&token)).with_context(
-                            || {
-                                format!(
-                                    "retrying X recent search without stale since_id for query {query:?}"
-                                )
-                            },
-                        )?;
-                        x_fail_on_response_errors(&value)?;
-                        value
+                        fetch_x_json(retry_url.as_str(), Some(&token)).with_context(|| {
+                            format!(
+                                "retrying X recent search without stale since_id for query {query:?}"
+                            )
+                        })?
                     }
                     Err(error) => return Err(error),
-                },
-                Err(error)
-                    if previous_cursor.is_some()
-                        && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
-                {
-                    stale_since_id_retried = true;
-                    let retry_url = build_url(None)?;
-                    fetch_x_json(retry_url.as_str(), Some(&token)).with_context(|| {
-                        format!(
-                            "retrying X recent search without stale since_id for query {query:?}"
-                        )
-                    })?
-                }
-                Err(error) => return Err(error),
+                };
+                (value, stale_since_id_retried)
             };
-            let import_value =
+            x_fail_on_response_errors(&value)?;
+            let mut import_value =
                 x_search_response_to_import_items(&value, "recent_search", Some(query))?;
+            if let Some(tool_name) = mcp_tool_name.as_deref() {
+                x_tag_import_value_as_mcp(&mut import_value, tool_name);
+            }
             let report = self.import_x_json_value_without_sync_run(&import_value)?;
             if report.rejected > 0 {
                 let first_error = report
@@ -1176,7 +1244,7 @@ impl Store {
                 self.record_x_sync_run(XSyncRunInsert {
                     account_id: None,
                     stream: "recent_search",
-                    transport: "x_api",
+                    transport: transport.sync_transport(),
                     status: "completed",
                     started_at: &started_at,
                     completed_at: &completed_at,
@@ -1189,7 +1257,12 @@ impl Store {
                     previous_cursor: previous_cursor_for_run.as_deref(),
                     new_cursor: new_cursor_for_run.as_deref(),
                     error: None,
-                    metadata: json!({ "query": query, "max_results": max_results.clamp(10, 100) }),
+                    metadata: json!({
+                        "query": query,
+                        "max_results": max_results.clamp(10, 100),
+                        "transport": transport.cli_value(),
+                        "mcp_tool": mcp_tool_name_for_run
+                    }),
                 })?;
             }
             Err(error) => {
@@ -1213,7 +1286,7 @@ impl Store {
                 let _ = self.record_x_sync_run(XSyncRunInsert {
                     account_id: None,
                     stream: "recent_search",
-                    transport: "x_api",
+                    transport: transport.sync_transport(),
                     status: "failed",
                     started_at: &started_at,
                     completed_at: &completed_at,
@@ -1226,11 +1299,214 @@ impl Store {
                     previous_cursor: previous_cursor_for_run.as_deref(),
                     new_cursor: new_cursor_for_run.as_deref(),
                     error: Some(&error_text),
-                    metadata: json!({ "query": query, "max_results": max_results.clamp(10, 100) }),
+                    metadata: json!({
+                        "query": query,
+                        "max_results": max_results.clamp(10, 100),
+                        "transport": transport.cli_value(),
+                        "mcp_tool": mcp_tool_name_for_run
+                    }),
                 });
             }
         }
         result
+    }
+
+    fn x_mcp_recent_search_api_response(
+        &self,
+        endpoint: &str,
+        token: &str,
+        query: &str,
+        max_results: usize,
+        previous_cursor: Option<&str>,
+    ) -> Result<(Value, String)> {
+        let server_url = default_x_mcp_server_url(endpoint)?;
+        let tools = fetch_x_mcp_tools(&server_url, token)?;
+        let tool = select_x_mcp_tool_excluding(
+            &tools,
+            "ARCWELL_X_MCP_RECENT_SEARCH_TOOL",
+            "recent search",
+            &["search", "post"],
+            &["count", "news", "user"],
+        )?;
+        let mut arguments = Map::new();
+        x_mcp_insert_arg(&mut arguments, &tool, "query", json!(query));
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "max_results",
+            json!(max_results.clamp(10, 100)),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "maxResults",
+            json!(max_results.clamp(10, 100)),
+        );
+        if let Some(previous_cursor) = previous_cursor {
+            x_mcp_insert_arg(&mut arguments, &tool, "since_id", json!(previous_cursor));
+            x_mcp_insert_arg(&mut arguments, &tool, "sinceId", json!(previous_cursor));
+        }
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "tweet.fields",
+            json!("created_at,author_id,public_metrics"),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "post.fields",
+            json!("created_at,author_id,public_metrics"),
+        );
+        x_mcp_insert_arg(&mut arguments, &tool, "expansions", json!("author_id"));
+        x_mcp_insert_arg(&mut arguments, &tool, "user.fields", json!("username,name"));
+        let result = call_x_mcp_tool(&server_url, token, &tool.name, Value::Object(arguments))?;
+        Ok((x_mcp_extract_x_api_response(&result)?, tool.name))
+    }
+
+    fn x_mcp_bookmarks_api_response(
+        &self,
+        endpoint: &str,
+        token: &str,
+        max_bookmarks: usize,
+    ) -> Result<(Value, String)> {
+        let server_url = default_x_mcp_server_url(endpoint)?;
+        let tools = fetch_x_mcp_tools(&server_url, token)?;
+        let me_tool = select_x_mcp_tool_excluding(
+            &tools,
+            "ARCWELL_X_MCP_USER_ME_TOOL",
+            "current user",
+            &["users", "me"],
+            &["username"],
+        )?;
+        let mut me_arguments = Map::new();
+        x_mcp_insert_arg(
+            &mut me_arguments,
+            &me_tool,
+            "user.fields",
+            json!("username,name"),
+        );
+        let me_result = call_x_mcp_tool(
+            &server_url,
+            token,
+            &me_tool.name,
+            Value::Object(me_arguments),
+        )?;
+        let me_value = x_mcp_extract_json_response(&me_result)?;
+        x_fail_on_response_errors(&me_value)?;
+        let user_id = me_value
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .context("X MCP get-users-me response missing data.id")?;
+        let tool = select_x_mcp_tool_excluding(
+            &tools,
+            "ARCWELL_X_MCP_BOOKMARKS_TOOL",
+            "bookmarks",
+            &["bookmark"],
+            &["create", "delete", "folder"],
+        )?;
+        let mut arguments = Map::new();
+        let page_size = max_bookmarks.clamp(1, 100);
+        x_mcp_insert_arg(&mut arguments, &tool, "id", json!(user_id));
+        x_mcp_insert_arg(&mut arguments, &tool, "max_results", json!(page_size));
+        x_mcp_insert_arg(&mut arguments, &tool, "maxResults", json!(page_size));
+        x_mcp_insert_arg(&mut arguments, &tool, "limit", json!(page_size));
+        x_mcp_insert_arg(&mut arguments, &tool, "count", json!(page_size));
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "tweet.fields",
+            json!(
+                "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets"
+            ),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "post.fields",
+            json!(
+                "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets"
+            ),
+        );
+        x_mcp_insert_arg(&mut arguments, &tool, "expansions", json!("author_id"));
+        x_mcp_insert_arg(
+            &mut arguments,
+            &tool,
+            "user.fields",
+            json!("username,name,description,verified,verified_type"),
+        );
+        let result = call_x_mcp_tool(&server_url, token, &tool.name, Value::Object(arguments))?;
+        let mut value = x_mcp_extract_x_api_response(&result)?;
+        if let Some(object) = value.as_object_mut() {
+            let meta = object.entry("meta").or_insert_with(|| json!({}));
+            if let Some(meta) = meta.as_object_mut()
+                && !meta.contains_key("account_id")
+            {
+                meta.insert("account_id".to_string(), json!(user_id));
+            }
+        }
+        Ok((value, tool.name))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn x_ingest_bookmark_response_tweets(
+        &self,
+        value: &Value,
+        cutoff: DateTime<Utc>,
+        max_bookmarks: usize,
+        seen: &mut usize,
+        imported: &mut usize,
+        skipped_duplicates: &mut usize,
+        rejected: &mut usize,
+        rejected_errors: &mut Vec<String>,
+        imported_items: &mut Vec<XItem>,
+        mcp_tool_name: Option<&str>,
+    ) -> Result<usize> {
+        let tweets = value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let users = x_users_by_id(value);
+        for tweet in tweets.iter() {
+            if *seen >= max_bookmarks {
+                break;
+            }
+            *seen += 1;
+            match x_bookmark_tweet_to_item_input(tweet, &users, cutoff) {
+                Ok(Some(mut input)) => {
+                    if let Some(tool_name) = mcp_tool_name {
+                        x_tag_bookmark_input_as_mcp(&mut input, tool_name);
+                    }
+                    match self.insert_x_item(input) {
+                        Ok(Some(item)) => {
+                            *imported += 1;
+                            imported_items.push(item);
+                        }
+                        Ok(None) => *skipped_duplicates += 1,
+                        Err(error) => {
+                            *rejected += 1;
+                            if rejected_errors.len() < 10 {
+                                rejected_errors.push(excerpt(
+                                    &redact_secret_like_text(&error.to_string()),
+                                    500,
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    *rejected += 1;
+                    if rejected_errors.len() < 10 {
+                        rejected_errors
+                            .push(excerpt(&redact_secret_like_text(&error.to_string()), 500));
+                    }
+                }
+            }
+        }
+        Ok(tweets.len())
     }
 
     pub fn x_import_bookmarks(
@@ -1238,9 +1514,24 @@ impl Store {
         bookmark_days: i64,
         max_bookmarks: usize,
     ) -> Result<XImportReport> {
+        self.x_import_bookmarks_with_transport(bookmark_days, max_bookmarks, None)
+    }
+
+    pub fn x_import_bookmarks_with_transport(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        transport: Option<&str>,
+    ) -> Result<XImportReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        self.x_import_bookmarks_with_base(bookmark_days, max_bookmarks, &endpoint)
+        let transport = XProviderTransport::parse(transport)?;
+        self.x_import_bookmarks_with_base_and_transport(
+            bookmark_days,
+            max_bookmarks,
+            &endpoint,
+            transport,
+        )
     }
 
     pub(crate) fn x_import_bookmarks_with_base(
@@ -1248,6 +1539,21 @@ impl Store {
         bookmark_days: i64,
         max_bookmarks: usize,
         endpoint: &str,
+    ) -> Result<XImportReport> {
+        self.x_import_bookmarks_with_base_and_transport(
+            bookmark_days,
+            max_bookmarks,
+            endpoint,
+            XProviderTransport::DirectApi,
+        )
+    }
+
+    pub(crate) fn x_import_bookmarks_with_base_and_transport(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        endpoint: &str,
+        transport: XProviderTransport,
     ) -> Result<XImportReport> {
         let bookmark_days = bookmark_days.clamp(1, 36_500);
         let max_bookmarks = max_bookmarks.clamp(1, 100_000);
@@ -1261,7 +1567,11 @@ impl Store {
             subject: None,
             target: Some(endpoint.to_string()),
             projected_usd: Some(projected),
-            metadata: json!({ "bookmark_days": bookmark_days, "max_bookmarks": max_bookmarks }),
+            metadata: json!({
+                "bookmark_days": bookmark_days,
+                "max_bookmarks": max_bookmarks,
+                "transport": transport.cli_value()
+            }),
             untrusted_excerpt: None,
         })?;
         self.require_cost_budget(
@@ -1277,10 +1587,7 @@ impl Store {
         let started_at = now();
         let mut account_id_for_run: Option<String> = None;
         let result = (|| -> Result<XImportReport> {
-            let token = self.x_bearer_token_for_endpoint(endpoint)?;
-            let base = validated_x_api_base(endpoint)?;
-            let user_id = self.x_user_id(&base, &token)?;
-            account_id_for_run = Some(user_id.clone());
+            let token = self.x_bearer_token_for_transport(endpoint, transport)?;
             let cutoff = Utc::now() - chrono::Duration::days(bookmark_days);
             let mut seen = 0;
             let mut imported = 0;
@@ -1293,90 +1600,107 @@ impl Store {
             let mut exhausted = false;
             let mut stop_reason = "not_started".to_string();
 
-            while seen < max_bookmarks {
-                let page_size = (max_bookmarks - seen).clamp(1, 100);
-                let mut url = base.join(&format!("/2/users/{user_id}/bookmarks"))?;
-                {
-                    let mut pairs = url.query_pairs_mut();
-                    pairs
-                        .append_pair("max_results", &page_size.to_string())
-                        .append_pair(
-                            "tweet.fields",
-                            "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets",
-                        )
-                        .append_pair("expansions", "author_id")
-                        .append_pair(
-                            "user.fields",
-                            "username,name,description,verified,verified_type",
-                        );
-                    if let Some(token) = &pagination_token {
-                        pairs.append_pair("pagination_token", token);
-                    }
-                }
-                let value = fetch_x_json(url.as_str(), Some(&token))?;
+            if transport == XProviderTransport::XApiMcp {
+                let (value, tool_name) =
+                    self.x_mcp_bookmarks_api_response(endpoint, &token, max_bookmarks)?;
                 x_fail_on_response_errors(&value)?;
-                pages_fetched += 1;
-                let tweets = value
-                    .get("data")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                if tweets.is_empty() {
+                pages_fetched = 1;
+                account_id_for_run = value
+                    .pointer("/meta/account_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.pointer("/meta/user_id").and_then(Value::as_str))
+                    .map(ToOwned::to_owned);
+                let tweets_on_page = self.x_ingest_bookmark_response_tweets(
+                    &value,
+                    cutoff,
+                    max_bookmarks,
+                    &mut seen,
+                    &mut imported,
+                    &mut skipped_duplicates,
+                    &mut rejected,
+                    &mut rejected_errors,
+                    &mut imported_items,
+                    Some(&tool_name),
+                )?;
+                if tweets_on_page == 0 {
                     exhausted = true;
                     stop_reason = "empty_page".to_string();
-                    break;
-                }
-                let users = x_users_by_id(&value);
-                for tweet in tweets {
-                    if seen >= max_bookmarks {
-                        break;
+                } else {
+                    pagination_token = value
+                        .pointer("/meta/next_token")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    if pagination_token.is_none() {
+                        exhausted = true;
+                        stop_reason = "provider_exhausted".to_string();
+                    } else {
+                        exhausted = false;
+                        stop_reason = "mcp_single_page_next_token_unverified".to_string();
                     }
-                    seen += 1;
-                    match x_bookmark_tweet_to_item_input(&tweet, &users, cutoff) {
-                        Ok(Some(input)) => match self.insert_x_item(input) {
-                            Ok(Some(item)) => {
-                                imported += 1;
-                                imported_items.push(item);
-                            }
-                            Ok(None) => skipped_duplicates += 1,
-                            Err(error) => {
-                                rejected += 1;
-                                if rejected_errors.len() < 10 {
-                                    rejected_errors.push(excerpt(
-                                        &redact_secret_like_text(&error.to_string()),
-                                        500,
-                                    ));
-                                }
-                            }
-                        },
-                        Ok(None) => {}
-                        Err(error) => {
-                            rejected += 1;
-                            if rejected_errors.len() < 10 {
-                                rejected_errors.push(excerpt(
-                                    &redact_secret_like_text(&error.to_string()),
-                                    500,
-                                ));
-                            }
+                }
+            } else {
+                let base = validated_x_api_base(endpoint)?;
+                let user_id = self.x_user_id(&base, &token)?;
+                account_id_for_run = Some(user_id.clone());
+                while seen < max_bookmarks {
+                    let page_size = (max_bookmarks - seen).clamp(1, 100);
+                    let mut url = base.join(&format!("/2/users/{user_id}/bookmarks"))?;
+                    {
+                        let mut pairs = url.query_pairs_mut();
+                        pairs
+                            .append_pair("max_results", &page_size.to_string())
+                            .append_pair(
+                                "tweet.fields",
+                                "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets",
+                            )
+                            .append_pair("expansions", "author_id")
+                            .append_pair(
+                                "user.fields",
+                                "username,name,description,verified,verified_type",
+                            );
+                        if let Some(token) = &pagination_token {
+                            pairs.append_pair("pagination_token", token);
                         }
                     }
-                }
-                pagination_token = value
-                    .pointer("/meta/next_token")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
-                if pagination_token.is_none() {
-                    exhausted = true;
-                    stop_reason = "provider_exhausted".to_string();
-                    break;
+                    let value = fetch_x_json(url.as_str(), Some(&token))?;
+                    x_fail_on_response_errors(&value)?;
+                    pages_fetched += 1;
+                    let tweets_on_page = self.x_ingest_bookmark_response_tweets(
+                        &value,
+                        cutoff,
+                        max_bookmarks,
+                        &mut seen,
+                        &mut imported,
+                        &mut skipped_duplicates,
+                        &mut rejected,
+                        &mut rejected_errors,
+                        &mut imported_items,
+                        None,
+                    )?;
+                    if tweets_on_page == 0 {
+                        exhausted = true;
+                        stop_reason = "empty_page".to_string();
+                        break;
+                    }
+                    pagination_token = value
+                        .pointer("/meta/next_token")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    if pagination_token.is_none() {
+                        exhausted = true;
+                        stop_reason = "provider_exhausted".to_string();
+                        break;
+                    }
                 }
             }
             if !exhausted {
-                stop_reason = if seen >= max_bookmarks {
-                    "requested_limit_reached".to_string()
-                } else {
-                    "stopped_before_exhaustion".to_string()
-                };
+                if stop_reason == "not_started" {
+                    stop_reason = if seen >= max_bookmarks {
+                        "requested_limit_reached".to_string()
+                    } else {
+                        "stopped_before_exhaustion".to_string()
+                    };
+                }
             }
             let source_card_projections = imported_items
                 .iter()
@@ -1426,7 +1750,7 @@ impl Store {
                 self.record_x_sync_run(XSyncRunInsert {
                     account_id: account_id_for_run.as_deref(),
                     stream: "bookmarks",
-                    transport: "x_api",
+                    transport: transport.sync_transport(),
                     status: "completed",
                     started_at: &started_at,
                     completed_at: &completed_at,
@@ -1449,6 +1773,7 @@ impl Store {
                         "next_token_present": report.next_token.is_some(),
                         "source_card_projections": report.source_card_projections,
                         "drift_warnings": report.drift_warnings,
+                        "transport": transport.cli_value(),
                     }),
                 })?;
             }
@@ -1473,7 +1798,7 @@ impl Store {
                 let _ = self.record_x_sync_run(XSyncRunInsert {
                     account_id: account_id_for_run.as_deref(),
                     stream: "bookmarks",
-                    transport: "x_api",
+                    transport: transport.sync_transport(),
                     status: "failed",
                     started_at: &started_at,
                     completed_at: &completed_at,
@@ -1490,6 +1815,7 @@ impl Store {
                         "bookmark_days": bookmark_days,
                         "max_bookmarks": max_bookmarks,
                         "stop_reason": "failed",
+                        "transport": transport.cli_value(),
                     }),
                 });
             }
@@ -1505,6 +1831,41 @@ impl Store {
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
         self.x_import_following_watch_sources_with_base(max_users, &endpoint)
     }
+}
+
+fn x_mcp_insert_arg(
+    arguments: &mut Map<String, Value>,
+    tool: &XApiMcpTool,
+    key: &str,
+    value: Value,
+) {
+    if x_mcp_tool_accepts(tool, key) {
+        arguments.insert(key.to_string(), value);
+    }
+}
+
+fn x_tag_import_value_as_mcp(value: &mut Value, tool_name: &str) {
+    let Some(items) = value.as_array_mut() else {
+        return;
+    };
+    for item in items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let metadata = object.entry("source_metadata").or_insert_with(|| json!({}));
+        if let Some(metadata) = metadata.as_object_mut() {
+            metadata.insert("imported_from".to_string(), json!("x_api_mcp"));
+            metadata.insert("x_mcp_tool".to_string(), json!(tool_name));
+        }
+    }
+}
+
+fn x_tag_bookmark_input_as_mcp(input: &mut XItemInput, tool_name: &str) {
+    let Some(metadata) = input.source_metadata.as_object_mut() else {
+        return;
+    };
+    metadata.insert("imported_from".to_string(), json!("x_api_mcp"));
+    metadata.insert("x_mcp_tool".to_string(), json!(tool_name));
 }
 
 fn x_recent_search_error_is_stale_since_id(error: &str) -> bool {

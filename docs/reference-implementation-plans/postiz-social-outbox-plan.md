@@ -271,3 +271,79 @@ The first publish-capable slice should target a disposable or explicitly
 authorized account and produce a delivery proof packet before any docs claim
 Arcwell can publish.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has much stronger outbound infrastructure than when this file was
+first written:
+
+- `digest_candidates`, review/approval fields, `digest_deliveries`,
+  `channel_delivery_attempts`, and `channel_delivery_observations` already
+  model review, delivery, provider acceptance, and mailbox observation.
+- Radar summaries can be manually delivered through authorized Telegram or
+  Cloudflare Email paths with durable radar delivery rows.
+- Email sends now attach Arcwell-controlled message IDs and can be verified
+  through host Gmail observations or Gmail API verifier jobs.
+- Policy and cost gates run before delivery/provider paths, and delivery gaps
+  surface through source health and ops.
+- The job weekly-report delivery path has controlled provider proof, duplicate
+  prevention, privacy checks, and clear `provider accepted but mailbox
+  unverified` language.
+
+The Postiz lesson should now become an outbound publication ledger extension
+over existing digest/radar/channel delivery surfaces, not a standalone social
+calendar.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can prepare, approve, deliver, and verify outbound artifacts through
+> existing channel/digest/radar delivery ledgers, while keeping provider
+> acceptance, recipient observation, and user approval distinct.
+
+Refutations:
+
+- A generated post/report exists but no approval snapshot binds the exact
+  payload.
+- A provider returns 200 but no delivery attempt or observation row exists.
+- A delivery is called "received" when only provider acceptance exists.
+- Retrying a worker tick sends duplicate content.
+- Policy/cost/quiet-hours denial happens after provider calls.
+
+Revised implementation slices:
+
+1. Generalize current digest/radar/job delivery checks into an outbound
+   artifact contract: payload hash, source IDs, review status, policy/cost
+   decision, delivery attempt, and observation.
+2. Add provider capability metadata for email, Telegram, and future social
+   accounts without changing the ledger shape per provider.
+3. Add `outbound_draft` only if current digest candidates cannot represent the
+   payload; otherwise extend digest/radar candidates with provider-specific
+   validation overlays.
+4. Implement one future social provider as a plugin over the existing delivery
+   attempt/observation pattern.
+5. Require proof-ledger packets for each provider before any README/status
+   language says Arcwell can publish there.
+
+Keep from Postiz:
+
+- provider capability validation;
+- token refresh/error classification;
+- idempotent delivery attempts;
+- media validation;
+- scheduled vs manual publish distinction.
+
+Do not copy:
+
+- a separate Temporal/NestJS workflow stack;
+- a marketing calendar UI before Arcwell's existing delivery ledger is unified;
+- provider-specific state transitions that bypass policy/cost/channel auth.
+
+Next proof gate:
+
+- Local Proof: one existing outbound path proves payload hash, approval,
+  idempotency, policy denial, quiet-hours deferral, provider failure, and
+  observation gap states.
+- Production Data Proof: one authorized provider delivery records provider
+  acceptance plus an independent observation, or keeps the gap visible until
+  observation happens.

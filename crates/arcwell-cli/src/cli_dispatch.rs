@@ -3,7 +3,13 @@ use crate::*;
 pub(crate) fn run(store: Store, command: Command) -> Result<()> {
     match command {
         Command::Health => print_json(&store.health()?),
-        Command::Ops => print_json(&store.ops_snapshot()?),
+        Command::Ops(args) => {
+            if args.compact {
+                print_json(&store.compact_ops_snapshot()?)
+            } else {
+                print_json(&store.ops_snapshot()?)
+            }
+        }
         Command::Provider(args) => provider(store, args),
         Command::Doctor(args) => doctor(store, args),
         Command::Service(args) => service(store, args),
@@ -35,5 +41,6 @@ pub(crate) fn run(store: Store, command: Command) -> Result<()> {
         Command::Secrets(args) => secrets(store, args),
         Command::Cursors(args) => cursors(store, args),
         Command::Proof(args) => proof(store, args),
+        Command::Guard(args) => guard(store, args),
     }
 }

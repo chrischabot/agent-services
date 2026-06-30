@@ -200,15 +200,97 @@ PR, implementation note, or final report:
       real-home schedule `isch-093a064e3b5ecba50704d090` runs
       `knowledge_daily_briefing` at 7:00 local with 72-hour catch-up, 20 reports,
       120 source cards, email delivery policy, channel authorization, ops
-      visibility. The first missed 7am issue tick was catch-up delivered after
+      visibility. The first missed 7am issue tick was catch-up attempted after
       laptop downtime through delivery `bbc7dc97-e94b-4485-a364-517042456c70`
       and tick `8c3ad3bd-9759-41b6-83a9-78154ba1d33a`, after fixing due-job
-      priority and briefing email body capping; the older June 29 oversized
-      tick remains a historical blocked row. High-confidence breaking
-      2026-06-30 follow-up: `ops_snapshot`, compact MCP ops, and `/ops/ui` now
-      expose issue schedule tick counts/latest sent/latest blocked state, which
-      proves local scheduler/delivery ledger visibility, not future inbox
-      placement or multi-day recurrence.
+      priority and briefing email body capping; the provider accepted the send
+      with HTTP 200, but Gmail/message-id search did not prove mailbox
+      observation for that exact 09:37 UTC message. Durable
+      `channel_delivery_observations` rows now let CLI/MCP record later
+      mailbox-observed, mailbox-not-found, or mailbox-unknown evidence against
+      a provider delivery attempt, verification-gap/request CLI/MCP surfaces
+      list successful email attempts that still need mailbox verification and
+      emit bounded Gmail-ready `rfc822msgid:` searches, throttled
+      `email_delivery_verification_request` worker jobs make those requests
+      resident-worker-visible, and batch observation CLI/MCP surfaces apply
+      host mailbox verifier results. Follow-up hardening makes new Cloudflare
+      Email sends attach an Arcwell-controlled outbound `Message-ID` plus
+      `X-Arcwell-Message-Id`, store that id in delivery metadata, and prefer it
+      for future verifier searches instead of relying on Cloudflare's opaque
+      provider response id. A policy- and cost-gated Gmail API verifier now runs
+      from `email_delivery_verification_request` jobs and `email verify-mailbox`
+      when `GMAIL_ACCESS_TOKEN` is configured, and records Gmail placement
+      labels such as `INBOX`, `SPAM`, or `TRASH` for matched message ids.
+      Gmail OAuth setup is exposed through `arcwell email oauth-url`,
+      `oauth-exchange`, `oauth-refresh`, interactive `oauth-reauthorize`, and
+      MCP authorize/exchange/refresh tools. Default Gmail OAuth consent now
+      requests both `gmail.readonly` for mailbox verification and
+      `gmail.modify` for placement repair, stored refresh/client material can
+      refresh expired `GMAIL_ACCESS_TOKEN` values before daemon-owned verifier
+      or repair work, and active mailbox gaps now create secret-health /
+      credential-reminder warnings when Gmail OAuth material is missing or
+      policy-blocked. Host-Gmail connector proof
+      `.arcwell-dev/proofs/gmail-host-mailbox-verification-20260630T1745Z/artifacts/proof-packet.json`
+      reconciled 25 historical provider-accepted sends and showed why
+      `found in Gmail` is not sufficient delivery proof when placement is
+      Trash. A later 2026-06-30 job-scan delivery
+      attempt `6c681db5-1bde-4406-9ed9-e65fa18e28b1` was host-observed in
+      Gmail Inbox with Gmail id `19f19b743b9ce433`, leaving
+      `email verification-gaps` empty again. Missing Gmail verifier credentials
+      for ready gaps now write `email:gmail-mailbox-verifier` source health
+      instead of requiring a manual verifier run to expose the blocker.
+      Mailbox observations for not-observed, unknown, Trash, and Spam
+      placements now write per-delivery source-health alerts, while Inbox
+      placement clears that per-delivery row. `arcwell email
+      repair-mailbox-placement` and MCP `email_delivery_mailbox_repair` now
+      provide an explicit Gmail modify-scope operator repair path for
+      Trash/Spam placements: it removes bad placement labels, adds `INBOX`,
+      fetches post-repair metadata, and only clears the gap after a fresh Inbox
+      observation is recorded. This is deliberate repair, not silent resend or
+      uncontrolled mailbox mutation. Bad-placement gaps now also become
+      throttled resident-worker-visible `email_delivery_mailbox_repair` jobs;
+      absent Gmail modify credentials, the job records
+      `email:gmail-mailbox-repair` source health and leaves the gap open. The
+      2026-06-30 09:37 UTC catch-up briefing is mailbox-observed in Gmail with
+      `TRASH`/`CATEGORY_UPDATES` labels, so the user-visible failure was
+      mailbox placement rather than scheduler catch-up. Live real-home Gmail
+      OAuth mailbox proof and live real-home repair execution are still open;
+      the repair path and managed Gmail refresh path are local/mock proven and
+      require an initial explicit Gmail OAuth grant with modify scope. A broader
+      automatic retry policy for unobserved/trash/spam sends is still open. The
+      older June 29 oversized tick remains a historical blocked
+      row. 2026-06-30 follow-up:
+      `ops_snapshot`, compact MCP ops, and `/ops/ui` now expose issue schedule
+      tick counts, tick type counts, latest scheduled tick, latest manual tick,
+      latest sent tick, and latest blocked state; daily briefing delivery text
+      now blocks stored briefing-card summaries that still contain internal
+      pipeline language before provider send. `arcwell ops --compact` and MCP
+      now return compact counts plus health/backlog/issue-schedule state without
+      building the full source-card/job arrays, and the real home shows the
+      2026-06-30 7am-local scheduled tick as sent but mailbox-observed in
+      Gmail Trash, so rebuilt ops now keeps that as bad placement instead of
+      inbox receipt while preserving the older June 29 blocked tick as
+      historical evidence. Follow-up ops-summary hardening now separates the
+      latest provider-sent tick from the latest Inbox-confirmed tick; Trash or
+      Spam placement stays visible in `latest_sent_*`, but
+      `latest_inbox_confirmed_*` only advances on `mailbox_observed_inbox`.
+      Follow-up profiling removed
+      an X FTS drift anti-join hotspot, dropping real-home `health`, `x stats`,
+      and `ops --compact` from roughly 10s to below 1s while preserving X drift
+      counts. Follow-up delivery-lineage accounting now splits approved digest
+      history from active approved-delivery backlog; the current real home has
+      16 approved digest candidates with sent deliveries and 0 approved
+      candidates pending delivery, so the remaining digest work is the
+      unreviewed pending/ready backlog, not a stuck approved-send queue. This
+      proves local scheduler, delivery-ledger, durable manual/host-supplied
+      mailbox-observation recording, production-data host-Gmail connector
+      reconciliation, verifier request/apply batching, locally/mock-proven
+      daemon-owned Gmail mailbox verification and OAuth setup, Arcwell-controlled
+      outbound search keys for future sends, delivery-proof labeling, Gmail
+      placement-label evidence, resident-worker-visible bad-placement repair
+      enqueueing, and delivery-text hygiene visibility, not live real-home Gmail
+      OAuth mailbox placement, live Gmail repair execution, automatic
+      retry/alert policy, or multi-day recurrence. High-confidence breaking
       candidates route through the Arcwell digest-alert schedule `Breaking AI
       knowledge alerts`. The worker now filters due sources before applying the
       batch cap, advances source health using watch-source cadence, reuses an
@@ -249,6 +331,18 @@ PR, implementation note, or final report:
       dead-lettered knowledge jobs. Remaining work is recurring proof over
       time, stale RSS/GitHub source cleanup, broad provider freshness, and
       review/digest candidate backlog policy, not this alias-collision failure.
+      2026-06-30 48-hour/reporting and GitHub projection follow-up: one-off
+      AI briefings now derive "last N hours" from the actual issue window, and
+      the corrected 48-hour report was sent through the digest ledger after the
+      provider accepted the email attempt. GitHub owner canonical keys now
+      lowercase owner casing, repo keys lowercase only the owner segment, and
+      lookups merge legacy mixed-case GitHub canonical keys case-insensitively;
+      the Microsoft owner-case dead-letter was requeued after the fix and the
+      worker queue drained back to 0 pending/failed/dead-lettered jobs. Severe
+      coverage protects the 48-hour copy and the GitHub owner-case failure.
+      Remaining work is still multi-day recurrence, complete source-family
+      freshness, and editorial/report quality over broader live corpora, not
+      these repaired local/live failure classes.
       replace the remaining Codex-side six-hour catch-up wrapper with native
       fixed-time scan scheduling or prove watch-source cadence is sufficient,
       record multi-day sleep/shutdown/restart catch-up proof, work down
@@ -607,6 +701,32 @@ PR, implementation note, or final report:
 - [ ] Keep `arcwell-x` status honest: every checked X item must state whether
       it is only local proof, copied-home live proof, real-home live proof, or
       operational scheduled proof.
+- [ ] Promote the X MCP/xurl path beyond `Partial` only after recurrence and
+      pagination gaps are closed. Current implemented slice: `direct-api`
+      remains the default provider transport; `xurl-token-api` is wired through
+      CLI and MCP for recent search and bookmark import, delegates only token
+      acquisition to `xurl token`, and keeps Arcwell policy, cost,
+      source-card/wiki projection, cursor, source-health, and sync-run writes.
+      `x-api-mcp` now calls hosted X MCP directly: recent search uses
+      app-only bearer aliases such as `TWITTER_BEARER_TOKEN` with
+      `search_posts_all`, while bookmark import uses user-context
+      `X_BEARER_TOKEN` through hosted `get_users_me` and `get_users_bookmarks`.
+      Severe tests prove xurl-token local token acquisition, hosted MCP
+      recent-search canonical writes, prose/non-JSON fail-closed cursor safety,
+      misleading-tool selection resistance, and hosted MCP bookmark canonical
+      collections/edge metadata. Current proof packets:
+      `.arcwell-dev/proofs/x-mcp-xurl-proof-20260630T182334Z-9284/artifacts/proof-packet.json`
+      is still `blocked_auth` because local `xurl` has no official X MCP bridge
+      `CLIENT_ID`/`CLIENT_SECRET` env and no registered app/cached token;
+      `.arcwell-dev/proofs/x-transport-comparison-20260630T190356Z-72790/artifacts/proof-packet.json`
+      scores `x-api-mcp` 8.0, `direct-api` 7.4, and `xurl-token-api` 2.6 for
+      copied-home live recent search; and
+      `.arcwell-dev/proofs/x-api-mcp-bookmarks-live-20260630T190104Z-62057/artifacts/proof-packet.json`
+      passes one copied-home hosted MCP bookmark page with preserved
+      `next_token`. Remaining work: register/authorize the local xurl app if we
+      still want the xurl bridge, prove hosted MCP bookmark pagination beyond one
+      page, decide whether `x-api-mcp` should become the default recent-search
+      transport, and rerun broader quota/tier/live recurrence matrices.
 - [ ] Treat the 2026-06-25 X knowledge-system proof as the current baseline, not
       the finish line. Latest repeatable proof saw 1,010 bookmark collections,
       5,228 X source cards, three deterministic clusters (`model-launches`,

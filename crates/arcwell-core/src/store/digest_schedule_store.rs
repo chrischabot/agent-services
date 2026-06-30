@@ -518,9 +518,7 @@ impl Store {
                     .read_source_card(source_card_id)?
                     .with_context(|| format!("digest source card not found: {source_card_id}"))?;
                 if digest_source_card_is_knowledge_daily_briefing(&card) {
-                    return Ok(Self::cap_digest_candidate_delivery_text(
-                        Self::knowledge_daily_briefing_delivery_text(candidate, &card),
-                    ));
+                    return Self::knowledge_daily_briefing_delivery_text(candidate, &card);
                 }
             }
         }
@@ -590,7 +588,7 @@ impl Store {
     pub(crate) fn knowledge_daily_briefing_delivery_text(
         candidate: &DigestCandidate,
         briefing_card: &SourceCard,
-    ) -> String {
+    ) -> Result<String> {
         let body = briefing_card.summary.trim();
         let text = if body.starts_with("# ") || body.starts_with("## ") {
             body.to_string()
@@ -601,7 +599,14 @@ impl Store {
                 body
             )
         };
-        Self::cap_digest_candidate_delivery_text(text)
+        let forbidden_reader_terms = daily_briefing_forbidden_reader_terms(&text);
+        if !forbidden_reader_terms.is_empty() {
+            bail!(
+                "knowledge daily briefing delivery text contains internal pipeline language: {}",
+                forbidden_reader_terms.join(", ")
+            );
+        }
+        Ok(Self::cap_digest_candidate_delivery_text(text))
     }
 
     pub(crate) fn credential_reminder_delivery_text(

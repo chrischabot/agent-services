@@ -853,6 +853,80 @@ fn severe_knowledge_entity_alias_collision_requires_review() {
 }
 
 #[test]
+fn severe_source_item_alias_collision_reuses_existing_entity() {
+    // CLAIM: Source-card title entities that exactly name an already-known
+    // canonical entity should attach evidence to that entity instead of
+    // dead-lettering a backlog projection.
+    // ORACLE: a feed item titled "OpenAI/gpt-oss" reuses the existing GitHub
+    // repo entity and still creates a provider relation for the new evidence.
+    // SEVERITY: Severe because source-card backlog jobs can repeatedly die on
+    // high-signal repos or orgs that are already in the knowledge graph.
+    let store = test_store("source-item-alias-reuses-existing-entity");
+    let repo_card = store
+        .add_source_card(SourceCardInput {
+            title: "OpenAI/gpt-oss release".to_string(),
+            url: "https://github.com/openai/gpt-oss".to_string(),
+            source_type: "github_repo".to_string(),
+            provider: "github".to_string(),
+            summary: "GitHub source card for the OpenAI gpt-oss repo.".to_string(),
+            claims: Vec::new(),
+            retrieved_at: Some("2026-06-30T12:00:00Z".to_string()),
+            metadata: json!({
+                "owner": "OpenAI",
+                "repo": "gpt-oss",
+                "source_role": "primary"
+            }),
+        })
+        .unwrap();
+    let repo = store
+        .upsert_knowledge_entity(KnowledgeEntityInput {
+            entity_type: "github_repo".to_string(),
+            name: "OpenAI/gpt-oss".to_string(),
+            canonical_key: "github:openai/gpt-oss".to_string(),
+            aliases: vec!["OpenAI/gpt-oss".to_string()],
+            homepage_url: Some("https://github.com/openai/gpt-oss".to_string()),
+            source_card_ids: vec![repo_card.id.clone()],
+            wiki_page_id: None,
+            confidence: 0.9,
+            metadata: json!({ "provider": "github" }),
+        })
+        .unwrap();
+    let feed_card = store
+        .add_source_card(SourceCardInput {
+            title: "OpenAI/gpt-oss".to_string(),
+            url: "https://example.com/openai-gpt-oss-analysis".to_string(),
+            source_type: "rss".to_string(),
+            provider: "rss".to_string(),
+            summary: "A feed item discusses the OpenAI gpt-oss repository.".to_string(),
+            claims: Vec::new(),
+            retrieved_at: Some("2026-06-30T12:05:00Z".to_string()),
+            metadata: json!({ "source_role": "secondary" }),
+        })
+        .unwrap();
+    let event = store
+        .upsert_knowledge_event(knowledge_event_input_from_source_card(&feed_card).unwrap())
+        .unwrap();
+
+    let (entities, relations) = store
+        .project_knowledge_entities_for_source_card(&feed_card, &event)
+        .unwrap();
+    let updated_repo = store
+        .get_knowledge_entity_by_canonical_key("github:openai/gpt-oss")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(repo.id, updated_repo.id);
+    assert!(updated_repo.source_card_ids.contains(&repo_card.id));
+    assert!(updated_repo.source_card_ids.contains(&feed_card.id));
+    assert!(entities.iter().any(|entity| entity.id == repo.id));
+    assert!(relations.iter().any(|relation| {
+        relation.relation_type == "reported_by_provider"
+            && relation.subject_entity_id == repo.id
+            && relation.source_card_ids.contains(&feed_card.id)
+    }));
+}
+
+#[test]
 fn severe_generated_daily_briefing_revisions_share_source_item_entity() {
     // CLAIM: Generated daily briefing source-card revisions for the same day
     // are one evolving local source item, not many unrelated URL entities

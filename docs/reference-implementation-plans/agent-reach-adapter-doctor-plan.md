@@ -251,3 +251,84 @@ Implement `arcwell reach doctor --json` for three existing source families and
 make `arcwell ops` show their health. The first slice is complete only when a
 test proves a fake implementation that returns static JSON cannot pass.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell has moved past the original "add a doctor" starting point. The current
+repo already has several pieces that should become the spine of an
+Agent-Reach-inspired adapter doctor:
+
+- `provider_credential_probe` exists in CLI/MCP and writes redacted
+  `source_health` rows for GitHub, OpenAI, Brave Search, and Cloudflare.
+- `secret_health`, `health`, `doctor`, `/ops/ui`, and `ops_snapshot` expose
+  missing, expiring, refreshable, and policy-blocked credential states.
+- `source_health` is now the shared place where provider probes, email mailbox
+  verification, X OAuth/sync, wiki jobs, source adapters, and delivery gaps can
+  surface attention states.
+- Worker jobs, source cursors, radar source-quality windows, and X sync runs
+  already record operational context; a separate "reach" health database would
+  fragment the system.
+- The proof ledger exists (`proof_packets`, `proof_claims`,
+  `proof_artifacts`, `proof_checks`), so adapter-doctor promotion should record
+  proof packets rather than living only in docs.
+
+The refreshed Arcwell direction is therefore not a new `reach_*` subsystem. It
+is a normalized adapter-health layer over existing `source_health`,
+provider-probe, secret-health, policy/cost, worker, cursor, and ops surfaces.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can tell which configured source/provider adapters are ready,
+> blocked, stale, rate-limited, credential-expired, policy-denied, or only
+> locally scaffolded, using real probe rows and source-health state rather than
+> static command descriptions.
+
+Refutations:
+
+- A probe passes locally but no `source_health` row changes.
+- Provider credentials exist but no cheap endpoint accepted them.
+- A source family has healthy provider credentials but stale cursors or blocked
+  jobs.
+- MCP tool descriptions claim live fetch while policy/cost/secret gates would
+  block the real path.
+- Ops cannot distinguish missing credentials, policy denial, quota/rate-limit,
+  stale cursor, and partial write.
+
+Revised implementation slices:
+
+1. Add an adapter-doctor view that composes provider probes, `secret_health`,
+   source-health rows, cursor age, worker job failures, and last successful
+   durable source-card/write proof.
+2. Define per-source-family capability metadata: expected probes, expected
+   cursors, required policy actions, required secrets, and expected downstream
+   projections.
+3. Teach `doctor --strict` and `/ops/ui` to show "credential probe ok but
+   ingestion stale" as a distinct state.
+4. Add proof-ledger integration: an adapter cannot be promoted past Local Proof
+   unless a packet records the exact test/probe commands and rows inspected.
+5. Add MCP parity with bounded result shape and redacted diagnostics.
+
+Keep from Agent-Reach:
+
+- ordered backend probing;
+- per-backend status;
+- warning-vs-blocking classification;
+- config override visibility;
+- secret redaction and permission checks.
+
+Do not copy:
+
+- a parallel config system;
+- a separate source-health truth store;
+- an "agent calls random upstream CLI directly" model where Arcwell already has
+  owned policy/cost/source-card boundaries.
+
+Next proof gate:
+
+- Local Proof: fixture source families cover ok, missing secret, policy denied,
+  quota/rate-limited, stale cursor, failed worker, and partial durable-write
+  states, and the doctor view renders each differently.
+- Production Data Proof: a copied or controlled home runs a real provider probe
+  plus one real source-family fetch and shows both credential readiness and
+  durable source-card/cursor/source-health outcome.

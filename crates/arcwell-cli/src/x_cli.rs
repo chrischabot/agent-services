@@ -308,16 +308,27 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
         XSubcommand::ExportPortable { out } => print_json(&store.export_x_portable(&out)?),
         XSubcommand::ValidatePortable { dir } => print_json(&store.validate_x_portable(&dir)?),
         XSubcommand::ImportPortable { dir } => print_json(&store.import_x_portable(&dir)?),
-        XSubcommand::RecentSearch { query, max_results } => {
-            print_json(&store.x_recent_search(&query, max_results)?)
-        }
+        XSubcommand::RecentSearch {
+            query,
+            max_results,
+            transport,
+        } => print_json(&store.x_recent_search_with_transport(
+            &query,
+            max_results,
+            transport.as_deref(),
+        )?),
         XSubcommand::EnqueueRecentSearch { query, max_results } => {
             print_json(&store.enqueue_x_recent_search_job(&query, max_results)?)
         }
         XSubcommand::ImportBookmarks {
             bookmark_days,
             max_bookmarks,
-        } => print_json(&store.x_import_bookmarks(bookmark_days, max_bookmarks)?),
+            transport,
+        } => print_json(&store.x_import_bookmarks_with_transport(
+            bookmark_days,
+            max_bookmarks,
+            transport.as_deref(),
+        )?),
         XSubcommand::ScheduleBookmarks {
             bookmark_days,
             max_bookmarks,

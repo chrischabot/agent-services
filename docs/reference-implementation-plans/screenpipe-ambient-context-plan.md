@@ -256,3 +256,79 @@ Implement ambient capture for Arcwell's own run/thread/project summaries only.
 No screen recording, no OCR, no microphone. The first useful feature is:
 searchable, redacted, source-linked local work context with honest ops health.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has several substrates that make the original "ambient context"
+idea more concrete and less invasive:
+
+- `work_runs`, `work_events`, project status snapshots, controller events,
+  guard goals/reviews, proof packets, source cards, channel messages, delivery
+  observations, and issue-schedule ticks already provide rich work context.
+- The knowledge pipeline has `knowledge_events`, `knowledge_event_sources`,
+  clusters, reports, editorial decisions, entities, relations, adapter runs,
+  and entity-resolution rows.
+- The ops snapshot now distinguishes stale, blocked, failed, partial,
+  attention, and healthy states across source health, queues, schedules,
+  delivery, X, email, radar, and knowledge.
+- Email delivery verification demonstrates a useful pattern: capture an
+  observation, classify placement/status, and project unresolved state into ops
+  without pretending provider acceptance equals user receipt.
+- Worker heartbeat events and proof packets give an inspectable timeline that
+  should be searchable before considering any screen/OCR capture.
+
+The refreshed plan should treat screenpipe as a lesson in local observability,
+write-queue health, redaction, and bounded search/detail tools, not as a reason
+to record screens.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can search and summarize its own recent work context from durable
+> work/controller/proof/channel/source rows, with redaction and provenance,
+> without adding new raw surveillance capture.
+
+Refutations:
+
+- Search returns generated summaries without backing row IDs.
+- Guard/proof/channel text can be re-ingested as fresh memory without origin
+  labels.
+- Secret-like values appear in ambient snippets, ops details, proof packets, or
+  model prompts.
+- A worker/delivery/provider event is shown as successful without its matching
+  durable observation or proof row.
+- Deleting or forgetting a context item leaves stale FTS/projection rows.
+
+Revised implementation slices:
+
+1. Build `ambient_context` as a read/index layer over existing Arcwell durable
+   rows, not a new capture daemon.
+2. Use source-card and proof-packet IDs as primary provenance for snippets.
+3. Add a redacted, bounded `ambient_search` MCP/CLI surface with detail-by-ID.
+4. Add context source labels: user, source evidence, generated summary, guard
+   review, proof check, provider observation, delivery observation.
+5. Add deletion/forget checks for indexed context rows before expanding source
+   families.
+
+Keep from screenpipe:
+
+- write-queue health and degraded-state vocabulary;
+- atomic cursor/save semantics;
+- search-first/detail-later MCP ergonomics;
+- redaction as a pipeline state, not a UI afterthought;
+- namespaced tags.
+
+Do not copy:
+
+- raw screen recording as a default;
+- microphone/OCR capture before the existing work ledger is searchable;
+- unbounded MCP tools that dump whole transcripts.
+
+Next proof gate:
+
+- Local Proof: fixtures index work runs, proof packets, guard reviews, channel
+  delivery observations, and source cards; search returns redacted snippets and
+  detail IDs; prompt-injection text remains evidence-only.
+- Production Data Proof: a copied current home indexes a bounded recent window
+  of real Arcwell work rows and produces a provenance-linked context summary
+  without raw screenshots or private-file capture.

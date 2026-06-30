@@ -322,6 +322,11 @@ impl Store {
             Some(entity) => Some(entity),
             None => self.legacy_daily_briefing_entity_for_input(&input)?,
         };
+        if existing.is_none()
+            && let Some(entity) = self.source_item_alias_entity_for_input(&input)?
+        {
+            return self.merge_source_item_entity_evidence(entity, &input, &timestamp);
+        }
         let id = existing
             .as_ref()
             .map(|entity| entity.id.clone())
@@ -413,6 +418,104 @@ impl Store {
             .with_context(|| format!("inserted knowledge entity not found: {id}"))
     }
 
+    fn source_item_alias_entity_for_input(
+        &self,
+        input: &KnowledgeEntityInput,
+    ) -> Result<Option<KnowledgeEntity>> {
+        if !matches!(
+            input.entity_type.as_str(),
+            "discussion" | "feed_item" | "paper" | "social_post" | "source_item"
+        ) {
+            return Ok(None);
+        }
+        if !input.canonical_key.starts_with("url:")
+            && !input
+                .metadata
+                .get("source_card_url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| !url.trim().is_empty())
+        {
+            return Ok(None);
+        }
+        let wanted = normalize_knowledge_aliases(&input.aliases, Some(&input.name))
+            .into_iter()
+            .map(|alias| normalize_knowledge_alias_key(&alias))
+            .collect::<BTreeSet<_>>();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, entity_type, name, canonical_key, aliases_json, homepage_url,
+                   source_card_ids_json, wiki_page_id, confidence, metadata_json,
+                   created_at, updated_at
+            FROM knowledge_entities
+            ORDER BY updated_at DESC, id ASC
+            "#,
+        )?;
+        let mut matched = None::<KnowledgeEntity>;
+        for entity in rows(stmt.query_map([], knowledge_entity_from_row)?)? {
+            if entity.canonical_key == input.canonical_key {
+                continue;
+            }
+            let mut entity_aliases =
+                normalize_knowledge_aliases(&entity.aliases, Some(&entity.name));
+            entity_aliases.push(entity.canonical_key.clone());
+            let entity_keys = entity_aliases
+                .iter()
+                .map(|alias| normalize_knowledge_alias_key(alias))
+                .collect::<BTreeSet<_>>();
+            if wanted.intersection(&entity_keys).next().is_none() {
+                continue;
+            }
+            if let Some(existing) = &matched {
+                bail!(
+                    "source item alias collision requires review: `{}` matches both `{}` and `{}`",
+                    input.name,
+                    existing.canonical_key,
+                    entity.canonical_key
+                );
+            }
+            matched = Some(entity);
+        }
+        Ok(matched)
+    }
+
+    fn merge_source_item_entity_evidence(
+        &self,
+        entity: KnowledgeEntity,
+        input: &KnowledgeEntityInput,
+        timestamp: &str,
+    ) -> Result<KnowledgeEntity> {
+        let aliases = merge_string_sets(&entity.aliases, &input.aliases);
+        self.ensure_knowledge_entity_aliases_available(
+            &entity.canonical_key,
+            &aliases,
+            Some(entity.id.as_str()),
+        )?;
+        let source_card_ids = merge_string_sets(&entity.source_card_ids, &input.source_card_ids);
+        let confidence = entity.confidence.max(input.confidence);
+        self.conn.execute(
+            r#"
+            UPDATE knowledge_entities
+            SET aliases_json = ?2,
+                source_card_ids_json = ?3,
+                confidence = MAX(confidence, ?4),
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+            params![
+                entity.id,
+                serde_json::to_string(&aliases)?,
+                serde_json::to_string(&source_card_ids)?,
+                confidence,
+                timestamp,
+            ],
+        )?;
+        self.get_knowledge_entity(&entity.id)?
+            .with_context(|| format!("merged knowledge entity not found: {}", entity.id))
+    }
+
     fn legacy_daily_briefing_entity_for_input(
         &self,
         input: &KnowledgeEntityInput,
@@ -483,7 +586,8 @@ impl Store {
         canonical_key: &str,
     ) -> Result<Option<KnowledgeEntity>> {
         validate_knowledge_text("knowledge entity canonical key", canonical_key, 500)?;
-        self.conn
+        let exact = self
+            .conn
             .query_row(
                 r#"
                 SELECT id, entity_type, name, canonical_key, aliases_json, homepage_url,
@@ -491,6 +595,24 @@ impl Store {
                        created_at, updated_at
                 FROM knowledge_entities
                 WHERE canonical_key = ?1
+                "#,
+                params![canonical_key],
+                knowledge_entity_from_row,
+            )
+            .optional()?;
+        if exact.is_some() || !canonical_key.starts_with("github:") {
+            return Ok(exact);
+        }
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, entity_type, name, canonical_key, aliases_json, homepage_url,
+                       source_card_ids_json, wiki_page_id, confidence, metadata_json,
+                       created_at, updated_at
+                FROM knowledge_entities
+                WHERE lower(canonical_key) = lower(?1)
+                ORDER BY updated_at DESC, id ASC
+                LIMIT 1
                 "#,
                 params![canonical_key],
                 knowledge_entity_from_row,

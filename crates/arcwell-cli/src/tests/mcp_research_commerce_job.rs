@@ -65,6 +65,176 @@ fn severe_mcp_tool_call_structured_content_is_object_for_list_results() {
 }
 
 #[test]
+fn severe_mcp_channel_delivery_observations_round_trip_mailbox_proof() {
+    let paths = test_paths("mcp-delivery-observation");
+    let message = call_mcp_tool(
+        &paths,
+        "channel_record",
+        json!({
+            "channel": "email",
+            "direction": "outgoing",
+            "sender": "email:briefing@example.com",
+            "body": "Provider accepted this briefing; mailbox proof is recorded separately."
+        }),
+    )
+    .unwrap();
+    let message_id = message["id"].as_str().unwrap();
+    let attempt = {
+        let store = Store::open(paths.clone()).unwrap();
+        store
+            .record_channel_delivery_attempt(
+                message_id,
+                "email",
+                "email:briefing@example.com",
+                true,
+                200,
+                &json!({
+                    "success": true,
+                    "result": {
+                        "message_id": "<briefing-proof@example.com>",
+                        "delivered": [],
+                        "queued": []
+                    }
+                }),
+                None,
+                None,
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        attempt.delivery_proof,
+        "provider_accepted_mailbox_unverified"
+    );
+    let attempt_id = attempt.id.clone();
+    let gaps = call_mcp_tool(&paths, "email_delivery_verification_gaps", json!({})).unwrap();
+    assert_eq!(gaps.as_array().unwrap().len(), 1);
+    assert_eq!(gaps[0]["delivery_attempt_id"], json!(attempt_id.clone()));
+    assert_eq!(gaps[0]["verification_state"], json!("mailbox_unverified"));
+
+    let requests = call_mcp_tool(
+        &paths,
+        "email_delivery_verification_requests",
+        json!({ "limit": 10, "verification_state": "mailbox_unverified" }),
+    )
+    .unwrap();
+    assert_eq!(requests.as_array().unwrap().len(), 1);
+    assert_eq!(
+        requests[0]["delivery_attempt_id"],
+        json!(attempt_id.clone())
+    );
+    assert_eq!(
+        requests[0]["search_query"],
+        json!("rfc822msgid:<briefing-proof@example.com>")
+    );
+    assert_eq!(requests[0]["ready"], json!(true));
+    let queued = call_mcp_tool(
+        &paths,
+        "email_delivery_verification_enqueue",
+        json!({ "limit": 10, "verification_state": "mailbox_unverified" }),
+    )
+    .unwrap();
+    assert_eq!(
+        queued["kind"].as_str(),
+        Some("email_delivery_verification_request")
+    );
+    assert_eq!(queued["status"].as_str(), Some("pending"));
+
+    let trash_observation_batch = call_mcp_tool(
+        &paths,
+        "email_delivery_observation_batch_add",
+        json!({
+            "results": [{
+                "delivery_attempt_id": attempt_id.clone(),
+                "observation_source": "gmail",
+                "observation_status": "mailbox_observed",
+                "mailbox_message_id": "gmail-message-id-briefing-proof-trash",
+                "provider_message_id": "<briefing-proof@example.com>",
+                "observed_at": "2026-06-30T07:02:00Z",
+                "evidence": {
+                    "query": "rfc822msgid:<briefing-proof@example.com>",
+                    "result_count": 1,
+                    "gmail_message_metadata": [{
+                        "id": "gmail-message-id-briefing-proof-trash",
+                        "label_ids": ["TRASH", "CATEGORY_UPDATES"],
+                        "placement": "trash"
+                    }]
+                }
+            }]
+        }),
+    )
+    .unwrap();
+    assert_eq!(trash_observation_batch.as_array().unwrap().len(), 1);
+    let trash_gaps = call_mcp_tool(&paths, "email_delivery_verification_gaps", json!({})).unwrap();
+    assert_eq!(
+        trash_gaps[0]["verification_state"],
+        json!("mailbox_bad_placement_trash")
+    );
+    let repair_without_credentials = call_mcp_tool(
+        &paths,
+        "email_delivery_mailbox_repair",
+        json!({ "limit": 10, "verification_state": "mailbox_bad_placement_trash" }),
+    )
+    .unwrap();
+    assert_eq!(repair_without_credentials["eligible"], json!(1));
+    assert_eq!(repair_without_credentials["repaired"], json!(0));
+    assert_eq!(
+        repair_without_credentials["missing_credential"],
+        json!(true)
+    );
+    let still_trash = call_mcp_tool(&paths, "email_delivery_verification_gaps", json!({})).unwrap();
+    assert_eq!(
+        still_trash[0]["verification_state"],
+        json!("mailbox_bad_placement_trash")
+    );
+
+    let observation_batch = call_mcp_tool(
+        &paths,
+        "email_delivery_observation_batch_add",
+        json!({
+            "results": [{
+                "delivery_attempt_id": attempt_id.clone(),
+                "observation_source": "gmail",
+                "observation_status": "mailbox_observed",
+                "mailbox_message_id": "gmail-message-id-briefing-proof",
+                "provider_message_id": "<briefing-proof@example.com>",
+                "observed_at": "2026-06-30T07:03:00Z",
+                "evidence": {
+                    "query": "rfc822msgid:<briefing-proof@example.com>",
+                    "result_count": 1,
+                    "gmail_message_metadata": [{
+                        "id": "gmail-message-id-briefing-proof",
+                        "label_ids": ["IMPORTANT", "CATEGORY_PERSONAL", "INBOX"],
+                        "placement": "inbox"
+                    }]
+                }
+            }]
+        }),
+    )
+    .unwrap();
+    assert_eq!(observation_batch.as_array().unwrap().len(), 1);
+    assert_eq!(
+        observation_batch[0]["observation_status"],
+        json!("mailbox_observed")
+    );
+
+    let observations = call_mcp_tool(
+        &paths,
+        "channel_delivery_observations",
+        json!({ "delivery_attempt_id": attempt_id }),
+    )
+    .unwrap();
+    assert_eq!(observations.as_array().unwrap().len(), 2);
+    assert!(
+        observations.as_array().unwrap().iter().any(|observation| {
+            observation["mailbox_message_id"] == json!("gmail-message-id-briefing-proof")
+        }),
+        "{observations:#?}"
+    );
+    let gaps_after = call_mcp_tool(&paths, "email_delivery_verification_gaps", json!({})).unwrap();
+    assert!(gaps_after.as_array().unwrap().is_empty());
+}
+
+#[test]
 fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
     let paths = test_paths("mcp-compact-ops");
     call_mcp_tool(
@@ -104,7 +274,7 @@ fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
     assert!(structured.is_object());
     assert_eq!(
         structured["summary"].as_str(),
-        Some("Compact MCP ops snapshot. Use `arcwell ops` for the full local JSON payload.")
+        Some("Compact ops snapshot. Use `arcwell ops` for the full local JSON payload.")
     );
     assert!(structured["health"].is_object());
     assert!(structured["backlog"].is_object());
@@ -117,6 +287,12 @@ fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
     assert!(structured.get("source_cards").is_none());
     assert!(structured.get("issue_schedule_ticks").is_none());
     assert!(structured.get("memory_candidates").is_none());
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"counts\"")
+    );
 }
 
 #[test]

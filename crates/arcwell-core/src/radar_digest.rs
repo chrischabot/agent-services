@@ -820,17 +820,18 @@ pub(crate) fn render_knowledge_daily_briefing(
 ) -> String {
     let day = issue_schedule_day_label(&tick.due_at);
     let window = daily_briefing_window(window_start, window_end);
+    let window_label = daily_briefing_window_label(window.as_ref());
     let stories = daily_briefing_reader_stories(reports, source_cards, window);
     let mut lines = vec![
         format!("# AI Daily Briefing - {day}"),
         String::new(),
         "## Bottom Line".to_string(),
-        daily_briefing_lede_for_stories(&stories),
+        daily_briefing_lede_for_stories(&stories, &window_label),
         String::new(),
     ];
     if stories.is_empty() {
         lines.push("## Quiet Day".to_string());
-        lines.push("The scan was not empty; it just did not produce a clean story. The apparent activity was old feed items, reply-level social chatter, and routine code-hosting updates. None of that changes the picture for model access, agents, evaluation, or developer workflow on its own.".to_string());
+        lines.push(format!("The {window_label} scan was not empty; it just did not produce a clean story. The apparent activity was old feed items, reply-level social chatter, and routine code-hosting updates. None of that changes the picture for model access, agents, evaluation, or developer workflow on its own."));
         lines.push(String::new());
     } else {
         lines.push("## Today's Stories".to_string());
@@ -856,10 +857,10 @@ pub(crate) fn render_knowledge_daily_briefing(
         lines.push(String::new());
     }
     lines.push("## Editor's Read".to_string());
-    lines.push(daily_briefing_issue_read(&stories));
+    lines.push(daily_briefing_issue_read(&stories, &window_label));
     lines.push(String::new());
     lines.push("## Watch Next".to_string());
-    lines.push(daily_briefing_watch_next(&stories));
+    lines.push(daily_briefing_watch_next(&stories, &window_label));
     lines.join("\n")
 }
 
@@ -881,6 +882,21 @@ pub(crate) fn daily_briefing_window(
         .ok()?
         .with_timezone(&Utc);
     Some((start, end))
+}
+
+pub(crate) fn daily_briefing_window_label(
+    window: Option<&(DateTime<Utc>, DateTime<Utc>)>,
+) -> String {
+    let Some((start, end)) = window else {
+        return "current window".to_string();
+    };
+    let seconds = (*end - *start).num_seconds().max(1);
+    let hours = ((seconds + 3_599) / 3_600).clamp(1, 24 * 14);
+    if hours == 24 {
+        "last 24 hours".to_string()
+    } else {
+        format!("last {hours} hours")
+    }
 }
 
 fn daily_briefing_reader_stories<'a>(
@@ -929,15 +945,18 @@ fn daily_briefing_reader_stories<'a>(
     stories
 }
 
-fn daily_briefing_lede_for_stories(stories: &[DailyBriefingReaderStory<'_>]) -> String {
+fn daily_briefing_lede_for_stories(
+    stories: &[DailyBriefingReaderStory<'_>],
+    window_label: &str,
+) -> String {
     if stories.is_empty() {
-        return daily_briefing_lede_for_titles(&[]);
+        return daily_briefing_lede_for_titles_in_window(&[], window_label);
     }
     let titles = stories
         .iter()
         .map(|story| story.title.as_str())
         .collect::<Vec<_>>();
-    daily_briefing_lede_for_titles(&titles)
+    daily_briefing_lede_for_titles_in_window(&titles, window_label)
 }
 
 pub(crate) fn daily_briefing_report_has_newsletter_story(
@@ -1007,31 +1026,46 @@ pub(crate) fn daily_briefing_source_cards_are_github_repo_only(
     })
 }
 
-fn daily_briefing_issue_read(stories: &[DailyBriefingReaderStory<'_>]) -> String {
+fn daily_briefing_issue_read(
+    stories: &[DailyBriefingReaderStory<'_>],
+    window_label: &str,
+) -> String {
     if stories.is_empty() {
-        return "The useful conclusion is negative: nothing fresh and well-sourced changed the picture today.".to_string();
+        return format!(
+            "The useful conclusion is negative: nothing fresh and well-sourced from the {window_label} changed the picture."
+        );
     }
     "The useful read is whether the primary links are backed by docs, releases, benchmarks, or credible developer use.".to_string()
 }
 
-fn daily_briefing_watch_next(stories: &[DailyBriefingReaderStory<'_>]) -> String {
+fn daily_briefing_watch_next(
+    stories: &[DailyBriefingReaderStory<'_>],
+    window_label: &str,
+) -> String {
     if stories.is_empty() {
-        return "The next real issue should start from a primary announcement, release note, benchmark, shipping detail, or credible developer reaction dated inside the last 24 hours.".to_string();
+        return format!(
+            "The next real issue should start from a primary announcement, release note, benchmark, shipping detail, or credible developer reaction dated inside the {window_label}."
+        );
     }
     "Check official release notes or docs first, then look for independent developer use before promoting any item into a trend.".to_string()
 }
 
-pub(crate) fn daily_briefing_lede_for_titles(titles: &[&str]) -> String {
+pub(crate) fn daily_briefing_lede_for_titles_in_window(
+    titles: &[&str],
+    window_label: &str,
+) -> String {
     match titles {
-        [] => "Quiet day. The last 24 hours had activity, but not a clean AI story worth elevating; old feed items, reply-level social chatter, and routine code-hosting updates did not clear the bar.".to_string(),
+        [] => format!(
+            "Quiet day. The {window_label} had activity, but not a clean AI story worth elevating; old feed items, reply-level social chatter, and routine code-hosting updates did not clear the bar."
+        ),
         [lead] => format!(
             "The cleanest item today is {lead}. I would treat it as a story to watch, not a settled claim, and read it for what the evidence actually changes."
         ),
         [lead, second] => format!(
-            "Today is a watchlist issue: {lead} and {second} are the strongest items from the last 24 hours. The interesting part is what gets backed by docs, releases, benchmarks, or real developer use."
+            "Today is a watchlist issue: {lead} and {second} are the strongest items from the {window_label}. The interesting part is what gets backed by docs, releases, benchmarks, or real developer use."
         ),
         [lead, second, third, ..] => format!(
-            "Today is a watchlist issue: {lead}, {second}, and {third} are the strongest items from the last 24 hours. The useful tension is what gets backed by docs, releases, benchmarks, or real developer use."
+            "Today is a watchlist issue: {lead}, {second}, and {third} are the strongest items from the {window_label}. The useful tension is what gets backed by docs, releases, benchmarks, or real developer use."
         ),
     }
 }

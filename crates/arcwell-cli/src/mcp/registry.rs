@@ -1230,6 +1230,138 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
             [],
         ),
         tool(
+            "channel_delivery_observation_add",
+            "Record a mailbox observation for a channel delivery attempt.",
+            [
+                (
+                    "delivery_attempt_id",
+                    "string",
+                    "Channel delivery attempt id.",
+                ),
+                (
+                    "observation_status",
+                    "string",
+                    "mailbox_observed, mailbox_not_found, or mailbox_unknown.",
+                ),
+            ],
+        ),
+        tool(
+            "channel_delivery_observations",
+            "List mailbox observations for channel delivery attempts.",
+            [],
+        ),
+        tool(
+            "email_delivery_verification_gaps",
+            "List successful email delivery attempts that still need mailbox verification or follow-up.",
+            [],
+        ),
+        tool(
+            "email_delivery_verification_requests",
+            "Build bounded Gmail-ready mailbox verification requests for successful email deliveries.",
+            [],
+        ),
+        tool(
+            "email_delivery_verification_enqueue",
+            "Enqueue a worker-visible mailbox verification request job for successful email deliveries.",
+            [],
+        ),
+        tool(
+            "email_delivery_mailbox_verify",
+            "Use configured Gmail API credentials to search for successful email deliveries and record mailbox observations.",
+            [
+                (
+                    "limit",
+                    "number",
+                    "Maximum delivery attempts to verify, default 25.",
+                ),
+                (
+                    "verification_state",
+                    "string",
+                    "Optional state, default mailbox_unverified.",
+                ),
+                (
+                    "destination",
+                    "string",
+                    "Optional email destination filter.",
+                ),
+                (
+                    "api_base",
+                    "string",
+                    "Optional Gmail API base for authorized local/staging tests.",
+                ),
+            ],
+        ),
+        tool(
+            "email_delivery_mailbox_repair",
+            "Use configured Gmail API credentials with modify scope to move bad-placement Arcwell deliveries back to Inbox and record post-repair observations.",
+            [
+                (
+                    "limit",
+                    "number",
+                    "Maximum delivery attempts to repair, default 25.",
+                ),
+                (
+                    "verification_state",
+                    "string",
+                    "Optional state, default mailbox_bad_placement_trash.",
+                ),
+                (
+                    "destination",
+                    "string",
+                    "Optional email destination filter.",
+                ),
+                (
+                    "api_base",
+                    "string",
+                    "Optional Gmail API base for authorized local/staging tests.",
+                ),
+            ],
+        ),
+        tool(
+            "gmail_oauth_authorize_url",
+            "Create a Gmail OAuth PKCE authorization URL for mailbox verification, resolving stored Gmail client metadata when omitted.",
+            [
+                (
+                    "client_id",
+                    "string",
+                    "Optional Gmail/Google OAuth client id.",
+                ),
+                ("redirect_uri", "string", "Optional OAuth redirect URI."),
+            ],
+        ),
+        tool(
+            "gmail_oauth_exchange_code",
+            "Exchange a Gmail OAuth authorization code and store returned Gmail access/refresh tokens in local SQLite secrets.",
+            [
+                (
+                    "client_id",
+                    "string",
+                    "Optional Gmail/Google OAuth client id.",
+                ),
+                ("redirect_uri", "string", "Optional OAuth redirect URI."),
+                ("code", "string", "Authorization code."),
+                ("code_verifier", "string", "PKCE code verifier."),
+            ],
+        ),
+        tool(
+            "gmail_oauth_refresh",
+            "Refresh the Gmail access token from the stored GMAIL_REFRESH_TOKEN and store the new token response.",
+            [(
+                "client_id",
+                "string",
+                "Optional Gmail/Google OAuth client id.",
+            )],
+        ),
+        tool(
+            "email_delivery_observation_batch_add",
+            "Record a batch of mailbox observations from a host mailbox verifier.",
+            [(
+                "results",
+                "array",
+                "Observation result objects with delivery_attempt_id and observation_status.",
+            )],
+        ),
+        tool(
             "telegram_drain_edge_events",
             "Drain Telegram edge inbox events into local channel messages.",
             [],
@@ -1760,8 +1892,15 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_recent_search",
-            "Run live X recent search using X_BEARER_TOKEN from env or local SQLite secrets.",
-            [("query", "string", "X search query.")],
+            "Run live X recent search through Arcwell's owned X provider transport. Default transport is direct-api; xurl-token-api delegates token acquisition to xurl; x-api-mcp calls hosted X MCP post search with an app-only bearer alias such as TWITTER_BEARER_TOKEN and maps X API-shaped tool output into Arcwell source cards, cursors, health, and sync runs.",
+            [
+                ("query", "string", "X search query."),
+                (
+                    "transport",
+                    "string",
+                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp.",
+                ),
+            ],
         ),
         tool(
             "x_enqueue_recent_search",
@@ -1770,7 +1909,7 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_import_bookmarks",
-            "Import authenticated X bookmarks as full X items with source provenance and public metrics.",
+            "Import authenticated X bookmarks as full X items with source provenance and public metrics through Arcwell's owned X provider transport. x-api-mcp uses hosted X MCP user-context tools.",
             [
                 (
                     "bookmark_days",
@@ -1778,6 +1917,11 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                     "Only import bookmarked tweets newer than this many days.",
                 ),
                 ("max_bookmarks", "integer", "Maximum bookmarks to scan."),
+                (
+                    "transport",
+                    "string",
+                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp. The hosted MCP bookmark path imports one tool-call page and preserves returned next_token as an unverified continuation.",
+                ),
             ],
         ),
         tool(

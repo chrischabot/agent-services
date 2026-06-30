@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 static LOOPBACK_URL_INGEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static REDDIT_BEARER_TOKEN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static X_API_BASE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static X_MCP_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static XURL_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn with_loopback_url_ingest_allowed<T>(f: impl FnOnce() -> T) -> T {
     let _guard = LOOPBACK_URL_INGEST_ENV_LOCK
@@ -79,6 +81,106 @@ fn with_x_api_base<T>(base: &str, f: impl FnOnce() -> T) -> T {
         Ok(value) => value,
         Err(payload) => resume_unwind(payload),
     }
+}
+
+fn with_xurl_bin<T>(bin: &Path, f: impl FnOnce() -> T) -> T {
+    let _guard = XURL_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("xurl env lock poisoned");
+    let previous_bin = std::env::var_os("ARCWELL_XURL_BIN");
+    let previous_app = std::env::var_os("ARCWELL_XURL_APP");
+    let previous_username = std::env::var_os("ARCWELL_XURL_USERNAME");
+    unsafe {
+        std::env::set_var("ARCWELL_XURL_BIN", bin);
+        std::env::remove_var("ARCWELL_XURL_APP");
+        std::env::remove_var("ARCWELL_XURL_USERNAME");
+    }
+    let result = catch_unwind(AssertUnwindSafe(f));
+    unsafe {
+        if let Some(previous) = previous_bin {
+            std::env::set_var("ARCWELL_XURL_BIN", previous);
+        } else {
+            std::env::remove_var("ARCWELL_XURL_BIN");
+        }
+        if let Some(previous) = previous_app {
+            std::env::set_var("ARCWELL_XURL_APP", previous);
+        } else {
+            std::env::remove_var("ARCWELL_XURL_APP");
+        }
+        if let Some(previous) = previous_username {
+            std::env::set_var("ARCWELL_XURL_USERNAME", previous);
+        } else {
+            std::env::remove_var("ARCWELL_XURL_USERNAME");
+        }
+    }
+    match result {
+        Ok(value) => value,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn without_x_mcp_env<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = X_MCP_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_server = std::env::var_os("ARCWELL_X_MCP_SERVER_URL");
+    let previous_recent = std::env::var_os("ARCWELL_X_MCP_RECENT_SEARCH_TOOL");
+    let previous_bookmarks = std::env::var_os("ARCWELL_X_MCP_BOOKMARKS_TOOL");
+    unsafe {
+        std::env::remove_var("ARCWELL_X_MCP_SERVER_URL");
+        std::env::remove_var("ARCWELL_X_MCP_RECENT_SEARCH_TOOL");
+        std::env::remove_var("ARCWELL_X_MCP_BOOKMARKS_TOOL");
+    }
+    let result = catch_unwind(AssertUnwindSafe(f));
+    unsafe {
+        if let Some(previous) = previous_server {
+            std::env::set_var("ARCWELL_X_MCP_SERVER_URL", previous);
+        } else {
+            std::env::remove_var("ARCWELL_X_MCP_SERVER_URL");
+        }
+        if let Some(previous) = previous_recent {
+            std::env::set_var("ARCWELL_X_MCP_RECENT_SEARCH_TOOL", previous);
+        } else {
+            std::env::remove_var("ARCWELL_X_MCP_RECENT_SEARCH_TOOL");
+        }
+        if let Some(previous) = previous_bookmarks {
+            std::env::set_var("ARCWELL_X_MCP_BOOKMARKS_TOOL", previous);
+        } else {
+            std::env::remove_var("ARCWELL_X_MCP_BOOKMARKS_TOOL");
+        }
+    }
+    match result {
+        Ok(value) => value,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn fake_xurl_token_script(name: &str, token: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("arcwell-test-{name}-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("xurl");
+    let token = token
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"token\" ]; then\n  printf '%s\\n' \"{token}\"\n  exit 0\nfi\necho unsupported xurl test command >&2\nexit 2\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    path
 }
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -662,6 +764,7 @@ fn seed_knowledge_event(store: &Store, canonical_key: &str) -> KnowledgeEvent {
         .unwrap()
 }
 
+mod guard;
 mod knowledge;
 use knowledge::seed_saturated_convergence_fixture;
 mod proof;

@@ -140,6 +140,8 @@ impl Store {
                         WHEN 'knowledge_daily_briefing' THEN 0
                         WHEN 'digest_scheduled_alert' THEN 1
                         WHEN 'radar_scheduled_delivery' THEN 1
+                        WHEN 'email_delivery_verification_request' THEN 2
+                        WHEN 'email_delivery_mailbox_repair' THEN 2
                         ELSE 10
                     END ASC,
                     created_at ASC
@@ -201,6 +203,12 @@ impl Store {
                 "digest_scheduled_alert" => self.execute_digest_scheduled_alert(&job.input_json),
                 "knowledge_daily_briefing" => {
                     self.execute_knowledge_daily_briefing(&job.input_json)
+                }
+                "email_delivery_verification_request" => {
+                    self.execute_email_delivery_verification_request(&job.input_json)
+                }
+                "email_delivery_mailbox_repair" => {
+                    self.execute_email_delivery_mailbox_repair(&job.input_json)
                 }
                 "knowledge_cluster_editorial_decide" => {
                     self.execute_knowledge_cluster_editorial_decide(&job.input_json)

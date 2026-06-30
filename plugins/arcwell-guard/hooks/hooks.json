@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell guard capture-goal --event session-start",
+            "timeout": 20,
+            "statusMessage": "Arcwell Guard: noting session goal"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell guard capture-goal --event user-prompt-submit",
+            "timeout": 20,
+            "statusMessage": "Arcwell Guard: capturing goal"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "arcwell guard stop-review",
+            "timeout": 900,
+            "statusMessage": "Arcwell Guard: cross-model review"
+          }
+        ]
+      }
+    ]
+  }
+}

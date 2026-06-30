@@ -236,13 +236,15 @@ pub(crate) fn upsert_x_canonical_on(
 pub(crate) fn upsert_x_canonical_edge_on(conn: &Connection, input: &XItemInput) -> Result<()> {
     let seen_at = input.retrieved_at.clone().unwrap_or_else(now);
     let metadata_json = canonical_json(&input.source_metadata)?;
+    let transport = x_edge_transport(input);
     conn.execute(
         r#"
         INSERT INTO x_tweet_edges
           (account_id, tweet_x_id, edge_kind, source_kind, source_detail, transport, first_seen_at, last_seen_at, seen_count, raw_json)
-        VALUES ('acct_default', ?1, ?2, ?2, ?3, 'x_api', ?4, ?4, 1, ?5)
+        VALUES ('acct_default', ?1, ?2, ?2, ?3, ?4, ?5, ?5, 1, ?6)
         ON CONFLICT(account_id, tweet_x_id, edge_kind, source_kind, source_detail) DO UPDATE SET
           last_seen_at = excluded.last_seen_at,
+          transport = excluded.transport,
           seen_count = x_tweet_edges.seen_count + 1,
           raw_json = excluded.raw_json
         "#,
@@ -250,12 +252,25 @@ pub(crate) fn upsert_x_canonical_edge_on(conn: &Connection, input: &XItemInput) 
             input.x_id,
             input.source_kind,
             input.source_detail.clone().unwrap_or_default(),
+            transport,
             seen_at,
             metadata_json
         ],
     )?;
     upsert_x_tweet_refs_on(conn, input)?;
     Ok(())
+}
+
+fn x_edge_transport(input: &XItemInput) -> &'static str {
+    match input
+        .source_metadata
+        .get("imported_from")
+        .and_then(Value::as_str)
+    {
+        Some("x_api_mcp") => "x_api_mcp",
+        Some("xurl_token_api") => "xurl_token_api",
+        _ => "x_api",
+    }
 }
 
 pub(crate) fn upsert_x_tweet_refs_on(conn: &Connection, input: &XItemInput) -> Result<()> {

@@ -956,6 +956,23 @@ impl Store {
               FOREIGN KEY(message_id) REFERENCES channel_messages(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS channel_delivery_observations (
+              id TEXT PRIMARY KEY,
+              delivery_attempt_id TEXT NOT NULL,
+              message_id TEXT NOT NULL,
+              channel TEXT NOT NULL,
+              destination TEXT NOT NULL,
+              provider_message_id TEXT,
+              observation_source TEXT NOT NULL,
+              observation_status TEXT NOT NULL,
+              mailbox_message_id TEXT,
+              observed_at TEXT NOT NULL,
+              evidence_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(delivery_attempt_id) REFERENCES channel_delivery_attempts(id) ON DELETE CASCADE,
+              FOREIGN KEY(message_id) REFERENCES channel_messages(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -1585,6 +1602,9 @@ impl Store {
         })?;
         self.apply_schema_migration(22, "proof_packet_ledger", false, None, |conn| {
             ensure_proof_packet_schema_on(conn)
+        })?;
+        self.apply_schema_migration(23, "guard_review_ledger", false, None, |conn| {
+            ensure_guard_schema_on(conn)
         })?;
         repair_radar_source_quality_run_scope_on(&self.conn)?;
         self.conn.execute(

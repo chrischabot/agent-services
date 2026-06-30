@@ -299,3 +299,74 @@ channel in mock/local mode. Do not claim container isolation. The first "oh yes"
 deliverable is durable inbound -> wake -> outbound -> delivery receipt with
 audit and ops visibility.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+The original NanoClaw-inspired first slice is now partly real in Arcwell-shaped
+form:
+
+- `docs/arcwell-controller-design.md` says Phase 0 local controller
+  ledger/router is implemented.
+- Telegram drain routes recorded messages through the controller.
+- MCP exposes project/controller surfaces: project create/list/resolve/status,
+  channel route, controller thread/run/event/action listing, and run status
+  update.
+- Channel delivery attempts and observations are already durable.
+- Ops UI exposes projects, channels, work runs, policy decisions/approvals, and
+  channel delivery failures.
+
+The remaining NanoClaw value is sharper exchange isolation: make inbound,
+pending actions, runner wake, outbound, delivery receipt, and observation
+states explicit enough that no channel or host adapter can pretend work ran or
+delivered.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell controller can route authorized channel input into project/thread/run
+> actions and record every state transition from inbound message to host action,
+> outbound response, provider attempt, and independent observation.
+
+Refutations:
+
+- Controller action exists but no originating channel message/project binding
+  is recorded.
+- A host adapter claims it started work without a durable run/action state.
+- A delivery attempt succeeds but observation gap is hidden.
+- Access-denied messages are accumulated as context or source evidence.
+- Stop/cancel requests go through normal busy queues instead of a hard-stop
+  control path.
+
+Revised implementation slices:
+
+1. Audit current controller tables against NanoClaw's inbound/outbound/receipt
+   split and add missing explicit states only where current rows are ambiguous.
+2. Add controller action idempotency keys and wake/delivery dedupe tests.
+3. Add destination ACL checks that use Arcwell channel authorizations.
+4. Add hard-stop/cancel API proof for host adapters before claiming command
+   control.
+5. Add ops UI/controller detail rows that show inbound -> action -> run ->
+   outbound -> delivery -> observation.
+
+Keep from NanoClaw:
+
+- channel adapters ignorant of agent/session IDs;
+- access/sender-scope gates;
+- dropped-message audit;
+- engage modes and accumulate-only context;
+- wake dedup and delivery idempotency;
+- attachment path safety.
+
+Do not copy:
+
+- container isolation claims before Arcwell has a container runner proof;
+- two physical SQLite databases unless one-writer isolation becomes necessary;
+- platform-specific channel logic inside controller core.
+
+Next proof gate:
+
+- Local Proof: fixtures prove access denial, accumulate-only, wake dedupe,
+  delivery idempotency, hard-stop priority, and observation-gap visibility.
+- Production Data Proof: a fresh authorized real channel message routes through
+  controller into a disposable host action and replies with a delivery attempt
+  plus observation or explicit observation gap.

@@ -38,6 +38,17 @@ pub(crate) fn render_ops_ui_with_options(
         .iter()
         .filter(|attempt| !attempt.ok)
         .count();
+    let mailbox_unverified_email_deliveries = snapshot
+        .channel_delivery_attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.channel == "email"
+                && matches!(
+                    attempt.delivery_proof.as_str(),
+                    "provider_accepted_mailbox_unverified" | "provider_queued_mailbox_unverified"
+                )
+        })
+        .count();
     let failed_radar_deliveries = snapshot
         .radar_deliveries
         .iter()
@@ -162,7 +173,11 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Projects", snapshot.projects.len()),
         ("Project statuses", snapshot.project_status_snapshots.len()),
         ("Channels", snapshot.channel_messages.len()),
-        ("Telegram failures", failed_deliveries),
+        ("Channel failures", failed_deliveries),
+        (
+            "Email mailbox unverified",
+            mailbox_unverified_email_deliveries,
+        ),
         ("Radar delivery failures", failed_radar_deliveries),
         ("Job roles", snapshot.job_hunting.role_count),
         ("Job source failures", failed_job_sources),
@@ -1086,10 +1101,27 @@ fn render_backlog_age_table(snapshot: &OpsSnapshot) -> String {
                 String::new(),
             ],
             vec![
-                "Digest candidates approved".to_string(),
+                "Digest candidates approved total".to_string(),
                 backlog.approved_digest_candidates.to_string(),
                 backlog
                     .oldest_approved_digest_candidate_at
+                    .clone()
+                    .unwrap_or_default(),
+                String::new(),
+            ],
+            vec![
+                "Digest candidates approved sent".to_string(),
+                backlog.approved_digest_candidates_sent.to_string(),
+                String::new(),
+                String::new(),
+            ],
+            vec![
+                "Digest candidates approved pending delivery".to_string(),
+                backlog
+                    .approved_digest_candidates_pending_delivery
+                    .to_string(),
+                backlog
+                    .oldest_approved_digest_candidate_pending_delivery_at
                     .clone()
                     .unwrap_or_default(),
                 String::new(),
@@ -1127,9 +1159,19 @@ fn render_issue_schedule_summary_table(snapshot: &OpsSnapshot) -> String {
             "status",
             "time",
             "tick counts",
+            "type counts",
             "latest due",
             "latest status",
+            "scheduled due",
+            "scheduled status",
+            "scheduled proof",
+            "manual due",
+            "manual status",
+            "manual proof",
             "latest sent",
+            "sent proof",
+            "latest inbox",
+            "inbox proof",
             "latest blocked",
             "error",
         ],
@@ -1146,9 +1188,46 @@ fn render_issue_schedule_summary_table(snapshot: &OpsSnapshot) -> String {
                         schedule.time_zone, schedule.hour, schedule.minute
                     ),
                     serde_json::to_string(&schedule.tick_status_counts).unwrap_or_default(),
+                    serde_json::to_string(&schedule.tick_type_counts).unwrap_or_default(),
                     schedule.latest_tick_due_at.clone().unwrap_or_default(),
                     schedule.latest_tick_status.clone().unwrap_or_default(),
+                    schedule
+                        .latest_scheduled_tick_due_at
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_scheduled_tick_status
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_scheduled_tick_delivery_proof
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_manual_tick_due_at
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_manual_tick_status
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_manual_tick_delivery_proof
+                        .clone()
+                        .unwrap_or_default(),
                     schedule.latest_sent_due_at.clone().unwrap_or_default(),
+                    schedule
+                        .latest_sent_delivery_proof
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_inbox_confirmed_due_at
+                        .clone()
+                        .unwrap_or_default(),
+                    schedule
+                        .latest_inbox_confirmed_delivery_proof
+                        .clone()
+                        .unwrap_or_default(),
                     schedule.latest_blocked_due_at.clone().unwrap_or_default(),
                     schedule
                         .latest_tick_error

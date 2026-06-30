@@ -2426,6 +2426,20 @@ impl Store {
         } else {
             None
         };
+        let email_delivery_verification =
+            self.enqueue_due_email_delivery_verification_jobs(max_jobs)?;
+        let email_delivery_verification = if email_delivery_verification.inspected > 0 {
+            Some(email_delivery_verification)
+        } else {
+            None
+        };
+        let email_mailbox_placement_repair =
+            self.enqueue_due_email_delivery_mailbox_repair_jobs(max_jobs)?;
+        let email_mailbox_placement_repair = if email_mailbox_placement_repair.inspected > 0 {
+            Some(email_mailbox_placement_repair)
+        } else {
+            None
+        };
         let knowledge_cluster_model_writer = self.enqueue_due_knowledge_cluster_model_writer_jobs(
             max_jobs, "mock", None, None, None, true,
         )?;
@@ -2506,6 +2520,8 @@ impl Store {
             radar_schedule,
             digest_alert_schedule,
             issue_schedule,
+            email_delivery_verification,
+            email_mailbox_placement_repair,
             knowledge_cluster_model_writer,
             knowledge_entity_resolution,
             knowledge_cluster_editorial_decision,

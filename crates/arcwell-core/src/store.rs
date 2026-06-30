@@ -7,6 +7,7 @@ mod commerce_store;
 mod cursors_edge;
 mod digest_schedule_store;
 mod governance;
+mod guard;
 mod health_worker;
 mod job_evidence_privacy_store;
 mod job_refresh_ops_store;

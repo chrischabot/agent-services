@@ -1003,6 +1003,92 @@ impl Store {
                 bearer.status = "refreshable".to_string();
             }
         }
+        let gmail_gaps = self.list_email_delivery_verification_gaps()?;
+        let gmail_unverified_count = gmail_gaps
+            .iter()
+            .filter(|gap| gap.verification_state == "mailbox_unverified")
+            .count();
+        let gmail_repairable_count = gmail_gaps
+            .iter()
+            .filter(|gap| {
+                matches!(
+                    gap.verification_state.as_str(),
+                    "mailbox_bad_placement_trash" | "mailbox_bad_placement_spam"
+                )
+            })
+            .count();
+        if gmail_unverified_count > 0 || gmail_repairable_count > 0 {
+            let access_ready = by_name
+                .get("GMAIL_ACCESS_TOKEN")
+                .is_some_and(|item| item.present && item.status != "expired");
+            let refresh_ready = by_name
+                .get("GMAIL_REFRESH_TOKEN")
+                .is_some_and(|item| item.present && item.status != "expired");
+            let client_ready = by_name
+                .get("GMAIL_CLIENT_ID")
+                .or_else(|| by_name.get("GOOGLE_CLIENT_ID"))
+                .is_some_and(|item| item.present && item.status != "expired");
+            let gmail_scope_warning = format!(
+                "Gmail mailbox verification has {gmail_unverified_count} unverified gap(s) and {gmail_repairable_count} Trash/Spam repairable gap(s); stored Gmail OAuth credentials must include https://www.googleapis.com/auth/gmail.readonly for verification and https://www.googleapis.com/auth/gmail.modify for placement repair."
+            );
+            if !access_ready && !(refresh_ready && client_ready) {
+                push_secret_warning(
+                    &mut by_name,
+                    "GMAIL_ACCESS_TOKEN",
+                    "gmail",
+                    Some("gmail"),
+                    &format!(
+                        "{gmail_scope_warning} GMAIL_ACCESS_TOKEN is missing or expired and Arcwell lacks complete stored refresh material."
+                    ),
+                );
+            }
+            if !refresh_ready {
+                push_secret_warning(
+                    &mut by_name,
+                    "GMAIL_REFRESH_TOKEN",
+                    "gmail",
+                    Some("gmail"),
+                    &format!(
+                        "{gmail_scope_warning} GMAIL_REFRESH_TOKEN is missing or expired, so daemon-owned Gmail mailbox verification/repair cannot recover after access-token expiry."
+                    ),
+                );
+            }
+            if !client_ready {
+                push_secret_warning(
+                    &mut by_name,
+                    "GMAIL_CLIENT_ID",
+                    "gmail",
+                    Some("gmail"),
+                    &format!(
+                        "{gmail_scope_warning} GMAIL_CLIENT_ID or GOOGLE_CLIENT_ID is missing or expired, so daemon-owned Gmail OAuth refresh cannot run."
+                    ),
+                );
+            }
+            if refresh_ready && client_ready {
+                if let Some(warning) = self.gmail_oauth_refresh_policy_warning() {
+                    push_secret_warning(
+                        &mut by_name,
+                        "GMAIL_OAUTH_REFRESH_POLICY",
+                        "gmail",
+                        Some("gmail"),
+                        &warning,
+                    );
+                    if let Some(access) = by_name.get_mut("GMAIL_ACCESS_TOKEN") {
+                        access.warnings.push(warning);
+                    }
+                } else if let Some(access) = by_name.get_mut("GMAIL_ACCESS_TOKEN")
+                    && matches!(access.status.as_str(), "expired" | "expiring_soon")
+                {
+                    let secret_name = access.name.clone();
+                    access.warnings.retain(|warning| {
+                        !(warning.starts_with(&format!("secret {secret_name} "))
+                            && (warning.contains(" expired at ")
+                                || warning.contains(" expires soon at ")))
+                    });
+                    access.status = "refreshable".to_string();
+                }
+            }
+        }
         Ok(by_name.into_values().collect())
     }
 
@@ -1026,6 +1112,31 @@ impl Store {
             )),
             Err(error) => Some(format!(
                 "Arcwell cannot verify provider.oauth policy for X token refresh: {}",
+                redact_secret_like_text(&error.to_string())
+            )),
+        }
+    }
+
+    pub(crate) fn gmail_oauth_refresh_policy_warning(&self) -> Option<String> {
+        match self.policy_explain(PolicyRequest {
+            action: "provider.oauth".to_string(),
+            package: Some("arcwell-email".to_string()),
+            provider: Some("gmail".to_string()),
+            source: Some("gmail_oauth".to_string()),
+            channel: Some("email".to_string()),
+            subject: None,
+            target: Some("https://oauth2.googleapis.com".to_string()),
+            projected_usd: Some(estimated_network_fetch_cost(1)),
+            metadata: json!({ "operation": "refresh", "health_check": true }),
+            untrusted_excerpt: None,
+        }) {
+            Ok(explanation) if explanation.allowed => None,
+            Ok(explanation) => Some(format!(
+                "Arcwell cannot auto-refresh expired GMAIL_ACCESS_TOKEN because provider.oauth policy for arcwell-email/gmail_oauth is {}; reason: {}",
+                explanation.effect, explanation.reason
+            )),
+            Err(error) => Some(format!(
+                "Arcwell cannot verify provider.oauth policy for Gmail token refresh: {}",
                 redact_secret_like_text(&error.to_string())
             )),
         }

@@ -104,14 +104,82 @@ fn severe_ops_issue_schedule_summary_surfaces_latest_sent_and_blocked_ticks() {
             "2026-06-30T06:00:00Z",
         )
         .unwrap();
+    let card = seed_knowledge_source_card(
+        &store,
+        "issue-schedule-delivery-proof",
+        "A provider-accepted email send still needs mailbox-observed proof before ops can call it received.",
+    );
+    let digest = store
+        .create_digest_candidate("Mailbox proof distinction", std::slice::from_ref(&card.id))
+        .unwrap();
     store
-        .update_issue_schedule_tick(&sent_tick.id, "sent", None, None, None)
+        .approve_digest_candidate(&digest.id, Some("test"), Some("ops proof fixture"))
+        .unwrap();
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted body",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": {
+                    "message_id": "<ops-proof@example.com>",
+                    "delivered": [],
+                    "queued": []
+                }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        attempt.delivery_proof,
+        "provider_accepted_mailbox_unverified"
+    );
+    assert_eq!(
+        attempt.provider_message_id.as_deref(),
+        Some("<ops-proof@example.com>")
+    );
+    let delivery = store
+        .get_or_create_digest_delivery(
+            &digest.id,
+            "email",
+            "email:friend@example.com",
+            "email:friend@example.com",
+            "ops-proof",
+        )
+        .unwrap();
+    let delivery = store
+        .update_digest_delivery(
+            &delivery.id,
+            "sent",
+            None,
+            Some(&message.id),
+            Some(&attempt.id),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(&sent_tick.id, "sent", None, Some(&delivery.id), None)
         .unwrap();
     let blocked_tick = store
         .create_issue_schedule_tick(
             &schedule.id,
             "issue-ops-summary-blocked",
-            "2026-07-01T06:00:00Z",
+            "2026-06-29T06:00:00Z",
         )
         .unwrap();
     store
@@ -123,29 +191,81 @@ fn severe_ops_issue_schedule_summary_surfaces_latest_sent_and_blocked_ticks() {
             Some("digest candidate Email delivery blocked: notes are too long"),
         )
         .unwrap();
+    let manual_tick = store
+        .create_issue_schedule_tick(
+            &schedule.id,
+            "manual-ops-summary-rerun",
+            "2026-07-01T12:00:00Z",
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(&manual_tick.id, "sent", None, None, None)
+        .unwrap();
 
     let summary = store.issue_schedule_ops_summary().unwrap();
     let schedule_summary = summary
         .iter()
         .find(|item| item.schedule_id == schedule.id)
         .unwrap();
-    assert_eq!(schedule_summary.tick_status_counts.get("sent"), Some(&1));
+    assert_eq!(schedule_summary.tick_status_counts.get("sent"), Some(&2));
     assert_eq!(schedule_summary.tick_status_counts.get("blocked"), Some(&1));
+    assert_eq!(schedule_summary.tick_type_counts.get("scheduled"), Some(&2));
+    assert_eq!(schedule_summary.tick_type_counts.get("manual"), Some(&1));
     assert_eq!(
         schedule_summary.latest_tick_due_at.as_deref(),
-        Some("2026-07-01T06:00:00Z")
+        Some("2026-07-01T12:00:00Z")
     );
+    assert_eq!(schedule_summary.latest_tick_status.as_deref(), Some("sent"));
     assert_eq!(
-        schedule_summary.latest_tick_status.as_deref(),
-        Some("blocked")
-    );
-    assert_eq!(
-        schedule_summary.latest_sent_due_at.as_deref(),
+        schedule_summary.latest_scheduled_tick_due_at.as_deref(),
         Some("2026-06-30T06:00:00Z")
     );
     assert_eq!(
+        schedule_summary.latest_scheduled_tick_status.as_deref(),
+        Some("sent")
+    );
+    assert_eq!(
+        schedule_summary
+            .latest_scheduled_tick_delivery_proof
+            .as_deref(),
+        Some("provider_accepted_mailbox_unverified")
+    );
+    let verification_gaps = store.list_email_delivery_verification_gaps().unwrap();
+    assert_eq!(verification_gaps.len(), 1);
+    assert_eq!(verification_gaps[0].delivery_attempt_id, attempt.id);
+    assert_eq!(
+        verification_gaps[0].verification_state,
+        "mailbox_unverified"
+    );
+    let verification_requests = store
+        .build_email_delivery_verification_requests(10, Some("mailbox_unverified"), None)
+        .unwrap();
+    assert_eq!(verification_requests.len(), 1);
+    assert_eq!(verification_requests[0].delivery_attempt_id, attempt.id);
+    assert_eq!(
+        verification_requests[0].search_query.as_deref(),
+        Some("rfc822msgid:<ops-proof@example.com>")
+    );
+    assert!(verification_requests[0].ready);
+    assert_eq!(
+        schedule_summary.latest_manual_tick_due_at.as_deref(),
+        Some("2026-07-01T12:00:00Z")
+    );
+    assert_eq!(
+        schedule_summary.latest_manual_tick_status.as_deref(),
+        Some("sent")
+    );
+    assert_eq!(
+        schedule_summary.latest_sent_due_at.as_deref(),
+        Some("2026-07-01T12:00:00Z")
+    );
+    assert_eq!(
+        schedule_summary.latest_inbox_confirmed_due_at.as_deref(),
+        None
+    );
+    assert_eq!(
         schedule_summary.latest_blocked_due_at.as_deref(),
-        Some("2026-07-01T06:00:00Z")
+        Some("2026-06-29T06:00:00Z")
     );
     assert!(
         schedule_summary
@@ -155,6 +275,178 @@ fn severe_ops_issue_schedule_summary_surfaces_latest_sent_and_blocked_ticks() {
             .contains("notes are too long"),
         "{schedule_summary:#?}"
     );
+    let not_found_observation = store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_not_found",
+            None,
+            Some("<ops-proof@example.com>"),
+            Some("2026-06-30T06:04:00Z"),
+            &json!({
+                "query": "rfc822msgid:<ops-proof@example.com>",
+                "result_count": 0
+            }),
+        )
+        .unwrap();
+    assert_eq!(not_found_observation.delivery_attempt_id, attempt.id);
+    assert_eq!(
+        not_found_observation.observation_status,
+        "mailbox_not_found"
+    );
+    let not_found_summary = store.issue_schedule_ops_summary().unwrap();
+    let not_found_schedule_summary = not_found_summary
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(
+        not_found_schedule_summary
+            .latest_scheduled_tick_delivery_proof
+            .as_deref(),
+        Some("provider_accepted_mailbox_not_observed")
+    );
+    let not_found_gaps = store.list_email_delivery_verification_gaps().unwrap();
+    assert_eq!(not_found_gaps.len(), 1);
+    assert_eq!(not_found_gaps[0].delivery_attempt_id, attempt.id);
+    assert_eq!(not_found_gaps[0].verification_state, "mailbox_not_observed");
+    let mailbox_health_key = format!("email:delivery:{}:mailbox", attempt.id);
+    let not_found_health = store
+        .get_source_health(&mailbox_health_key)
+        .unwrap()
+        .expect("mailbox-not-found observation should create a per-delivery alert");
+    assert_eq!(not_found_health.status, "failed");
+    assert!(
+        not_found_health
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("placement=not_observed"),
+        "{not_found_health:#?}"
+    );
+    let observation = store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_observed",
+            Some("gmail-message-id-ops-proof"),
+            Some("<ops-proof@example.com>"),
+            Some("2026-06-30T06:05:00Z"),
+            &json!({
+                "query": "rfc822msgid:<ops-proof@example.com>",
+                "result_count": 1,
+                "gmail_message_metadata": [{
+                    "id": "gmail-message-id-ops-proof",
+                    "label_ids": ["TRASH", "CATEGORY_UPDATES"],
+                    "placement": "trash"
+                }]
+            }),
+        )
+        .unwrap();
+    assert_eq!(observation.delivery_attempt_id, attempt.id);
+    assert_eq!(observation.observation_status, "mailbox_observed");
+    let observed_summary = store.issue_schedule_ops_summary().unwrap();
+    let observed_schedule_summary = observed_summary
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(
+        observed_schedule_summary
+            .latest_scheduled_tick_delivery_proof
+            .as_deref(),
+        Some("provider_accepted_mailbox_trash")
+    );
+    assert_eq!(
+        observed_schedule_summary
+            .latest_inbox_confirmed_due_at
+            .as_deref(),
+        None,
+        "Trash placement must not count as an Inbox-confirmed sent briefing"
+    );
+    let trash_gaps = store.list_email_delivery_verification_gaps().unwrap();
+    assert_eq!(trash_gaps.len(), 1);
+    assert_eq!(trash_gaps[0].delivery_attempt_id, attempt.id);
+    assert_eq!(
+        trash_gaps[0].verification_state,
+        "mailbox_bad_placement_trash"
+    );
+    let trash_requests = store
+        .build_email_delivery_verification_requests(10, Some("mailbox_bad_placement_trash"), None)
+        .unwrap();
+    assert_eq!(trash_requests.len(), 1);
+    assert_eq!(trash_requests[0].delivery_attempt_id, attempt.id);
+    let trash_health = store
+        .get_source_health(&mailbox_health_key)
+        .unwrap()
+        .expect("trash mailbox placement should remain visible in per-delivery health");
+    assert_eq!(trash_health.status, "failed");
+    assert!(
+        trash_health
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("placement=trash"),
+        "{trash_health:#?}"
+    );
+    let inbox_observation = store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_observed",
+            Some("gmail-message-id-ops-proof"),
+            Some("<ops-proof@example.com>"),
+            Some("2026-06-30T06:06:00Z"),
+            &json!({
+                "query": "rfc822msgid:<ops-proof@example.com>",
+                "result_count": 1,
+                "gmail_message_metadata": [{
+                    "id": "gmail-message-id-ops-proof",
+                    "label_ids": ["IMPORTANT", "CATEGORY_PERSONAL", "INBOX"],
+                    "placement": "inbox"
+                }]
+            }),
+        )
+        .unwrap();
+    assert_eq!(inbox_observation.delivery_attempt_id, attempt.id);
+    let inbox_summary = store.issue_schedule_ops_summary().unwrap();
+    let inbox_schedule_summary = inbox_summary
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(
+        inbox_schedule_summary
+            .latest_scheduled_tick_delivery_proof
+            .as_deref(),
+        Some("mailbox_observed_inbox")
+    );
+    assert_eq!(
+        inbox_schedule_summary
+            .latest_inbox_confirmed_due_at
+            .as_deref(),
+        Some("2026-06-30T06:00:00Z")
+    );
+    assert_eq!(
+        inbox_schedule_summary
+            .latest_inbox_confirmed_delivery_id
+            .as_deref(),
+        Some(delivery.id.as_str())
+    );
+    assert_eq!(
+        inbox_schedule_summary
+            .latest_inbox_confirmed_delivery_proof
+            .as_deref(),
+        Some("mailbox_observed_inbox")
+    );
+    assert!(
+        store
+            .list_email_delivery_verification_gaps()
+            .unwrap()
+            .is_empty()
+    );
+    let inbox_health = store
+        .get_source_health(&mailbox_health_key)
+        .unwrap()
+        .expect("inbox mailbox placement should leave a healthy per-delivery row");
+    assert_eq!(inbox_health.status, "healthy");
 
     let snapshot = store.ops_snapshot().unwrap();
     assert!(
@@ -162,7 +454,24 @@ fn severe_ops_issue_schedule_summary_surfaces_latest_sent_and_blocked_ticks() {
             .issue_schedule_summary
             .iter()
             .any(|item| item.schedule_id == schedule.id
-                && item.latest_tick_status.as_deref() == Some("blocked"))
+                && item.latest_tick_status.as_deref() == Some("sent")
+                && item.latest_scheduled_tick_status.as_deref() == Some("sent")
+                && item.latest_scheduled_tick_delivery_proof.as_deref()
+                    == Some("mailbox_observed_inbox")
+                && item.latest_inbox_confirmed_delivery_proof.as_deref()
+                    == Some("mailbox_observed_inbox"))
+    );
+    assert!(
+        snapshot
+            .channel_delivery_observations
+            .iter()
+            .any(|item| item.id == inbox_observation.id)
+    );
+    assert!(
+        snapshot
+            .channel_delivery_observations
+            .iter()
+            .any(|item| item.id == not_found_observation.id)
     );
 }
 
@@ -197,6 +506,756 @@ fn severe_due_delivery_jobs_do_not_wait_behind_bulk_backlog() {
 }
 
 #[test]
+fn severe_email_delivery_verification_request_jobs_are_worker_visible_and_throttled() {
+    // CLAIM: provider-accepted email delivery gaps become worker-visible
+    // verification-request jobs without pretending the worker can read Gmail.
+    // ORACLE: run_worker_once enqueues and completes a verification request
+    // ahead of older bulk backlog, emits rfc822msgid work for a host verifier,
+    // leaves the gap unresolved, and throttles immediate duplicate jobs.
+    // SEVERITY: Severe because a scheduled briefing can look "sent" while the
+    // user still has no mailbox-observed proof.
+    let store = test_store("email-verification-worker-visible");
+    let bulk = store
+        .insert_wiki_job_with_status("github_owner", "pending", json!({ "owner": "older-bulk" }))
+        .unwrap();
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "Provider accepted this briefing; mailbox proof is still separate.",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": {
+                    "message_id": "<worker-proof@example.com>",
+                    "delivered": [],
+                    "queued": []
+                }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        attempt.delivery_proof,
+        "provider_accepted_mailbox_unverified"
+    );
+    store
+        .conn
+        .execute(
+            "UPDATE channel_delivery_attempts SET created_at = ?2 WHERE id = ?1",
+            params![attempt.id, now_plus_seconds(-600)],
+        )
+        .unwrap();
+
+    let report = store.run_worker_once(1).unwrap();
+    assert_eq!(report.processed, 1, "{report:#?}");
+    assert_eq!(report.completed, 1, "{report:#?}");
+    let enqueue = report
+        .email_delivery_verification
+        .as_ref()
+        .expect("worker report must surface email verification enqueue state");
+    assert_eq!(enqueue.inspected, 1, "{enqueue:#?}");
+    assert_eq!(enqueue.enqueued, 1, "{enqueue:#?}");
+    assert_eq!(enqueue.request_count, 1, "{enqueue:#?}");
+    assert_eq!(report.jobs[0].kind, "email_delivery_verification_request");
+    assert_eq!(
+        store.get_wiki_job(&bulk.id).unwrap().unwrap().status,
+        "pending",
+        "email delivery proof requests must outrank unrelated bulk backlog"
+    );
+    let result = report.jobs[0].result_json.as_ref().unwrap();
+    assert_eq!(result["status"], json!("requests_ready"));
+    assert!(
+        result["boundary"]
+            .as_str()
+            .unwrap()
+            .contains("does not read Gmail")
+    );
+    assert_eq!(result["request_count"], json!(1));
+    assert_eq!(
+        result["requests"][0]["delivery_attempt_id"],
+        json!(attempt.id.clone())
+    );
+    assert_eq!(
+        result["requests"][0]["search_query"],
+        json!("rfc822msgid:<worker-proof@example.com>")
+    );
+    assert_eq!(
+        store.list_email_delivery_verification_gaps().unwrap().len(),
+        1,
+        "request generation must not mark mailbox proof observed"
+    );
+
+    let duplicate = store
+        .enqueue_due_email_delivery_verification_jobs(10)
+        .unwrap();
+    assert_eq!(duplicate.enqueued, 0, "{duplicate:#?}");
+    assert_eq!(duplicate.skipped, 1, "{duplicate:#?}");
+    assert_eq!(duplicate.recent_job_id, Some(report.jobs[0].id.clone()));
+}
+
+#[test]
+fn severe_bad_mailbox_placement_repair_jobs_are_worker_visible_and_credential_gated() {
+    // CLAIM: when Gmail observation proves a scheduled Arcwell email landed
+    // in Trash, the resident worker queues a repair job instead of treating
+    // provider acceptance as done or silently resending.
+    // ORACLE: a bad-placement gap becomes an email_delivery_mailbox_repair
+    // job ahead of bulk backlog; without Gmail modify credentials the job
+    // completes as missing_credential, records source health, and leaves the
+    // verification gap open.
+    // SEVERITY: Severe because a 7am briefing hidden in Trash is not a real
+    // user-visible delivery, but automatic uncredentialed mutation would be
+    // worse than the original miss.
+    let store = test_store("email-placement-repair-worker-visible");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-placement-repair-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_mailbox_repair"
+reason = "allow mailbox placement repair jobs"
+priority = 10
+"#,
+    );
+    let bulk = store
+        .insert_wiki_job_with_status("github_owner", "pending", json!({ "owner": "older-bulk" }))
+        .unwrap();
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "Provider accepted this briefing but mailbox placement was bad.",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<repair-worker@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_observed",
+            Some("gmail-trash-worker"),
+            Some("<repair-worker@example.com>"),
+            Some("2026-06-30T07:03:00Z"),
+            &json!({
+                "query": "rfc822msgid:<repair-worker@example.com>",
+                "result_count": 1,
+                "gmail_message_metadata": [{
+                    "id": "gmail-trash-worker",
+                    "label_ids": ["TRASH", "CATEGORY_UPDATES"],
+                    "placement": "trash"
+                }]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        store.list_email_delivery_verification_gaps().unwrap()[0].verification_state,
+        "mailbox_bad_placement_trash"
+    );
+
+    let report = store.run_worker_once(1).unwrap();
+    assert_eq!(report.processed, 1, "{report:#?}");
+    assert_eq!(report.completed, 1, "{report:#?}");
+    let enqueue = report
+        .email_mailbox_placement_repair
+        .as_ref()
+        .expect("worker report must surface mailbox placement repair enqueue state");
+    assert_eq!(enqueue.inspected, 1, "{enqueue:#?}");
+    assert_eq!(enqueue.repairable_count, 1, "{enqueue:#?}");
+    assert_eq!(enqueue.enqueued, 1, "{enqueue:#?}");
+    assert_eq!(report.jobs[0].kind, "email_delivery_mailbox_repair");
+    assert_eq!(
+        store.get_wiki_job(&bulk.id).unwrap().unwrap().status,
+        "pending",
+        "mailbox placement repair must outrank unrelated bulk backlog"
+    );
+    let result = report.jobs[0].result_json.as_ref().unwrap();
+    assert_eq!(result["action"], json!("email_delivery_mailbox_repair"));
+    assert_eq!(result["status"], json!("missing_credential"));
+    assert!(
+        result["boundary"]
+            .as_str()
+            .unwrap()
+            .contains("does not resend mail"),
+        "{result:#?}"
+    );
+    assert_eq!(result["report"]["missing_credential"], json!(true));
+    assert_eq!(result["report"]["repaired"], json!(0));
+    assert_eq!(
+        store.list_email_delivery_verification_gaps().unwrap()[0].verification_state,
+        "mailbox_bad_placement_trash",
+        "missing credentials must not create fake Inbox proof"
+    );
+    let health = store
+        .get_source_health("email:gmail-mailbox-repair")
+        .unwrap()
+        .expect("missing Gmail repair credential should be visible in source health");
+    assert_eq!(health.status, "failed");
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("GMAIL_ACCESS_TOKEN is not configured"),
+        "{health:#?}"
+    );
+
+    let duplicate = store
+        .enqueue_due_email_delivery_mailbox_repair_jobs(10)
+        .unwrap();
+    assert_eq!(duplicate.enqueued, 0, "{duplicate:#?}");
+    assert_eq!(duplicate.skipped, 1, "{duplicate:#?}");
+    assert_eq!(duplicate.recent_job_id, Some(report.jobs[0].id.clone()));
+}
+
+#[test]
+fn severe_email_delivery_verification_job_reads_gmail_when_configured() {
+    // CLAIM: the resident verification job can use configured Gmail API
+    // credentials to turn provider-accepted email sends into durable mailbox
+    // observations, instead of only emitting work for a host verifier.
+    // ORACLE: one worker pass queries the Gmail API mock, records one
+    // mailbox_observed and one mailbox_not_found observation, uses the
+    // provider-controlled outbound Message-ID returned by Cloudflare, and
+    // writes verifier source health without leaking the token.
+    // SEVERITY: Severe because otherwise "scheduled email delivered" can
+    // still mean only provider acceptance with no mailbox proof.
+    let store = test_store("email-verification-gmail-configured");
+    let (gmail_base, requests) = mock_recording_sequence_server(vec![
+        (
+            "200 OK",
+            "",
+            r#"{"messages":[{"id":"gmail-hit-1","threadId":"thread-hit-1"}]}"#,
+            "application/json",
+        ),
+        (
+            "200 OK",
+            "",
+            r#"{"id":"gmail-hit-1","threadId":"thread-hit-1","labelIds":["TRASH","CATEGORY_UPDATES"]}"#,
+            "application/json",
+        ),
+        ("200 OK", "", r#"{}"#, "application/json"),
+    ]);
+    store
+        .set_secret_value("GMAIL_ACCESS_TOKEN", "GMAIL_TOKEN_SHOULD_NOT_LEAK", "email")
+        .unwrap();
+    store
+        .set_secret_value("GMAIL_API_BASE", &gmail_base, "email")
+        .unwrap();
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-verification-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_verification_request"
+reason = "allow mailbox verifier job enqueue"
+priority = 10
+
+[[rules]]
+id = "allow-gmail-mailbox-verifier"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-email"
+provider = "gmail"
+source = "email_delivery_mailbox_verify"
+reason = "allow bounded Gmail mailbox verification"
+priority = 10
+"#,
+    );
+    let hit_message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted, should be found",
+            None,
+            None,
+        )
+        .unwrap();
+    let hit_attempt = store
+        .record_channel_delivery_attempt(
+            &hit_message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "id": "provider-opaque-hit" },
+                "arcwell": { "outbound_message_id": "<arcwell-hit@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    let miss_message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted, should not be found",
+            None,
+            None,
+        )
+        .unwrap();
+    let miss_attempt = store
+        .record_channel_delivery_attempt(
+            &miss_message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<provider-miss@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE channel_delivery_attempts SET created_at = ?2 WHERE id = ?1",
+            params![hit_attempt.id, now_plus_seconds(-500)],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE channel_delivery_attempts SET created_at = ?2 WHERE id = ?1",
+            params![miss_attempt.id, now_plus_seconds(-600)],
+        )
+        .unwrap();
+
+    let report = store.run_worker_once(2).unwrap();
+    assert_eq!(report.processed, 1, "{report:#?}");
+    assert_eq!(report.completed, 1, "{report:#?}");
+    let result = report.jobs[0].result_json.as_ref().unwrap();
+    assert_eq!(result["action"], "email_delivery_mailbox_verify");
+    assert_eq!(result["status"], "mailbox_verification_complete");
+    assert_eq!(result["report"]["observed"], 1);
+    assert_eq!(result["report"]["not_found"], 1);
+    assert!(
+        !format!("{result:#?}").contains("GMAIL_TOKEN_SHOULD_NOT_LEAK"),
+        "{result:#?}"
+    );
+    let observations = store.list_channel_delivery_observations(None).unwrap();
+    assert_eq!(observations.len(), 2, "{observations:#?}");
+    assert!(observations.iter().any(|observation| {
+        observation.delivery_attempt_id == hit_attempt.id
+            && observation.observation_status == "mailbox_observed"
+            && observation.mailbox_message_id.as_deref() == Some("gmail-hit-1")
+            && observation.provider_message_id.as_deref() == Some("<arcwell-hit@example.com>")
+            && observation.evidence["matched_by"] == "gmail_api_message_id_search"
+            && observation.evidence["gmail_message_metadata"][0]["placement"] == "trash"
+            && observation.evidence["gmail_message_metadata"][0]["label_ids"][0] == "TRASH"
+    }));
+    assert!(observations.iter().any(|observation| {
+        observation.delivery_attempt_id == miss_attempt.id
+            && observation.observation_status == "mailbox_not_found"
+            && observation.mailbox_message_id.is_none()
+            && observation.provider_message_id.as_deref() == Some("<provider-miss@example.com>")
+    }));
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 3, "{captured:#?}");
+    assert!(
+        captured[0].contains("q=rfc822msgid%3A%3Carcwell-hit%40example.com%3E"),
+        "{}",
+        captured[0]
+    );
+    assert!(
+        captured[1].contains("/gmail/v1/users/me/messages/gmail-hit-1?format=metadata"),
+        "{}",
+        captured[1]
+    );
+    assert!(
+        captured[2].contains("q=rfc822msgid%3A%3Cprovider-miss%40example.com%3E"),
+        "{}",
+        captured[2]
+    );
+    let health = store
+        .get_source_health("email:gmail-mailbox-verifier")
+        .unwrap()
+        .expect("gmail verifier source health should be written");
+    assert_eq!(health.status, "healthy");
+}
+
+#[test]
+fn severe_email_mailbox_repair_moves_bad_placement_to_inbox_and_records_proof() {
+    // CLAIM: a provider-accepted email that Gmail placed in Trash can be
+    // deliberately repaired with Gmail modify scope, and Arcwell only clears
+    // the delivery gap after recording post-repair Inbox metadata.
+    // ORACLE: the mock Gmail API sees a labels.modify request that adds INBOX
+    // and removes TRASH/SPAM, followed by a metadata fetch whose Inbox labels
+    // become a fresh mailbox observation and clear the verification gap.
+    // SEVERITY: Severe because "sent" is not useful if the only copy is
+    // hidden in Trash, and silent resend/mutation would be unsafe.
+    let store = test_store("email-mailbox-placement-repair");
+    let (gmail_base, requests) = mock_recording_sequence_server(vec![
+        (
+            "200 OK",
+            "",
+            r#"{"id":"gmail-trash-1","threadId":"thread-trash-1","labelIds":["IMPORTANT","CATEGORY_PERSONAL","INBOX"]}"#,
+            "application/json",
+        ),
+        (
+            "200 OK",
+            "",
+            r#"{"id":"gmail-trash-1","threadId":"thread-trash-1","labelIds":["IMPORTANT","CATEGORY_PERSONAL","INBOX"]}"#,
+            "application/json",
+        ),
+    ]);
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-gmail-mailbox-repair"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-email"
+provider = "gmail"
+source = "email_delivery_mailbox_repair"
+reason = "allow bounded Gmail mailbox repair"
+priority = 10
+"#,
+    );
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted but Gmail placed it in Trash",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<repair-proof@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .record_channel_delivery_observation(
+            &attempt.id,
+            "gmail",
+            "mailbox_observed",
+            Some("gmail-trash-1"),
+            Some("<repair-proof@example.com>"),
+            Some("2026-06-30T07:01:00Z"),
+            &json!({
+                "query": "rfc822msgid:<repair-proof@example.com>",
+                "result_count": 1,
+                "gmail_message_metadata": [{
+                    "id": "gmail-trash-1",
+                    "label_ids": ["TRASH", "CATEGORY_UPDATES"],
+                    "placement": "trash"
+                }]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        store.list_email_delivery_verification_gaps().unwrap()[0].verification_state,
+        "mailbox_bad_placement_trash"
+    );
+
+    let report = store
+        .repair_email_delivery_mailbox_placement_with_gmail(
+            10,
+            Some("mailbox_bad_placement_trash"),
+            None,
+            Some("GMAIL_MODIFY_TOKEN_SHOULD_NOT_LEAK"),
+            Some(&gmail_base),
+        )
+        .unwrap();
+    assert_eq!(report.inspected, 1, "{report:#?}");
+    assert_eq!(report.eligible, 1, "{report:#?}");
+    assert_eq!(report.repaired, 1, "{report:#?}");
+    assert_eq!(report.skipped, 0, "{report:#?}");
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(report.observations.len(), 1, "{report:#?}");
+    assert_eq!(
+        report.observations[0].observation_source,
+        "gmail_api_repair"
+    );
+    assert_eq!(
+        report.observations[0].evidence["gmail_message_metadata"][0]["placement"],
+        json!("inbox")
+    );
+    assert!(
+        !serde_json::to_string(&report)
+            .unwrap()
+            .contains("GMAIL_MODIFY_TOKEN_SHOULD_NOT_LEAK")
+    );
+    assert!(
+        store
+            .list_email_delivery_verification_gaps()
+            .unwrap()
+            .is_empty()
+    );
+    let mailbox_health = store
+        .get_source_health(&format!("email:delivery:{}:mailbox", attempt.id))
+        .unwrap()
+        .expect("post-repair Inbox observation should leave healthy delivery health");
+    assert_eq!(mailbox_health.status, "healthy");
+    let repair_health = store
+        .get_source_health("email:gmail-mailbox-repair")
+        .unwrap()
+        .expect("repair source health should be written");
+    assert_eq!(repair_health.status, "healthy");
+
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2, "{captured:#?}");
+    assert!(
+        captured[0].contains("POST /gmail/v1/users/me/messages/gmail-trash-1/modify "),
+        "{}",
+        captured[0]
+    );
+    assert!(
+        captured[0].contains(r#""addLabelIds":["INBOX"]"#),
+        "{}",
+        captured[0]
+    );
+    assert!(
+        captured[0].contains(r#""removeLabelIds":["TRASH","SPAM"]"#),
+        "{}",
+        captured[0]
+    );
+    assert!(
+        captured[1].contains("/gmail/v1/users/me/messages/gmail-trash-1?format=metadata"),
+        "{}",
+        captured[1]
+    );
+}
+
+#[test]
+fn severe_email_delivery_verification_job_missing_gmail_token_stays_request_only() {
+    // CLAIM: absent Gmail credentials leave verification gaps untouched and
+    // emit host-verifier requests; they must not create fake observations.
+    let store = test_store("email-verification-gmail-missing-token");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-verification-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_verification_request"
+reason = "allow mailbox verifier request enqueue"
+priority = 10
+"#,
+    );
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted, but no Gmail credential exists",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<request-only@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE channel_delivery_attempts SET created_at = ?2 WHERE id = ?1",
+            params![attempt.id, now_plus_seconds(-600)],
+        )
+        .unwrap();
+
+    let report = store.run_worker_once(1).unwrap();
+    assert_eq!(report.completed, 1, "{report:#?}");
+    let result = report.jobs[0].result_json.as_ref().unwrap();
+    assert_eq!(result["action"], "email_delivery_verification_request");
+    assert!(
+        result["boundary"]
+            .as_str()
+            .unwrap()
+            .contains("GMAIL_ACCESS_TOKEN is not configured")
+    );
+    assert_eq!(
+        store
+            .list_channel_delivery_observations(None)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        store.list_email_delivery_verification_gaps().unwrap().len(),
+        1
+    );
+    let health = store
+        .get_source_health("email:gmail-mailbox-verifier")
+        .unwrap()
+        .expect("missing Gmail verifier credential should be visible in source health");
+    assert_eq!(health.status, "failed");
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("GMAIL_ACCESS_TOKEN is not configured"),
+        "{health:#?}"
+    );
+}
+
+#[test]
+fn severe_email_delivery_verification_job_policy_denial_records_no_observation() {
+    // CLAIM: Gmail mailbox verification is provider-network work and must be
+    // policy-gated before any mailbox observation is written.
+    let store = test_store("email-verification-gmail-policy-denied");
+    let gmail_base = mock_status_server(
+        "200 OK",
+        "",
+        r#"{"messages":[{"id":"gmail-hit"}]}"#,
+        "application/json",
+    );
+    store
+        .set_secret_value("GMAIL_ACCESS_TOKEN", "GMAIL_TOKEN_SHOULD_NOT_LEAK", "email")
+        .unwrap();
+    store
+        .set_secret_value("GMAIL_API_BASE", &gmail_base, "email")
+        .unwrap();
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-verification-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_verification_request"
+reason = "allow mailbox verifier job enqueue"
+priority = 10
+
+[[rules]]
+id = "deny-gmail-mailbox-verifier"
+effect = "deny"
+action = "provider.network"
+package = "arcwell-email"
+provider = "gmail"
+source = "email_delivery_mailbox_verify"
+reason = "gmail verification requires explicit approval"
+priority = 20
+"#,
+    );
+    let message = store
+        .record_channel_message(
+            "email",
+            "outgoing",
+            "email:friend@example.com",
+            "provider accepted, policy should block verifier",
+            None,
+            None,
+        )
+        .unwrap();
+    let attempt = store
+        .record_channel_delivery_attempt(
+            &message.id,
+            "email",
+            "email:friend@example.com",
+            true,
+            200,
+            &json!({
+                "success": true,
+                "result": { "message_id": "<policy-blocked@example.com>" }
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE channel_delivery_attempts SET created_at = ?2 WHERE id = ?1",
+            params![attempt.id, now_plus_seconds(-600)],
+        )
+        .unwrap();
+
+    let report = store.run_worker_once(1).unwrap();
+    assert_eq!(report.failed, 1, "{report:#?}");
+    assert_eq!(
+        store
+            .list_channel_delivery_observations(None)
+            .unwrap()
+            .len(),
+        0
+    );
+    let health = store
+        .get_source_health("email:gmail-mailbox-verifier")
+        .unwrap()
+        .expect("policy denial should be visible in source health");
+    assert_eq!(health.status, "failed");
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("policy denied provider.network"),
+        "{health:#?}"
+    );
+}
+
+#[test]
 fn severe_daily_briefing_delivery_text_stays_inside_channel_limit() {
     // CLAIM: a rich daily briefing source card may be longer than the email
     // channel should carry, but delivery rendering must stay inside the
@@ -227,7 +1286,7 @@ fn severe_daily_briefing_delivery_text_stays_inside_channel_limit() {
         provider: "arcwell".to_string(),
         summary: format!(
             "# AI Daily Briefing - 2026-06-30\n\n## Bottom Line\n{}\n",
-            "Long source-backed context. ".repeat(1400)
+            "Long reader-facing context. ".repeat(1400)
         ),
         claims: vec![],
         retrieved_at: Utc::now().to_rfc3339(),
@@ -238,12 +1297,58 @@ fn severe_daily_briefing_delivery_text_stays_inside_channel_limit() {
         updated_at: Utc::now().to_rfc3339(),
     };
 
-    let text = Store::knowledge_daily_briefing_delivery_text(&candidate, &briefing_card);
+    let text = Store::knowledge_daily_briefing_delivery_text(&candidate, &briefing_card).unwrap();
     assert!(text.len() < 20_000, "{}", text.len());
     validate_notes(&text).unwrap();
     let html = render_email_html_from_markdown("Arcwell AI daily briefing", &text).unwrap();
     validate_email_html(&html).unwrap();
     assert!(text.contains("Additional source details were omitted"));
+}
+
+#[test]
+fn severe_daily_briefing_delivery_text_blocks_internal_pipeline_language() {
+    // CLAIM: a stale or manually materialized daily briefing source card cannot
+    // bypass the renderer hygiene gate and send internal pipeline prose.
+    // ORACLE: the exact class of June 30 bad delivery text fails before the
+    // shared email body renderer can send it.
+    // SEVERITY: Severe because durable delivery rows can otherwise say "sent"
+    // while the user-visible briefing is a source-card bookkeeping dump.
+    let candidate = DigestCandidate {
+        id: "cand-daily-internal".to_string(),
+        topic: "Arcwell AI daily briefing: 2026-06-30".to_string(),
+        score: 0.9,
+        reason: "test".to_string(),
+        status: "approved".to_string(),
+        source_card_ids: vec!["src-daily-internal".to_string()],
+        review_status: "approved".to_string(),
+        reviewed_at: None,
+        reviewed_by: None,
+        review_note: None,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    let briefing_card = SourceCard {
+        id: "src-daily-internal".to_string(),
+        title: "Arcwell AI daily briefing 2026-06-30".to_string(),
+        url: "https://example.com/arcwell/knowledge-daily-briefing/internal".to_string(),
+        source_type: "knowledge_daily_briefing".to_string(),
+        provider: "arcwell".to_string(),
+        summary: "# AI Daily Briefing - 2026-06-30\n\nToday's issue is led by Knowledge Report: Reka Ai: model release activity. The system projected 2 durable source rows into the unified knowledge pipeline and stored source references from provider family buckets.".to_string(),
+        claims: vec![],
+        retrieved_at: Utc::now().to_rfc3339(),
+        wiki_page_id: "wiki-daily-internal".to_string(),
+        content_sha256: "sha".to_string(),
+        metadata: json!({ "source_kind": "knowledge_daily_briefing" }),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+
+    let error = Store::knowledge_daily_briefing_delivery_text(&candidate, &briefing_card)
+        .expect_err("internal pipeline language must block delivery text");
+    assert!(
+        error.to_string().contains("internal pipeline language"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -489,6 +1594,39 @@ fn severe_native_daily_briefing_worker_sends_human_readable_html_email_once() {
     let attempts = store.list_channel_delivery_attempts(None).unwrap();
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].ok);
+    assert_eq!(
+        attempts[0].provider_message_id.as_deref(),
+        Some("daily_briefing_email_ok")
+    );
+    let outbound_message_id = attempts[0]
+        .outbound_message_id
+        .as_deref()
+        .expect("email attempt should carry the provider outbound Message-ID");
+    assert_eq!(outbound_message_id, "daily_briefing_email_ok");
+    assert_eq!(
+        attempts[0].delivery_proof,
+        "provider_accepted_mailbox_unverified"
+    );
+    let verification_requests = store
+        .build_email_delivery_verification_requests(5, Some("mailbox_unverified"), None)
+        .unwrap();
+    let verification_request = verification_requests
+        .iter()
+        .find(|request| request.delivery_attempt_id == attempts[0].id)
+        .expect("scheduled email attempt should be verification-request visible");
+    assert_eq!(
+        verification_request.provider_message_id.as_deref(),
+        Some("daily_briefing_email_ok")
+    );
+    assert_eq!(
+        verification_request.outbound_message_id.as_deref(),
+        Some(outbound_message_id)
+    );
+    let expected_search_query = format!("rfc822msgid:{outbound_message_id}");
+    assert_eq!(
+        verification_request.search_query.as_deref(),
+        Some(expected_search_query.as_str())
+    );
 
     let captured = requests.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -500,6 +1638,18 @@ fn severe_native_daily_briefing_worker_sends_human_readable_html_email_once() {
         .nth(1)
         .expect("request body should be captured");
     let body_json: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(
+        body_json
+            .pointer("/headers/Message-ID")
+            .and_then(Value::as_str),
+        None
+    );
+    assert_eq!(
+        body_json
+            .pointer("/headers/X-Arcwell-Message-Id")
+            .and_then(Value::as_str),
+        Some(attempts[0].message_id.as_str())
+    );
     let text = body_json.get("text").and_then(Value::as_str).unwrap();
     let html = body_json.get("html").and_then(Value::as_str).unwrap();
     assert!(text.contains("AI Daily Briefing"));
@@ -681,7 +1831,7 @@ fn severe_daily_briefing_projection_ledger_does_not_become_fake_story() {
     let text = render_knowledge_daily_briefing(
         &schedule,
         &tick,
-        &[report],
+        std::slice::from_ref(&report),
         &cards,
         "2026-06-29T07:00:00+00:00",
         "2026-06-30T07:00:00+00:00",
@@ -691,6 +1841,20 @@ fn severe_daily_briefing_projection_ledger_does_not_become_fake_story() {
     assert!(text.contains("Quiet Day"), "{text}");
     assert!(text.contains("Quiet day"), "{text}");
     assert!(text.contains("last 24 hours"), "{text}");
+    let text_48h = render_knowledge_daily_briefing(
+        &schedule,
+        &tick,
+        std::slice::from_ref(&report),
+        &cards,
+        "2026-06-28T07:00:00+00:00",
+        "2026-06-30T07:00:00+00:00",
+        &BTreeMap::new(),
+    );
+    assert!(text_48h.contains("last 48 hours"), "{text_48h}");
+    assert!(
+        !text_48h.contains("last 24 hours"),
+        "48-hour one-off reports must not claim a daily window: {text_48h}"
+    );
     assert!(
         text.contains("old feed items, reply-level social chatter"),
         "{text}"
@@ -1613,6 +2777,11 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         "ops-backlog-c",
         "Ops backlog evidence says OpenAI developer documentation changed for the MCP release.",
     );
+    let card_d = seed_knowledge_source_card(
+        &store,
+        "ops-backlog-d",
+        "Ops backlog evidence says OpenAI SDK documentation changed for the MCP release.",
+    );
     let pending_digest = store
         .create_digest_candidate("Ordinary sourced note", std::slice::from_ref(&card_a.id))
         .unwrap();
@@ -1621,15 +2790,44 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         .create_digest_candidate("OpenAI MCP launch release", &[card_a.id.clone(), card_b.id])
         .unwrap();
     assert_eq!(ready_digest.status, "ready");
-    let approved_digest = store
+    let approved_sent_digest = store
         .create_digest_candidate("OpenAI MCP docs release", &[card_a.id.clone(), card_c.id])
         .unwrap();
-    assert_eq!(approved_digest.status, "ready");
+    assert_eq!(approved_sent_digest.status, "ready");
     store
         .approve_digest_candidate(
-            &approved_digest.id,
+            &approved_sent_digest.id,
             Some("ops-test"),
             Some("approved fixture"),
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO digest_deliveries
+              (id, candidate_id, channel, subject, target, idempotency_key, status,
+               policy_decision_id, channel_message_id, channel_delivery_attempt_id,
+               error, retry_at, created_at, updated_at)
+            VALUES
+              ('delivery-ops-backlog-sent', ?1, 'email', 'user:test', 'user:test',
+               'ops-backlog-sent', 'sent', NULL, NULL, NULL, NULL, NULL, ?2, ?2)
+            "#,
+            params![approved_sent_digest.id, "2026-06-04T01:00:00Z"],
+        )
+        .unwrap();
+    let approved_pending_delivery_digest = store
+        .create_digest_candidate(
+            "OpenAI MCP docs pending delivery",
+            &[card_a.id.clone(), card_d.id],
+        )
+        .unwrap();
+    assert_eq!(approved_pending_delivery_digest.status, "ready");
+    store
+        .approve_digest_candidate(
+            &approved_pending_delivery_digest.id,
+            Some("ops-test"),
+            Some("approved pending delivery fixture"),
         )
         .unwrap();
 
@@ -1680,7 +2878,14 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         .conn
         .execute(
             "UPDATE digest_candidates SET created_at = '2026-06-04T00:00:00Z' WHERE id = ?1",
-            [&approved_digest.id],
+            [&approved_sent_digest.id],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE digest_candidates SET created_at = '2026-06-07T00:00:00Z' WHERE id = ?1",
+            [&approved_pending_delivery_digest.id],
         )
         .unwrap();
     store
@@ -1709,7 +2914,12 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
     assert_eq!(snapshot.health.pending_candidates, 2);
     assert_eq!(snapshot.backlog.pending_memory_candidates, 2);
     assert_eq!(snapshot.backlog.pending_digest_candidates, 1);
-    assert_eq!(snapshot.backlog.approved_digest_candidates, 1);
+    assert_eq!(snapshot.backlog.approved_digest_candidates, 2);
+    assert_eq!(snapshot.backlog.approved_digest_candidates_sent, 1);
+    assert_eq!(
+        snapshot.backlog.approved_digest_candidates_pending_delivery,
+        1
+    );
     assert_eq!(snapshot.backlog.ready_digest_candidates, 1);
     assert_eq!(snapshot.backlog.pending_wiki_jobs, 3);
     assert_eq!(snapshot.backlog.pending_knowledge_jobs, 2);
@@ -1741,6 +2951,13 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
         Some("2026-06-04T00:00:00Z")
     );
     assert_eq!(
+        snapshot
+            .backlog
+            .oldest_approved_digest_candidate_pending_delivery_at
+            .as_deref(),
+        Some("2026-06-07T00:00:00Z")
+    );
+    assert_eq!(
         snapshot.backlog.oldest_pending_wiki_job_at.as_deref(),
         Some("2026-06-01T12:00:00Z")
     );
@@ -1770,7 +2987,7 @@ fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
             .digest_candidates_by_status
             .get("approved")
             .copied(),
-        Some(1)
+        Some(2)
     );
     assert_eq!(
         snapshot.backlog.wiki_jobs_by_status.get("pending").copied(),
@@ -2059,4 +3276,86 @@ fn severe_knowledge_projection_disambiguates_provider_named_github_owner() {
             .any(|relation| relation.relation_type == "owns_repo"
                 && relation.source_card_ids.contains(&card.id))
     );
+}
+
+#[test]
+fn severe_knowledge_projection_canonicalizes_github_owner_case() {
+    // CLAIM: GitHub owner canonical keys are case-insensitive while display
+    // names and repo names remain readable.
+    // ORACLE: an existing `github:owner:microsoft` entity and a later
+    // `Microsoft/agent-framework` release card project into one owner entity
+    // plus one repo entity, without alias-collision failure.
+    // SEVERITY: Severe because provider casing drift otherwise dead-letters
+    // backlog clustering for major orgs after source refreshes.
+    let store = test_store("knowledge-github-owner-case");
+    let owner_card = store
+        .add_source_card(SourceCardInput {
+            title: "GitHub repo microsoft/playwright".to_string(),
+            url: "https://github.com/microsoft/playwright".to_string(),
+            source_type: "github_repo".to_string(),
+            provider: "github".to_string(),
+            summary: "Microsoft maintains Playwright.".to_string(),
+            claims: vec![SourceClaim {
+                claim: "Microsoft maintains Playwright.".to_string(),
+                kind: "fact".to_string(),
+                confidence: 0.9,
+            }],
+            retrieved_at: Some("2026-06-29T01:00:00Z".to_string()),
+            metadata: json!({ "owner": "microsoft", "repo": "playwright" }),
+        })
+        .unwrap();
+    let first = store
+        .project_knowledge_from_source_card_query("Playwright", Some("Microsoft repo activity"), 10)
+        .unwrap();
+    assert!(first.entities.iter().any(|entity| {
+        entity.entity_type == "github_owner" && entity.canonical_key == "github:owner:microsoft"
+    }));
+
+    let release_card = store
+        .add_source_card(SourceCardInput {
+            title: "GitHub release Microsoft/agent-framework python-1.8.0".to_string(),
+            url: "https://github.com/microsoft/agent-framework/releases/tag/python-1.8.0"
+                .to_string(),
+            source_type: "github_release".to_string(),
+            provider: "github".to_string(),
+            summary: "Microsoft released agent-framework python-1.8.0.".to_string(),
+            claims: vec![SourceClaim {
+                claim: "Microsoft released agent-framework python-1.8.0.".to_string(),
+                kind: "release".to_string(),
+                confidence: 0.9,
+            }],
+            retrieved_at: Some("2026-06-30T01:00:00Z".to_string()),
+            metadata: json!({ "owner": "Microsoft", "repo": "agent-framework", "tag": "python-1.8.0" }),
+        })
+        .unwrap();
+    let second = store
+        .project_knowledge_from_source_card_query(
+            "agent-framework",
+            Some("Microsoft agent-framework releases"),
+            10,
+        )
+        .unwrap();
+    let owners = store
+        .list_knowledge_entities(100)
+        .unwrap()
+        .into_iter()
+        .filter(|entity| {
+            entity.entity_type == "github_owner"
+                && entity
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case("microsoft"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owners.len(), 1, "{owners:#?}");
+    assert_eq!(owners[0].canonical_key, "github:owner:microsoft");
+    assert!(owners[0].source_card_ids.contains(&owner_card.id));
+    assert!(owners[0].source_card_ids.contains(&release_card.id));
+    assert!(second.entities.iter().any(|entity| {
+        entity.entity_type == "github_repo"
+            && entity.canonical_key == "github:microsoft/agent-framework"
+            && entity
+                .aliases
+                .contains(&"Microsoft/agent-framework".to_string())
+    }));
 }

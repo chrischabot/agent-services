@@ -236,3 +236,74 @@ Implement `arcwell codex doctor --json` as a wrapper over existing dev-loop
 facts plus one real hook smoke. The first slice is valuable only if it catches a
 stale hook/plugin condition that a file-existence check would miss.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has several host-workflow guardrails that change the next step:
+
+- `scripts/arcwell-dev smoke/sync` exist for dev plugin regeneration and smoke.
+- `scripts/codex-hook-smoke` is part of the status matrix and proves
+  process-level Codex hook behavior against a disposable home.
+- The proof ledger records proof packets, claims, artifacts, and checks.
+- `arcwell-guard` now exists as a cross-model stop gate that captures goals and
+  reviews the uncommitted diff at `Stop`.
+- `docs/arcwell-controller-design.md` and the Codex host-adapter skill make
+  resident host-adapter work a real Arcwell boundary, not only a future note.
+- TODO still keeps fresh-thread Codex app smoke and live plugin/Claude host
+  proof open.
+
+The oh-my-codex lesson should now be a host-readiness and guardrail cockpit
+that composes dev-loop smoke, hook smoke, guard status, proof packets, plugin
+cache state, and fresh-thread proof requirements.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can tell whether the current Codex/Claude host integration is ready
+> for a claimed workflow by checking installed plugin freshness, hook behavior,
+> guard status, MCP tool visibility, proof packets, and fresh-thread smoke.
+
+Refutations:
+
+- `scripts/arcwell-dev sync` passed but the current Codex thread cannot see the
+  new MCP/slash surface.
+- Hook smoke passes in process but no live Codex app thread fired the hook.
+- Guard is installed but disabled or fail-open in a workflow that claims a
+  strict completion gate.
+- A proof packet exists but contains unresolved claims or missing/tampered
+  artifacts.
+- Host-adapter state is a stale snapshot but presented as live thread state.
+
+Revised implementation slices:
+
+1. Build `arcwell codex doctor --json` as a composed view of dev-loop status,
+   hook smoke, guard status, proof-ledger state, and plugin cache freshness.
+2. Add "fresh-thread required" as an explicit status, not a footnote.
+3. Add guard status into ops and proof packets for high-risk implementation
+   work.
+4. Add a live fresh-thread smoke script or checklist artifact that can be
+   recorded in the proof ledger.
+5. Keep Claude/Codex host sync states labeled as live, degraded, stale, or
+   manual snapshot.
+
+Keep from oh-my-codex:
+
+- real hook smokes;
+- plugin cache/version checks;
+- state-path validation;
+- dirty-worktree warnings;
+- owned-process cleanup discipline.
+
+Do not copy:
+
+- another tmux/HUD workflow unless Arcwell's controller needs it;
+- a parallel goal system outside guard/proof/project records;
+- broad team mode before single-host freshness proof.
+
+Next proof gate:
+
+- Local Proof: doctor fixtures distinguish synced plugin, stale plugin,
+  process-hook pass, hook fail, guard disabled, guard strict, and proof-packet
+  unresolved states.
+- Production Data Proof: a real fresh Codex app thread runs the dev plugin,
+  fires hooks, exposes MCP/slash surfaces, and records a proof packet.

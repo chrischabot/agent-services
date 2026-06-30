@@ -119,9 +119,112 @@ pub struct ChannelDeliveryAttempt {
     pub ok: bool,
     pub provider_status: i64,
     pub response: Value,
+    pub provider_message_id: Option<String>,
+    pub outbound_message_id: Option<String>,
+    pub delivery_proof: String,
     pub error: Option<String>,
     pub retry_at: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelDeliveryObservation {
+    pub id: String,
+    pub delivery_attempt_id: String,
+    pub message_id: String,
+    pub channel: String,
+    pub destination: String,
+    pub provider_message_id: Option<String>,
+    pub observation_source: String,
+    pub observation_status: String,
+    pub mailbox_message_id: Option<String>,
+    pub observed_at: String,
+    pub evidence: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailDeliveryVerificationGap {
+    pub delivery_attempt_id: String,
+    pub message_id: String,
+    pub destination: String,
+    pub provider_message_id: Option<String>,
+    pub outbound_message_id: Option<String>,
+    pub provider_status: i64,
+    pub provider_delivery_proof: String,
+    pub latest_observation_status: Option<String>,
+    pub latest_observation_at: Option<String>,
+    pub verification_state: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailDeliveryVerificationRequest {
+    pub delivery_attempt_id: String,
+    pub message_id: String,
+    pub destination: String,
+    pub provider_message_id: Option<String>,
+    pub outbound_message_id: Option<String>,
+    pub provider_status: i64,
+    pub provider_delivery_proof: String,
+    pub verification_state: String,
+    pub created_at: String,
+    pub observation_source: String,
+    pub search_query: Option<String>,
+    pub ready: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailMailboxVerificationReport {
+    pub inspected: usize,
+    pub ready: usize,
+    pub observed: usize,
+    pub not_found: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+    pub observations: Vec<ChannelDeliveryObservation>,
+    pub missing_credential: bool,
+    pub provider: String,
+    pub source_health_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailMailboxPlacementRepairReport {
+    pub inspected: usize,
+    pub eligible: usize,
+    pub repaired: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+    pub observations: Vec<ChannelDeliveryObservation>,
+    pub missing_credential: bool,
+    pub provider: String,
+    pub source_health_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthStart {
+    pub authorization_url: String,
+    pub state: String,
+    pub code_verifier: String,
+    pub code_challenge: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthTokenStoreReport {
+    pub stored: Vec<String>,
+    pub token_type: Option<String>,
+    pub expires_in: Option<i64>,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthReauthorizePreflightReport {
+    pub status: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -679,6 +782,7 @@ pub struct OpsSnapshot {
     pub watch_sources: Vec<WatchSource>,
     pub channel_messages: Vec<ChannelMessage>,
     pub channel_delivery_attempts: Vec<ChannelDeliveryAttempt>,
+    pub channel_delivery_observations: Vec<ChannelDeliveryObservation>,
     pub digest_candidates: Vec<DigestCandidate>,
     pub digest_deliveries: Vec<DigestDelivery>,
     pub issue_schedules: Vec<IssueSchedule>,
@@ -714,6 +818,8 @@ pub struct OpsBacklogSummary {
     pub pending_digest_candidates: i64,
     pub ready_digest_candidates: i64,
     pub approved_digest_candidates: i64,
+    pub approved_digest_candidates_sent: i64,
+    pub approved_digest_candidates_pending_delivery: i64,
     pub pending_wiki_jobs: i64,
     pub failed_wiki_jobs: i64,
     pub dead_lettered_wiki_jobs: i64,
@@ -726,6 +832,7 @@ pub struct OpsBacklogSummary {
     pub oldest_pending_digest_candidate_at: Option<String>,
     pub oldest_ready_digest_candidate_at: Option<String>,
     pub oldest_approved_digest_candidate_at: Option<String>,
+    pub oldest_approved_digest_candidate_pending_delivery_at: Option<String>,
     pub oldest_pending_wiki_job_at: Option<String>,
     pub oldest_pending_knowledge_job_at: Option<String>,
     pub next_pending_wiki_job_at: Option<String>,
@@ -745,14 +852,30 @@ pub struct IssueScheduleOpsSummary {
     pub minute: i64,
     pub catch_up_hours: i64,
     pub tick_status_counts: BTreeMap<String, i64>,
+    pub tick_type_counts: BTreeMap<String, i64>,
     pub latest_tick_due_at: Option<String>,
     pub latest_tick_status: Option<String>,
     pub latest_tick_created_at: Option<String>,
     pub latest_tick_updated_at: Option<String>,
     pub latest_tick_delivery_id: Option<String>,
+    pub latest_tick_delivery_proof: Option<String>,
     pub latest_tick_error: Option<String>,
+    pub latest_scheduled_tick_due_at: Option<String>,
+    pub latest_scheduled_tick_status: Option<String>,
+    pub latest_scheduled_tick_delivery_id: Option<String>,
+    pub latest_scheduled_tick_delivery_proof: Option<String>,
+    pub latest_scheduled_tick_error: Option<String>,
+    pub latest_manual_tick_due_at: Option<String>,
+    pub latest_manual_tick_status: Option<String>,
+    pub latest_manual_tick_delivery_id: Option<String>,
+    pub latest_manual_tick_delivery_proof: Option<String>,
+    pub latest_manual_tick_error: Option<String>,
     pub latest_sent_due_at: Option<String>,
     pub latest_sent_delivery_id: Option<String>,
+    pub latest_sent_delivery_proof: Option<String>,
+    pub latest_inbox_confirmed_due_at: Option<String>,
+    pub latest_inbox_confirmed_delivery_id: Option<String>,
+    pub latest_inbox_confirmed_delivery_proof: Option<String>,
     pub latest_blocked_due_at: Option<String>,
     pub latest_blocked_error: Option<String>,
 }

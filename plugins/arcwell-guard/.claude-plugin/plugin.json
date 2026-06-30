@@ -1,0 +1,19 @@
+{
+  "name": "arcwell-guard",
+  "version": "0.1.0",
+  "description": "Cross-model stop-gate: an independent model reviews each turn's work against the stated goal and blocks finishing on incomplete work or workarounds.",
+  "author": {
+    "name": "Chris Chabot",
+    "url": "https://github.com/chrischabot"
+  },
+  "homepage": "https://github.com/chrischabot/arcwell",
+  "repository": "https://github.com/chrischabot/arcwell",
+  "license": "MIT",
+  "keywords": [
+    "guardrail",
+    "review",
+    "stop-gate",
+    "codex",
+    "claude"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "arcwell-guard",
+  "version": "0.1.0",
+  "description": "Cross-model stop-gate: an independent model reviews each turn's work against the stated goal and blocks finishing on incomplete work or workarounds.",
+  "author": {
+    "name": "Chris Chabot",
+    "url": "https://github.com/chrischabot"
+  },
+  "homepage": "https://github.com/chrischabot/arcwell",
+  "repository": "https://github.com/chrischabot/arcwell",
+  "license": "MIT",
+  "keywords": [
+    "guardrail",
+    "review",
+    "stop-gate",
+    "codex",
+    "claude"
+  ],
+  "interface": {
+    "displayName": "Arcwell Guard",
+    "shortDescription": "Cross-model stop-gate review of every coding turn.",
+    "longDescription": "Captures the stated goal for each session, then at Stop time has the opposite model (Codex reviews Claude, Claude reviews Codex) adversarially review the actual diff against that goal. Blocks finishing when the work is incomplete, incorrect, or a workaround. Bounded iteration count, fail-open, and a kill switch keep it from ever trapping the agent.",
+    "developerName": "Chris Chabot",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/chrischabot/arcwell",
+    "brandColor": "#DC2626"
+  }
+}

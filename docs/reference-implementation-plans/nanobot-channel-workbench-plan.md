@@ -243,3 +243,70 @@ Add a read-only session replay/sanitizer over the existing Arcwell channel and
 run records. The first UI/workbench behavior should be inspectable session
 history and runtime events before any new always-on channel automation.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has more than a raw channel ledger:
+
+- `channel_messages`, channel authorizations, project bindings,
+  `channel_delivery_attempts`, and `channel_delivery_observations` exist.
+- The controller design has Phase 0 local ledger/router work; Telegram drain
+  routes recorded messages through the controller, and Codex host-adapter skill
+  work can consume pending actions.
+- Project status snapshots, work runs/events, proof packets, guard
+  goals/reviews, and ops UI summaries provide the raw material for a session
+  workbench.
+- Email verification gaps and delivery observations already show why replay
+  needs explicit source/observation labels.
+
+The nanobot lesson should now become "replay hygiene and runtime event
+ergonomics over current Arcwell sessions," not a second chat/session store.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can present a replay-safe, source-labeled session view across channel
+> messages, controller events, work runs, guard reviews, proof packets, and
+> delivery observations without feeding internal artifacts back as user text.
+
+Refutations:
+
+- Replay starts with orphan tool/delivery output.
+- Generated summaries, proof checks, or guard reviews appear as user-authored
+  messages.
+- Delivery provider acceptance is displayed as recipient observation.
+- Unknown channel senders can trigger project writes without authorization.
+- Runtime event ordering changes the meaning of a session.
+
+Revised implementation slices:
+
+1. Add a session/read-model over existing channel/controller/work/proof rows.
+2. Sanitize replay by role and origin: user text, assistant output, source
+   evidence, generated summary, guard review, proof check, delivery observation.
+3. Add event ordering and legal-slice tests before adding any interactive
+   workbench UI.
+4. Extend ops UI detail views to show a compact session timeline.
+5. Add pairing/authorization status to session views rather than creating a
+   separate pairing subsystem.
+
+Keep from nanobot:
+
+- legal context slicing;
+- artifact stripping on replay;
+- runtime event bus vocabulary;
+- streaming/reasoning/file-edit event types;
+- bounded sustained-goal continuation state.
+
+Do not copy:
+
+- JSONL as a second Arcwell session truth;
+- WebUI-first design before CLI/MCP/ops read models are stable;
+- hidden continuation prompts that bypass Arcwell proof/guard boundaries.
+
+Next proof gate:
+
+- Local Proof: a fixture timeline with channel messages, controller events,
+  proof packets, guard reviews, and delivery observations renders in legal
+  order with no internal artifact re-ingestion.
+- Production Data Proof: one real authorized channel/controller session is
+  replayed from durable rows and shows exact delivery-observation status.

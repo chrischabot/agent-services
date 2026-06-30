@@ -251,3 +251,71 @@ Implement read-only `arcwell context read/list/search` over source cards and
 wiki pages, with L0/L1 summaries and retrieval traces. Do not add filesystem
 mounting or local-file mutation in the first slice.
 
+## 2026-06-30 Refresh: Current Arcwell Shape
+
+Arcwell now has a larger context graph than the original plan assumed:
+
+- source cards, wiki pages, X canonical rows/projections, knowledge events,
+  clusters, reports, editorial decisions, entities, and relations;
+- project status snapshots, controller threads/runs/events/actions, work runs,
+  work events, proof packets, guard goals/reviews, channel messages, and
+  delivery observations;
+- search/report surfaces for source cards, X, radar, jobs, projects, and ops;
+- an active proof ledger that can already model claims, evidence, artifacts,
+  checks, and promotion status.
+
+The OpenViking lesson should be stable context URIs and layered summaries over
+existing Arcwell truth, not a new RAG filesystem. The proof ledger and
+knowledge graph are now better backing stores than a virtual filesystem would
+be.
+
+## 2026-06-30 Anti-Mirage Development
+
+Claim to build next:
+
+> Arcwell can expose stable, provenance-preserving context URIs over existing
+> source, wiki, knowledge, project, proof, guard, and delivery objects, with
+> bounded read/search and anti-pollution markers for injected recall.
+
+Refutations:
+
+- A context URI can escape to local filesystem paths.
+- A summary is returned without backing row IDs and source hashes.
+- Recalled/generated context is later captured as user-authored memory.
+- Cross-project/context-scope reads leak private evidence.
+- Retrieval traces cite model prose rather than source cards/proof artifacts.
+
+Revised implementation slices:
+
+1. Define `arcwell://` URI grammar over current object IDs:
+   source-card, wiki, X, knowledge-event, knowledge-cluster, project,
+   controller-run, proof-packet, guard-review, delivery-attempt.
+2. Add L0/L1 summaries only where source hashes and stale detection exist.
+3. Add `context_read` and `context_search` as bounded views, not filesystem
+   mutation.
+4. Add retrieval traces that point to proof/source/knowledge rows.
+5. Add anti-pollution wrappers for recalled context injected into agent prompts;
+   memory capture must strip or label those wrappers.
+
+Keep from OpenViking:
+
+- L0/L1/L2 layering;
+- `find` vs `search` distinction;
+- retrieval traces;
+- relation metadata;
+- anti-pollution envelope discipline.
+
+Do not copy:
+
+- mountable backend abstraction before URI/read/search proof;
+- multi-backend file routing where Arcwell has typed durable tables;
+- AGPL code or filesystem mutation semantics.
+
+Next proof gate:
+
+- Local Proof: URI parser rejects traversal/unknown mounts, reads source-card
+  and proof-packet contexts, records retrieval traces, and strips injected
+  context from memory capture.
+- Production Data Proof: a copied current home resolves a real question using
+  source-card/wiki/knowledge/proof contexts and produces an inspectable
+  retrieval trace without filesystem access.

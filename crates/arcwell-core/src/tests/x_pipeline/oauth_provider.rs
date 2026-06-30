@@ -67,6 +67,272 @@ fn x_oauth_exchange_and_refresh_store_tokens_without_echoing_values() {
 }
 
 #[test]
+fn gmail_oauth_exchange_and_refresh_store_tokens_without_echoing_values() {
+    // CLAIM: Gmail OAuth can establish and refresh the local verifier
+    // credential without printing or returning raw token values.
+    let store = test_store("gmail-oauth");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-gmail-oauth"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-email"
+provider = "gmail"
+source = "gmail_oauth"
+reason = "allow Gmail OAuth test"
+priority = 10
+"#,
+    );
+    let long_access_token = format!("gmail-access-{}", "a".repeat(240));
+    let long_refresh_token = format!("gmail-refresh-{}", "r".repeat(240));
+    let exchange_body = Box::leak(
+        json!({
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            "access_token": long_access_token,
+            "refresh_token": long_refresh_token
+        })
+        .to_string()
+        .into_boxed_str(),
+    );
+    let exchange_base = mock_base_server(exchange_body, "application/json");
+
+    let exchange = store
+        .gmail_oauth_exchange_code_with_base(
+            "client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:8766/callback",
+            &format!("code-{}", "c".repeat(240)),
+            &format!("verifier-{}", "v".repeat(240)),
+            Some("client-secret"),
+            &exchange_base,
+        )
+        .unwrap();
+    let exchange_json = serde_json::to_string(&exchange).unwrap();
+    assert_eq!(
+        exchange.stored,
+        vec![
+            "GMAIL_ACCESS_TOKEN".to_string(),
+            "GMAIL_REFRESH_TOKEN".to_string()
+        ]
+    );
+    assert!(!exchange_json.contains("gmail-access-"));
+    assert!(!exchange_json.contains("gmail-refresh-"));
+    assert!(
+        store
+            .get_secret_value("GMAIL_ACCESS_TOKEN")
+            .unwrap()
+            .unwrap()
+            .starts_with("gmail-access-")
+    );
+
+    let refresh_body = Box::leak(
+        json!({
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "access_token": "fresh-gmail-access-token",
+            "refresh_token": "fresh-gmail-refresh-token"
+        })
+        .to_string()
+        .into_boxed_str(),
+    );
+    let refresh_base = mock_base_server(refresh_body, "application/json");
+    let refresh = store
+        .gmail_oauth_refresh_with_base("client-id.apps.googleusercontent.com", None, &refresh_base)
+        .unwrap();
+    let refresh_json = serde_json::to_string(&refresh).unwrap();
+    assert!(!refresh_json.contains("fresh-gmail-access-token"));
+    assert!(!refresh_json.contains("fresh-gmail-refresh-token"));
+    assert_eq!(
+        store
+            .get_secret_value("GMAIL_ACCESS_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some("fresh-gmail-access-token")
+    );
+}
+
+#[test]
+fn severe_gmail_oauth_authorize_url_uses_pkce_and_mailbox_scopes() {
+    // CLAIM: the Gmail verifier/repair credential asks for the mailbox API
+    // surface it needs and uses PKCE/offline access so the worker can later
+    // refresh without storing browser session material.
+    let store = test_store("gmail-oauth-url");
+    let start = store
+        .gmail_oauth_authorize_url(
+            "client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:8766/callback",
+            &[],
+        )
+        .unwrap();
+    assert!(
+        start
+            .authorization_url
+            .contains("code_challenge_method=S256")
+    );
+    assert!(start.authorization_url.contains("access_type=offline"));
+    assert!(start.authorization_url.contains("prompt=consent"));
+    assert!(
+        start
+            .scopes
+            .iter()
+            .any(|scope| scope == "https://www.googleapis.com/auth/gmail.readonly")
+    );
+    assert!(
+        start
+            .scopes
+            .iter()
+            .any(|scope| scope == "https://www.googleapis.com/auth/gmail.modify")
+    );
+    assert_eq!(start.code_verifier.len(), 64);
+    assert!(!start.code_challenge.is_empty());
+}
+
+#[test]
+fn severe_gmail_access_token_auto_refreshes_from_stored_refresh_material() {
+    // CLAIM: daemon-owned Gmail mailbox verification/repair does not require
+    // repeated manual access-token pasting when stored refresh/client material
+    // can refresh and write back a new access token.
+    // ORACLE: an expired GMAIL_ACCESS_TOKEN is replaced through the configured
+    // OAuth endpoint before use, and returned/stored reports omit token values.
+    // SEVERITY: Severe because scheduled mailbox verification is hollow if it
+    // works only until the first short-lived Google access token expires.
+    let store = test_store("gmail-access-auto-refresh");
+    let old_access = format!("old-gmail-access-{}", "a".repeat(48));
+    let refresh = format!("refresh-gmail-{}", "r".repeat(48));
+    let fresh_access = "fresh-gmail-access-ffffffffffffffffffffffffffffffffffffffffffffffff";
+    let expired = (Utc::now() - ChronoDuration::minutes(5)).to_rfc3339();
+    let (oauth_base, requests) = mock_recording_sequence_server(vec![(
+        "200 OK",
+        "",
+        r#"{
+            "access_token": "fresh-gmail-access-ffffffffffffffffffffffffffffffffffffffffffffffff",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.modify",
+            "token_type": "Bearer"
+        }"#,
+        "application/json",
+    )]);
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-gmail-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-email"
+provider = "gmail"
+source = "gmail_oauth"
+reason = "allow managed Gmail OAuth refresh"
+priority = 20
+"#,
+    );
+    store
+        .set_secret_value_with_metadata(
+            "GMAIL_ACCESS_TOKEN",
+            &old_access,
+            "gmail",
+            Some("gmail"),
+            Some(&expired),
+        )
+        .unwrap();
+    store
+        .set_secret_value_with_metadata(
+            "GMAIL_REFRESH_TOKEN",
+            &refresh,
+            "gmail",
+            Some("gmail"),
+            None,
+        )
+        .unwrap();
+    store
+        .set_secret_value_with_metadata(
+            "GMAIL_CLIENT_ID",
+            "client-id.apps.googleusercontent.com",
+            "gmail",
+            Some("gmail"),
+            None,
+        )
+        .unwrap();
+
+    let token = store
+        .configured_gmail_access_token_with_oauth_base(Some(&oauth_base))
+        .unwrap()
+        .expect("refreshed token");
+    assert_eq!(token, fresh_access);
+    assert_eq!(
+        store
+            .get_secret_value("GMAIL_ACCESS_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some(fresh_access)
+    );
+    let stored = store.list_secret_values().unwrap();
+    let access_health = stored
+        .iter()
+        .find(|item| item.name == "GMAIL_ACCESS_TOKEN")
+        .expect("stored access token metadata");
+    assert_eq!(access_health.provider.as_deref(), Some("gmail"));
+    assert!(access_health.expires_at.is_some());
+
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1, "{captured:#?}");
+    assert!(captured[0].contains("grant_type=refresh_token"));
+    assert!(captured[0].contains("client_id=client-id.apps.googleusercontent.com"));
+    assert!(captured[0].contains("refresh_token="));
+
+    let serialized = serde_json::to_string(&json!({
+        "stored": stored,
+        "secret_health": store.secret_health().unwrap(),
+    }))
+    .unwrap();
+    assert!(!serialized.contains(&old_access), "{serialized}");
+    assert!(!serialized.contains(&refresh), "{serialized}");
+    assert!(!serialized.contains(fresh_access), "{serialized}");
+}
+
+#[test]
+fn severe_policy_denied_gmail_oauth_blocks_before_secret_or_cost_mutation() {
+    // CLAIM: Gmail OAuth exchange requires provider.oauth policy before token
+    // storage, credential lookup, network exchange, or cost reservation.
+    let store = test_store("policy-gmail-oauth-deny");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "deny-gmail-oauth"
+effect = "deny"
+action = "provider.oauth"
+provider = "gmail"
+source = "gmail_oauth"
+reason = "Gmail OAuth disabled during policy test"
+"#,
+    );
+
+    let error = store
+        .gmail_oauth_exchange_code_with_base(
+            "client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:8766/callback",
+            "authorization-code",
+            "code-verifier",
+            Some("explicit-client-secret"),
+            "https://oauth2.googleapis.com",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("policy denied provider.oauth"), "{error}");
+    assert!(store.list_secret_values().unwrap().is_empty());
+    assert_eq!(store.cost_summary().unwrap().2, 0);
+
+    let decisions = store.list_policy_decisions(10).unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].action, "provider.oauth");
+    assert_eq!(decisions[0].effect, "deny");
+}
+
+#[test]
 fn severe_x_oauth_probe_proves_each_scope_endpoint_and_writes_ledgers() {
     // CLAIM: X OAuth scope probing proves each required user-context scope
     // by reaching a matching provider endpoint, not by trusting stored scope

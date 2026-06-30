@@ -2541,6 +2541,94 @@ reason = "allow source-card fixtures for policy-context test"
 }
 
 #[test]
+fn severe_email_delivery_verification_worker_enqueue_uses_knowledge_policy_context() {
+    // CLAIM: mailbox verification request jobs use the providerless
+    // arcwell-knowledge enqueue policy context, not the generic wiki fallback.
+    // ORACLE: a policy that only allows that exact context permits enqueue and
+    // records the verification state as target.
+    // SEVERITY: Severe because provider-accepted scheduled email otherwise
+    // remains unverified behind a misleading "no matching policy rule" error.
+    let store = test_store("email-verification-worker-policy-context");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-verification-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_verification_request"
+reason = "allow mailbox verification request jobs"
+"#,
+    );
+
+    let job = store
+        .enqueue_email_delivery_verification_request_job(5, Some("mailbox_unverified"), None)
+        .unwrap();
+    assert_eq!(job.kind, "email_delivery_verification_request");
+
+    let decisions = store.list_policy_decisions(10).unwrap();
+    let decision = decisions
+        .iter()
+        .find(|decision| decision.action == "worker.enqueue")
+        .expect("worker enqueue policy decision should be recorded");
+    assert_eq!(decision.effect, "allow");
+    assert_eq!(decision.package.as_deref(), Some("arcwell-knowledge"));
+    assert_eq!(decision.provider.as_deref(), None);
+    assert_eq!(
+        decision.source.as_deref(),
+        Some("email_delivery_verification_request")
+    );
+    assert_eq!(decision.target.as_deref(), Some("mailbox_unverified"));
+}
+
+#[test]
+fn severe_email_mailbox_repair_worker_enqueue_uses_knowledge_policy_context() {
+    // CLAIM: mailbox placement repair jobs use the providerless
+    // arcwell-knowledge enqueue policy context; Gmail network access is
+    // separately gated when the job executes.
+    // ORACLE: a policy that only allows that exact enqueue context permits
+    // queueing and records the bad-placement verification state as target.
+    // SEVERITY: Severe because a repairable hidden briefing should not be
+    // stranded behind a generic worker.enqueue policy miss.
+    let store = test_store("email-mailbox-repair-worker-policy-context");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-email-placement-repair-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "email_delivery_mailbox_repair"
+reason = "allow mailbox placement repair jobs"
+"#,
+    );
+
+    let job = store
+        .enqueue_email_delivery_mailbox_repair_job(5, Some("mailbox_bad_placement_trash"), None)
+        .unwrap();
+    assert_eq!(job.kind, "email_delivery_mailbox_repair");
+
+    let decisions = store.list_policy_decisions(10).unwrap();
+    let decision = decisions
+        .iter()
+        .find(|decision| decision.action == "worker.enqueue")
+        .expect("worker enqueue policy decision should be recorded");
+    assert_eq!(decision.effect, "allow");
+    assert_eq!(decision.package.as_deref(), Some("arcwell-knowledge"));
+    assert_eq!(decision.provider.as_deref(), None);
+    assert_eq!(
+        decision.source.as_deref(),
+        Some("email_delivery_mailbox_repair")
+    );
+    assert_eq!(
+        decision.target.as_deref(),
+        Some("mailbox_bad_placement_trash")
+    );
+}
+
+#[test]
 fn severe_policy_denied_queued_provider_job_fails_before_cost_network_or_wiki_write() {
     // CLAIM: Already queued provider jobs still hit policy before cost reservation,
     // provider network, or local wiki/source writes.

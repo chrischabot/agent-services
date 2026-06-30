@@ -427,7 +427,9 @@ impl Store {
         let mut entities = Vec::new();
         let mut by_key = BTreeMap::new();
         for input in inputs {
+            let input_key = input.canonical_key.clone();
             let entity = self.upsert_knowledge_entity(input)?;
+            by_key.insert(input_key, entity.clone());
             by_key.insert(entity.canonical_key.clone(), entity.clone());
             entities.push(entity);
         }

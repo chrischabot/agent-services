@@ -8,16 +8,27 @@ fn issue_schedule_status_rank(status: &str) -> u8 {
     }
 }
 
+fn issue_schedule_tick_type(tick_key: &str) -> &'static str {
+    if tick_key.starts_with("issue-") {
+        "scheduled"
+    } else if tick_key.starts_with("manual-") {
+        "manual"
+    } else {
+        "other"
+    }
+}
+
 impl Store {
     pub fn ops_snapshot(&self) -> Result<OpsSnapshot> {
-        let health = self.health()?;
+        let (health, x_stats) = self.health_with_x_stats()?;
         let worker = health.latest_worker_heartbeat.clone();
+        let secret_health = health.secret_health.clone();
         Ok(OpsSnapshot {
             health,
             worker,
             backlog: self.ops_backlog_summary()?,
             issue_schedule_summary: self.issue_schedule_ops_summary()?,
-            x_stats: self.x_stats()?,
+            x_stats,
             radar_runs: self.list_radar_runs()?.into_iter().take(50).collect(),
             radar_source_quality: self.list_all_radar_source_quality()?,
             radar_deliveries: self.list_radar_deliveries(None)?,
@@ -41,6 +52,7 @@ impl Store {
             watch_sources: self.list_watch_sources()?,
             channel_messages: self.list_channel_messages()?,
             channel_delivery_attempts: self.list_channel_delivery_attempts(None)?,
+            channel_delivery_observations: self.list_channel_delivery_observations(None)?,
             digest_candidates: self.list_digest_candidates()?,
             digest_deliveries: self.list_digest_deliveries(None)?,
             issue_schedules: self.list_issue_schedules()?,
@@ -64,8 +76,89 @@ impl Store {
             policy_decisions: self.list_policy_decisions(50)?,
             policy_approvals: self.list_policy_approvals(Some("pending"))?,
             secrets: self.list_secret_refs()?,
-            secret_health: self.secret_health()?,
+            secret_health,
         })
+    }
+
+    pub fn compact_ops_snapshot(&self) -> Result<Value> {
+        let (health, x_stats) = self.health_with_x_stats()?;
+        let secret_health = health.secret_health.clone();
+        Ok(json!({
+            "summary": "Compact ops snapshot. Use `arcwell ops` for the full local JSON payload.",
+            "health": health,
+            "backlog": self.ops_backlog_summary()?,
+            "issue_schedule_summary": self.issue_schedule_ops_summary()?,
+            "secret_health": secret_health,
+            "x_stats": x_stats,
+            "counts": self.ops_compact_counts()?,
+        }))
+    }
+
+    fn ops_compact_counts(&self) -> Result<Value> {
+        let tables = [
+            ("radar_runs", "radar_runs"),
+            ("radar_source_quality", "radar_source_quality"),
+            ("radar_deliveries", "radar_deliveries"),
+            ("knowledge_adapter_runs", "knowledge_adapter_runs"),
+            ("knowledge_entities", "knowledge_entities"),
+            (
+                "knowledge_entity_resolutions",
+                "knowledge_entity_resolutions",
+            ),
+            ("knowledge_relations", "knowledge_relations"),
+            ("knowledge_events", "knowledge_events"),
+            ("knowledge_clusters", "knowledge_clusters"),
+            (
+                "knowledge_editorial_decisions",
+                "knowledge_editorial_decisions",
+            ),
+            ("knowledge_reports", "knowledge_reports"),
+            ("x_knowledge_clusters", "x_knowledge_clusters"),
+            ("x_editorial_decisions", "x_editorial_decisions"),
+            ("jobs", "wiki_jobs"),
+            ("edge_events", "edge_events"),
+            ("cursors", "cursors"),
+            ("source_health", "source_health"),
+            ("projects", "projects"),
+            ("project_status_snapshots", "project_status_snapshots"),
+            ("source_cards", "source_cards"),
+            ("watch_sources", "watch_sources"),
+            ("channel_messages", "channel_messages"),
+            ("channel_delivery_attempts", "channel_delivery_attempts"),
+            (
+                "channel_delivery_observations",
+                "channel_delivery_observations",
+            ),
+            ("digest_candidates", "digest_candidates"),
+            ("digest_deliveries", "digest_deliveries"),
+            ("issue_schedules", "issue_schedules"),
+            ("issue_schedule_ticks", "issue_schedule_ticks"),
+            ("work_runs", "work_runs"),
+            ("procedures", "procedures"),
+            ("procedure_candidates", "procedure_candidates"),
+            ("memory_candidates", "candidates"),
+            ("memory_lifecycle_events", "memory_lifecycle_events"),
+            ("memory_decisions", "memory_decision_ledger"),
+            ("memory_forget_tombstones", "memory_forget_tombstones"),
+            ("import_runs", "import_runs"),
+            ("controller_threads", "controller_threads"),
+            ("controller_runs", "controller_runs"),
+            ("controller_events", "controller_events"),
+            ("controller_pending_actions", "controller_pending_actions"),
+            ("cost_policies", "cost_policies"),
+            ("cost_decisions", "cost_decisions"),
+            ("policy_decisions", "policy_decisions"),
+            ("policy_approvals", "policy_approvals"),
+            ("secrets", "secret_refs"),
+        ];
+        let mut counts = serde_json::Map::new();
+        for (key, table) in tables {
+            counts.insert(
+                key.to_string(),
+                json!(self.count_query(&format!("SELECT COUNT(*) FROM {table}"))?),
+            );
+        }
+        Ok(Value::Object(counts))
     }
 
     pub fn ops_backlog_summary(&self) -> Result<OpsBacklogSummary> {
@@ -93,6 +186,32 @@ impl Store {
             )?,
             approved_digest_candidates: self.count_query(
                 "SELECT COUNT(*) FROM digest_candidates WHERE status = 'approved'",
+            )?,
+            approved_digest_candidates_sent: self.count_query(
+                r#"
+                SELECT COUNT(*)
+                FROM digest_candidates candidate
+                WHERE candidate.status = 'approved'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM digest_deliveries delivery
+                    WHERE delivery.candidate_id = candidate.id
+                      AND delivery.status = 'sent'
+                  )
+                "#,
+            )?,
+            approved_digest_candidates_pending_delivery: self.count_query(
+                r#"
+                SELECT COUNT(*)
+                FROM digest_candidates candidate
+                WHERE candidate.status = 'approved'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM digest_deliveries delivery
+                    WHERE delivery.candidate_id = candidate.id
+                      AND delivery.status = 'sent'
+                  )
+                "#,
             )?,
             pending_wiki_jobs: self
                 .count_query("SELECT COUNT(*) FROM wiki_jobs WHERE status = 'pending'")?,
@@ -126,6 +245,19 @@ impl Store {
             )?,
             oldest_approved_digest_candidate_at: self.single_string_query(
                 "SELECT MIN(created_at) FROM digest_candidates WHERE status = 'approved'",
+            )?,
+            oldest_approved_digest_candidate_pending_delivery_at: self.single_string_query(
+                r#"
+                SELECT MIN(created_at)
+                FROM digest_candidates candidate
+                WHERE candidate.status = 'approved'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM digest_deliveries delivery
+                    WHERE delivery.candidate_id = candidate.id
+                      AND delivery.status = 'sent'
+                  )
+                "#,
             )?,
             oldest_pending_wiki_job_at: self
                 .single_string_query("SELECT MIN(created_at) FROM wiki_jobs WHERE status = 'pending'")?,
@@ -163,21 +295,58 @@ impl Store {
             });
 
             let mut tick_status_counts = BTreeMap::new();
+            let mut tick_type_counts = BTreeMap::new();
             for tick in &schedule_ticks {
                 *tick_status_counts.entry(tick.status.clone()).or_insert(0) += 1;
+                *tick_type_counts
+                    .entry(issue_schedule_tick_type(&tick.tick_key).to_string())
+                    .or_insert(0) += 1;
             }
 
             let latest_tick = schedule_ticks.last().copied();
+            let latest_scheduled_tick = schedule_ticks
+                .iter()
+                .rev()
+                .copied()
+                .find(|tick| issue_schedule_tick_type(&tick.tick_key) == "scheduled");
+            let latest_manual_tick = schedule_ticks
+                .iter()
+                .rev()
+                .copied()
+                .find(|tick| issue_schedule_tick_type(&tick.tick_key) == "manual");
             let latest_sent_tick = schedule_ticks
                 .iter()
                 .rev()
                 .copied()
                 .find(|tick| tick.status == "sent");
+            let mut latest_inbox_confirmed_tick = None;
+            let mut latest_inbox_confirmed_delivery_proof = None;
+            for tick in schedule_ticks
+                .iter()
+                .rev()
+                .copied()
+                .filter(|tick| tick.status == "sent")
+            {
+                let proof = self.issue_schedule_tick_delivery_proof(Some(tick))?;
+                if proof.as_deref() == Some("mailbox_observed_inbox") {
+                    latest_inbox_confirmed_tick = Some(tick);
+                    latest_inbox_confirmed_delivery_proof = proof;
+                    break;
+                }
+            }
             let latest_blocked_tick = schedule_ticks
                 .iter()
                 .rev()
                 .copied()
                 .find(|tick| tick.status == "blocked");
+            let latest_tick_delivery_proof =
+                self.issue_schedule_tick_delivery_proof(latest_tick)?;
+            let latest_scheduled_tick_delivery_proof =
+                self.issue_schedule_tick_delivery_proof(latest_scheduled_tick)?;
+            let latest_manual_tick_delivery_proof =
+                self.issue_schedule_tick_delivery_proof(latest_manual_tick)?;
+            let latest_sent_delivery_proof =
+                self.issue_schedule_tick_delivery_proof(latest_sent_tick)?;
 
             summaries.push(IssueScheduleOpsSummary {
                 schedule_id: schedule.id,
@@ -191,14 +360,35 @@ impl Store {
                 minute: schedule.minute,
                 catch_up_hours: schedule.catch_up_hours,
                 tick_status_counts,
+                tick_type_counts,
                 latest_tick_due_at: latest_tick.map(|tick| tick.due_at.clone()),
                 latest_tick_status: latest_tick.map(|tick| tick.status.clone()),
                 latest_tick_created_at: latest_tick.map(|tick| tick.created_at.clone()),
                 latest_tick_updated_at: latest_tick.map(|tick| tick.updated_at.clone()),
                 latest_tick_delivery_id: latest_tick.and_then(|tick| tick.delivery_id.clone()),
+                latest_tick_delivery_proof,
                 latest_tick_error: latest_tick.and_then(|tick| tick.error.clone()),
+                latest_scheduled_tick_due_at: latest_scheduled_tick.map(|tick| tick.due_at.clone()),
+                latest_scheduled_tick_status: latest_scheduled_tick.map(|tick| tick.status.clone()),
+                latest_scheduled_tick_delivery_id: latest_scheduled_tick
+                    .and_then(|tick| tick.delivery_id.clone()),
+                latest_scheduled_tick_delivery_proof,
+                latest_scheduled_tick_error: latest_scheduled_tick
+                    .and_then(|tick| tick.error.clone()),
+                latest_manual_tick_due_at: latest_manual_tick.map(|tick| tick.due_at.clone()),
+                latest_manual_tick_status: latest_manual_tick.map(|tick| tick.status.clone()),
+                latest_manual_tick_delivery_id: latest_manual_tick
+                    .and_then(|tick| tick.delivery_id.clone()),
+                latest_manual_tick_delivery_proof,
+                latest_manual_tick_error: latest_manual_tick.and_then(|tick| tick.error.clone()),
                 latest_sent_due_at: latest_sent_tick.map(|tick| tick.due_at.clone()),
                 latest_sent_delivery_id: latest_sent_tick.and_then(|tick| tick.delivery_id.clone()),
+                latest_sent_delivery_proof,
+                latest_inbox_confirmed_due_at: latest_inbox_confirmed_tick
+                    .map(|tick| tick.due_at.clone()),
+                latest_inbox_confirmed_delivery_id: latest_inbox_confirmed_tick
+                    .and_then(|tick| tick.delivery_id.clone()),
+                latest_inbox_confirmed_delivery_proof,
                 latest_blocked_due_at: latest_blocked_tick.map(|tick| tick.due_at.clone()),
                 latest_blocked_error: latest_blocked_tick.and_then(|tick| tick.error.clone()),
             });
@@ -210,6 +400,61 @@ impl Store {
                 .then_with(|| left.name.cmp(&right.name))
         });
         Ok(summaries)
+    }
+
+    fn issue_schedule_tick_delivery_proof(
+        &self,
+        tick: Option<&IssueScheduleTick>,
+    ) -> Result<Option<String>> {
+        let Some(delivery_id) = tick.and_then(|tick| tick.delivery_id.as_deref()) else {
+            return Ok(None);
+        };
+        let Some(delivery) = self.get_digest_delivery(delivery_id)? else {
+            return Ok(Some("digest_delivery_missing".to_string()));
+        };
+        let Some(attempt_id) = delivery.channel_delivery_attempt_id.as_deref() else {
+            return Ok(Some(format!("digest_delivery_{}", delivery.status)));
+        };
+        let Some(attempt) = self.get_channel_delivery_attempt(attempt_id)? else {
+            return Ok(Some("channel_delivery_attempt_missing".to_string()));
+        };
+        if let Some(observation) = self.latest_channel_delivery_observation(attempt_id)? {
+            let proof = match observation.observation_status.as_str() {
+                "mailbox_observed" => match super::channel_delivery::mailbox_observation_placement(
+                    &observation.observation_status,
+                    &observation.evidence,
+                )
+                .as_deref()
+                {
+                    Some("inbox") => "mailbox_observed_inbox".to_string(),
+                    Some("trash") => {
+                        delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "trash")
+                    }
+                    Some("spam") => {
+                        delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "spam")
+                    }
+                    Some("sent") => {
+                        delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "sent")
+                    }
+                    Some("other") => {
+                        delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "other")
+                    }
+                    Some(_) | None => delivery_proof_with_mailbox_observation(
+                        &attempt.delivery_proof,
+                        "placement_unknown",
+                    ),
+                },
+                "mailbox_not_found" => {
+                    delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "not_observed")
+                }
+                "mailbox_unknown" => {
+                    delivery_proof_with_mailbox_observation(&attempt.delivery_proof, "unknown")
+                }
+                _ => attempt.delivery_proof,
+            };
+            return Ok(Some(proof));
+        }
+        Ok(Some(attempt.delivery_proof))
     }
 
     pub fn create_research_plan(&self, query: &str, max_sources: usize) -> Result<ResearchPlan> {
@@ -657,4 +902,11 @@ impl Store {
             .optional()
             .map_err(Into::into)
     }
+}
+
+fn delivery_proof_with_mailbox_observation(provider_proof: &str, mailbox_suffix: &str) -> String {
+    let base = provider_proof
+        .strip_suffix("_mailbox_unverified")
+        .unwrap_or(provider_proof);
+    format!("{base}_mailbox_{mailbox_suffix}")
 }

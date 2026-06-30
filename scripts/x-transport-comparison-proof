@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Compare Arcwell X direct-api, xurl-token-api, and x-api-mcp transports.
+
+The script uses copied ARCWELL_HOME directories so cursor/source-health changes
+from one transport do not contaminate the other. It writes a redacted proof
+packet and a compact scorecard.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+
+TOKENISH = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}")
+LONG_SECRET = re.compile(r"[A-Za-z0-9._~+/=-]{36,}")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def sanitize(value: str) -> str:
+    value = TOKENISH.sub(r"\1[REDACTED]", value)
+    value = LONG_SECRET.sub("[REDACTED]", value)
+    return value
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def ensure_arcwell_bin(path: str) -> list[str]:
+    if path:
+        return [path]
+    candidate = repo_root() / "target" / "debug" / "arcwell"
+    if candidate.exists() and os.access(candidate, os.X_OK):
+        return [str(candidate)]
+    return ["cargo", "run", "-p", "arcwell-cli", "--"]
+
+
+def copy_home(source: Path, label: str) -> Path:
+    target = Path(tempfile.mkdtemp(prefix=f"arcwell-x-compare-{label}-"))
+    if source.exists():
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+    policy = r'''
+[[rules]]
+id = "x-compare-allow-recent-search"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_recent_search"
+reason = "copied-home X transport comparison"
+priority = 50
+
+[[rules]]
+id = "x-compare-allow-source-write"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "copied-home X transport comparison"
+priority = 50
+
+[[rules]]
+id = "x-compare-allow-xurl-token"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "xurl_token"
+reason = "copied-home X transport comparison"
+priority = 50
+'''
+    (target / "arcwell-policy.toml").write_text(policy, encoding="utf-8")
+    return target
+
+
+def run_json(command: list[str], *, env: dict[str, str], timeout: int) -> tuple[dict | None, dict]:
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+        stdout = proc.stdout
+        stderr = proc.stderr
+        returncode = proc.returncode
+        status = "passed" if returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        returncode = None
+        status = "timeout"
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    parsed = None
+    if status == "passed":
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            status = "failed"
+            stderr = (stderr + "\nfailed to parse JSON stdout").strip()
+    evidence = {
+        "status": status,
+        "returncode": returncode,
+        "duration_ms": elapsed_ms,
+        "stdout_excerpt": sanitize(stdout)[:4000],
+        "stderr_excerpt": sanitize(stderr)[:4000],
+    }
+    return parsed, evidence
+
+
+EXPECTED_TRANSPORT = {
+    "direct-api": "x_api",
+    "xurl-token-api": "xurl_token_api",
+    "x-api-mcp": "x_api_mcp",
+}
+
+
+def score_run(label: str, result: dict) -> dict:
+    import_report = result.get("import_report") or {}
+    sync_run = result.get("sync_run") or {}
+    status = result.get("status")
+    imported = int(import_report.get("imported") or 0)
+    projections = import_report.get("source_card_projections")
+    expected_transport = EXPECTED_TRANSPORT[label]
+    completed = status == "passed"
+    fidelity = 0
+    if completed and imported > 0 and projections == imported and sync_run.get("transport") == expected_transport:
+        fidelity = 10
+    elif completed and sync_run.get("transport") == expected_transport:
+        fidelity = 6
+    elif completed:
+        fidelity = 3
+    if completed and label == "xurl-token-api":
+        auth = 9
+    elif completed and label == "x-api-mcp":
+        auth = 8
+    elif completed:
+        auth = 7
+    else:
+        auth = 2
+    ops = 9 if completed and sync_run.get("transport") == expected_transport else 2
+    coverage = {"direct-api": 6, "xurl-token-api": 7, "x-api-mcp": 8}[label]
+    reliability = 9 if completed else 2
+    overall = round((fidelity + auth + ops + coverage + reliability) / 5, 1)
+    return {
+        "arcwell_fidelity": fidelity,
+        "auth_ergonomics": auth,
+        "ops_observability": ops,
+        "provider_coverage_potential": coverage,
+        "run_reliability": reliability,
+        "overall": overall,
+    }
+
+
+def run_transport(label: str, args: argparse.Namespace, base_command: list[str], source_home: Path) -> dict:
+    home = copy_home(source_home, label.replace("-", "_"))
+    env = os.environ.copy()
+    env["ARCWELL_HOME"] = str(home)
+    command = base_command + [
+        "x",
+        "recent-search",
+        args.query,
+        "--max-results",
+        str(args.max_results),
+        "--transport",
+        label,
+    ]
+    parsed, evidence = run_json(command, env=env, timeout=args.timeout)
+    stats, stats_evidence = run_json(base_command + ["x", "stats"], env=env, timeout=args.timeout)
+    sync_run = None
+    if stats and stats.get("latest_sync_runs"):
+        sync_run = stats["latest_sync_runs"][0]
+    result = {
+        "transport": label,
+        "copied_home": str(home),
+        "status": evidence["status"],
+        "command_duration_ms": evidence["duration_ms"],
+        "import_report": parsed,
+        "sync_run": sync_run,
+        "command_evidence": evidence,
+        "stats_evidence": stats_evidence,
+    }
+    result["scores"] = score_run(label, result)
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query", default="from:openai")
+    parser.add_argument("--max-results", type=int, default=10)
+    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--source-home", default=os.environ.get("ARCWELL_HOME", str(Path.home() / ".arcwell")))
+    parser.add_argument("--arcwell-bin", default=os.environ.get("ARCWELL_BIN", ""))
+    args = parser.parse_args()
+
+    proof_dir = (
+        repo_root()
+        / ".arcwell-dev"
+        / "proofs"
+        / f"x-transport-comparison-{utc_stamp()}-{os.getpid()}"
+        / "artifacts"
+    )
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    base_command = ensure_arcwell_bin(args.arcwell_bin)
+    source_home = Path(args.source_home).expanduser()
+
+    runs = [
+        run_transport("direct-api", args, base_command, source_home),
+        run_transport("xurl-token-api", args, base_command, source_home),
+        run_transport("x-api-mcp", args, base_command, source_home),
+    ]
+    winner = None
+    passed = [run for run in runs if run["status"] == "passed"]
+    if len(passed) == 2:
+        winner = max(passed, key=lambda run: run["scores"]["overall"])["transport"]
+    elif passed:
+        winner = passed[0]["transport"]
+
+    packet = {
+        "feature": "x_transport_comparison",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "proof_level": "copied_home_live_provider_comparison",
+        "query": args.query,
+        "max_results": args.max_results,
+        "source_home_copied_from": str(source_home),
+        "arcwell_command": base_command,
+        "runs": runs,
+        "winner": winner,
+        "non_claims": [
+            "This compares recent-search only; bookmark MCP has local mock coverage but is not part of this live scorecard.",
+            "This does not prove trends, Articles, DMs, media, streams, hosted MCP pagination, or scheduled recurrence.",
+            "Copied homes are used to avoid mutating real cursors; this is not operational recurrence proof.",
+            "Failures are valid evidence and should not be rephrased as live capability.",
+        ],
+    }
+    path = proof_dir / "proof-packet.json"
+    path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

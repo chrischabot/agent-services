@@ -889,9 +889,17 @@ fn daily_briefing_reader_stories<'a>(
     window: Option<(DateTime<Utc>, DateTime<Utc>)>,
 ) -> Vec<DailyBriefingReaderStory<'a>> {
     let mut stories = Vec::new();
+    let mut seen_titles = BTreeSet::new();
     for report in reports {
         let story_cards =
             daily_briefing_report_fresh_source_cards(report, source_cards, window.as_ref());
+        if story_cards.is_empty() {
+            continue;
+        }
+        let story_cards = daily_briefing_ranked_source_cards(&story_cards)
+            .into_iter()
+            .filter(|card| daily_briefing_source_card_is_reader_worthy(card))
+            .collect::<Vec<_>>();
         if story_cards.is_empty() {
             continue;
         }
@@ -899,6 +907,9 @@ fn daily_briefing_reader_stories<'a>(
             continue;
         }
         let title = daily_briefing_story_title(report, &story_cards);
+        if !seen_titles.insert(title.to_ascii_lowercase()) {
+            continue;
+        }
         let body = daily_briefing_story_body(report, &story_cards);
         if daily_briefing_output_has_forbidden_reader_language(&title)
             || daily_briefing_output_has_forbidden_reader_language(&body)
@@ -936,12 +947,55 @@ pub(crate) fn daily_briefing_report_has_newsletter_story(
     if source_cards.is_empty() {
         return false;
     }
-    if daily_briefing_report_is_generated_storying_artifact(report)
-        && daily_briefing_source_cards_are_github_repo_only(source_cards)
-    {
-        return false;
+    if daily_briefing_report_is_generated_storying_artifact(report) {
+        if daily_briefing_source_cards_are_github_repo_only(source_cards) {
+            return false;
+        }
+        let topic = daily_briefing_report_display_title(report);
+        if daily_briefing_generated_bucket_title_is_not_reader_story(&topic) {
+            return false;
+        }
+        if daily_briefing_title_entity(&topic).is_none() {
+            return false;
+        }
+        if source_cards.len() > 25 {
+            return false;
+        }
+        if !source_cards
+            .iter()
+            .all(|card| card.provider.eq_ignore_ascii_case("github"))
+        {
+            let readable_sources = daily_briefing_ranked_source_cards(source_cards)
+                .into_iter()
+                .filter(|card| daily_briefing_source_reader_score(card) >= 60)
+                .count();
+            let readable_non_reply_sources = daily_briefing_ranked_source_cards(source_cards)
+                .into_iter()
+                .filter(|card| {
+                    daily_briefing_source_reader_score(card) >= 60
+                        && !daily_briefing_source_takeaway_text(card, 500)
+                            .to_ascii_lowercase()
+                            .starts_with('@')
+                })
+                .count();
+            if readable_sources < 2 || readable_non_reply_sources == 0 {
+                return false;
+            }
+        }
     }
     true
+}
+
+pub(crate) fn daily_briefing_generated_bucket_title_is_not_reader_story(title: &str) -> bool {
+    let lower = title.trim().to_ascii_lowercase();
+    lower == "community reaction"
+        || lower.ends_with(": community reaction")
+        || lower == "ai usage practices"
+        || lower.ends_with(": ai usage practices")
+        || lower == "repository and package activity"
+        || lower.ends_with(": repository and package activity")
+        || lower == "source-backed updates"
+        || lower.ends_with(": source-backed updates")
 }
 
 pub(crate) fn daily_briefing_source_cards_are_github_repo_only(
@@ -971,13 +1025,13 @@ pub(crate) fn daily_briefing_lede_for_titles(titles: &[&str]) -> String {
     match titles {
         [] => "No issue today. I scanned the last 24 hours and did not find a clean AI story worth sending as news.".to_string(),
         [lead] => format!(
-            "The clearest item today is {lead}. Treat it as a concrete signal to check, not as a launch claim unless the linked source actually says so."
+            "The cleanest item today is {lead}. I would treat it as a story to watch, not a settled claim, and read it for what the evidence actually changes."
         ),
         [lead, second] => format!(
-            "Today's useful items are {lead} and {second}. The interesting part is whether these are isolated source movements or the start of something that shows up in docs, releases, benchmarks, or developer use."
+            "Today is a watchlist issue: {lead} and {second} are the strongest items from the last 24 hours. The interesting part is what gets backed by docs, releases, benchmarks, or real developer use."
         ),
         [lead, second, third, ..] => format!(
-            "Today's useful items are {lead}, {second}, and {third}. None of that should be inflated into a trend by itself; the point is to track which signals earn corroboration."
+            "Today is a watchlist issue: {lead}, {second}, and {third} are the strongest items from the last 24 hours. The useful tension is what gets backed by docs, releases, benchmarks, or real developer use."
         ),
     }
 }
@@ -1065,6 +1119,9 @@ fn daily_briefing_title_entity(title: &str) -> Option<String> {
         || topic.eq_ignore_ascii_case("model release activity")
         || topic.eq_ignore_ascii_case("community reaction")
         || topic.eq_ignore_ascii_case("repository and package activity")
+        || topic.eq_ignore_ascii_case("ai usage practices")
+        || topic.eq_ignore_ascii_case("benchmarks and evaluation")
+        || topic.eq_ignore_ascii_case("mcp and agent infrastructure")
     {
         None
     } else {
@@ -1280,17 +1337,18 @@ pub(crate) fn daily_briefing_source_card_story(
         );
     }
     format!(
-        "{topic} is showing up through {source_summary}. Read this as {angle}, not as a confirmed launch, benchmark result, or adoption claim. The evidence is still narrow, so the next check is whether official docs, release notes, benchmarks, or credible developer usage confirm the same direction."
+        "{topic}: {source_summary}. Read it as {angle}. This is still early evidence; I want primary docs, release notes, benchmarks, or credible developer use before treating it as settled."
     )
 }
 
 pub(crate) fn daily_briefing_source_summary_clause(source_cards: &[&SourceCard]) -> String {
-    let names = source_cards
+    let ranked = daily_briefing_ranked_source_cards(source_cards);
+    let names = ranked
         .iter()
         .take(3)
         .map(|card| {
-            let label = daily_briefing_source_label(card);
-            let summary = daily_briefing_source_takeaway_text(card, 90);
+            let label = daily_briefing_source_label(card).replace(" on X", "");
+            let summary = daily_briefing_source_takeaway_text(card, 170);
             if summary.is_empty() {
                 label
             } else {
@@ -1306,8 +1364,139 @@ pub(crate) fn daily_briefing_source_summary_clause(source_cards: &[&SourceCard])
     {
         format!("GitHub links for {}", human_join_strings(&names))
     } else {
-        format!("activity around {}", human_join_strings(&names))
+        names.join("; ")
     }
+}
+
+pub(crate) fn daily_briefing_ranked_source_cards<'a>(
+    source_cards: &[&'a SourceCard],
+) -> Vec<&'a SourceCard> {
+    let mut ranked = source_cards.to_vec();
+    ranked.sort_by(|left, right| {
+        daily_briefing_source_reader_score(right)
+            .cmp(&daily_briefing_source_reader_score(left))
+            .then_with(|| right.retrieved_at.cmp(&left.retrieved_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    ranked
+}
+
+pub(crate) fn daily_briefing_source_reader_score(card: &SourceCard) -> i32 {
+    let text = daily_briefing_source_takeaway_text(card, 500);
+    let lower = text.to_ascii_lowercase();
+    if text.trim().is_empty() {
+        return -100;
+    }
+    let mut score = text.chars().count().min(220) as i32;
+    if lower.starts_with('@') {
+        score -= 45;
+    }
+    if lower.starts_with("watch the full interview here")
+        || lower.contains("thank you for joining")
+        || lower.contains("hell yeah")
+        || lower.contains("you lied")
+        || lower.trim().chars().count() <= 24
+    {
+        score -= 80;
+    }
+    for needle in [
+        "released",
+        "launch",
+        "docs",
+        "benchmark",
+        "ships",
+        "deploy",
+        "available",
+        "report",
+        "verification",
+        "governance",
+        "revenue",
+        "model",
+        "agent",
+    ] {
+        if lower.contains(needle) {
+            score += 18;
+        }
+    }
+    score
+}
+
+pub(crate) fn daily_briefing_source_card_is_reader_worthy(card: &SourceCard) -> bool {
+    let text = daily_briefing_source_takeaway_text(card, 500);
+    let lower = text.to_ascii_lowercase();
+    if text.trim().is_empty() {
+        return false;
+    }
+    if daily_briefing_source_text_is_low_signal(&lower) {
+        return false;
+    }
+    if daily_briefing_source_card_is_social(card) {
+        if daily_briefing_source_text_is_reply(&lower) {
+            return false;
+        }
+        let char_count = text.chars().count();
+        if char_count < 110 {
+            return false;
+        }
+        return daily_briefing_source_text_has_substantive_signal(&lower)
+            && daily_briefing_source_reader_score(card) >= 90;
+    }
+    daily_briefing_source_reader_score(card) >= 50
+}
+
+pub(crate) fn daily_briefing_source_card_is_social(card: &SourceCard) -> bool {
+    card.provider.eq_ignore_ascii_case("x")
+        || card.provider.eq_ignore_ascii_case("twitter")
+        || card.source_type.eq_ignore_ascii_case("x")
+        || card.source_type.eq_ignore_ascii_case("x_tweet")
+        || daily_briefing_source_metadata_string(card, "source_owner")
+            .is_some_and(|owner| owner.eq_ignore_ascii_case("x.com"))
+}
+
+pub(crate) fn daily_briefing_source_text_is_reply(lower_text: &str) -> bool {
+    let trimmed = lower_text.trim_start();
+    trimmed.starts_with('@') || trimmed.starts_with("rt @")
+}
+
+pub(crate) fn daily_briefing_source_text_is_low_signal(lower_text: &str) -> bool {
+    let trimmed = lower_text.trim();
+    trimmed.chars().count() <= 40
+        || trimmed.starts_with("watch the full interview here")
+        || trimmed.contains("thank you for joining")
+        || trimmed.contains("thanks for joining")
+        || trimmed.contains("hell yeah")
+        || trimmed.contains("you lied")
+        || trimmed.contains("congrats on your marriage")
+        || trimmed == "more tomorrow"
+}
+
+pub(crate) fn daily_briefing_source_text_has_substantive_signal(lower_text: &str) -> bool {
+    [
+        "announced",
+        "released",
+        "launched",
+        "available",
+        "benchmark",
+        "evaluation",
+        "report",
+        "revenue",
+        "pricing",
+        "deploy",
+        "deployment",
+        "docs",
+        "api",
+        "sdk",
+        "model",
+        "agent",
+        "integration",
+        "workflow",
+        "verification",
+        "governance",
+        "inference",
+        "compute",
+    ]
+    .iter()
+    .any(|needle| lower_text.contains(needle))
 }
 
 pub(crate) fn daily_briefing_is_internal_reader_section(lower: &str) -> bool {
@@ -1413,7 +1602,8 @@ pub(crate) fn daily_briefing_key_source_lines(
     max_sources: usize,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    for card in source_cards.iter().take(max_sources) {
+    let ranked = daily_briefing_ranked_source_cards(source_cards);
+    for card in ranked.iter().take(max_sources) {
         lines.push(format!(
             "- [{}]({}) - {}",
             escape_markdown_link_text(&daily_briefing_source_label(card)),
@@ -1428,7 +1618,7 @@ pub(crate) fn daily_briefing_key_source_lines(
 }
 
 pub(crate) fn daily_briefing_source_label(card: &SourceCard) -> String {
-    knowledge_projection_source_label(card)
+    daily_briefing_rewrite_reader_language(&knowledge_projection_source_label(card))
 }
 
 pub(crate) fn daily_briefing_source_takeaway(card: &SourceCard) -> String {
@@ -1479,7 +1669,9 @@ pub(crate) fn daily_briefing_source_takeaway_text(card: &SourceCard, max_chars: 
             continue;
         }
         return excerpt(
-            &strip_bare_urls(&html_unescape_basic(&candidate)),
+            &daily_briefing_rewrite_reader_language(&strip_bare_urls(&html_unescape_basic(
+                &candidate,
+            ))),
             max_chars,
         );
     }
@@ -1530,13 +1722,20 @@ pub(crate) fn daily_briefing_prior_context_insight(
             angle
         ));
     }
+    if daily_briefing_report_is_generated_storying_artifact(report) {
+        return None;
+    }
     if !daily_briefing_has_prior_context_signal(report) {
         return None;
     }
     let titles = wiki_pages
         .iter()
         .take(3)
-        .map(|page| page.title.trim())
+        .map(|page| daily_briefing_rewrite_reader_language(page.title.trim()))
+        .collect::<Vec<_>>();
+    let titles = titles
+        .iter()
+        .map(|title| title.trim())
         .filter(|title| !title.is_empty())
         .collect::<Vec<_>>();
     if titles.is_empty() {
@@ -1614,6 +1813,27 @@ pub(crate) fn daily_briefing_interpretive_angle(
         || haystack.contains("multimodal")
     {
         "realtime multimodal developer experience becoming part of the agent stack".to_string()
+    } else if haystack.contains("azure") || haystack.contains("microsoft foundry") {
+        "Claude being packaged as managed enterprise infrastructure, not just a model endpoint"
+            .to_string()
+    } else if haystack.contains("spotify") || haystack.contains("verification") {
+        "agent adoption being argued through verification, supervision, and production workflow controls"
+            .to_string()
+    } else if haystack.contains("trainium") || haystack.contains("tpu") || haystack.contains("cuda")
+    {
+        "frontier-agent demand spilling into cloud silicon and inference-supply-chain questions"
+            .to_string()
+    } else if haystack.contains("nvidia dc compute")
+        || haystack.contains("accelerator model")
+        || haystack.contains("hbm")
+    {
+        "AI infrastructure expectations being revised around compute, memory, and second-half demand"
+            .to_string()
+    } else if (haystack.contains("grok") && haystack.contains("ai gateway"))
+        || haystack.contains("voice agent")
+        || haystack.contains("realtime voice")
+    {
+        "voice and realtime models moving into deployable developer tooling".to_string()
     } else if haystack.contains("copilotkit")
         || haystack.contains("ag-ui")
         || haystack.contains("generative ui")
@@ -1646,10 +1866,8 @@ pub(crate) fn daily_briefing_interpretive_angle(
     {
         "repository activity that only matters if release notes, docs, or developers connect it to a shipped change".to_string()
     } else {
-        format!(
-            "the topic moving from isolated evidence toward a trackable developing story about {}",
-            excerpt(&daily_briefing_report_display_title(report), 120)
-        )
+        "early evidence that needs a stronger primary source before it deserves a bigger claim"
+            .to_string()
     }
 }
 

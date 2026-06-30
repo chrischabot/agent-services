@@ -651,6 +651,158 @@ fn severe_daily_briefing_projection_ledger_does_not_become_fake_story() {
 }
 
 #[test]
+fn severe_daily_briefing_rejects_generated_social_reply_buckets() {
+    // CLAIM: generated community-reaction buckets made from X replies are
+    // not newsletter stories, even when they are fresh and entity-named.
+    // ORACLE: the renderer skips the Anthropic reply bucket while still
+    // surfacing a clean RSS-backed story from the same 24-hour window.
+    // SEVERITY: Severe because reply fragments like "thank you" and
+    // "@user ..." were being inflated into fake editorial sections.
+    let schedule = IssueSchedule {
+        id: "isch-social-replies".to_string(),
+        name: "AI daily briefing".to_string(),
+        status: "active".to_string(),
+        kind: "knowledge_daily_briefing".to_string(),
+        channel: "email".to_string(),
+        recipient_ref: "email:friend@example.com".to_string(),
+        time_zone: "utc".to_string(),
+        hour: 7,
+        minute: 0,
+        catch_up_hours: 72,
+        metadata: json!({}),
+        created_at: now(),
+        updated_at: now(),
+    };
+    let tick = IssueScheduleTick {
+        id: "ischt-social-replies".to_string(),
+        schedule_id: schedule.id.clone(),
+        tick_key: "2026-06-30".to_string(),
+        due_at: "2026-06-30T07:00:00+00:00".to_string(),
+        status: "pending".to_string(),
+        job_id: None,
+        candidate_id: None,
+        delivery_id: None,
+        error: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    let cards = vec![
+        SourceCard {
+            id: "src-anthropic-reply".to_string(),
+            title: "@ClaudeDevs on X".to_string(),
+            url: "https://x.com/ClaudeDevs/status/2071671424968966239".to_string(),
+            source_type: "x".to_string(),
+            provider: "x".to_string(),
+            summary: "@someone Watch the full interview here:".to_string(),
+            claims: Vec::new(),
+            retrieved_at: "2026-06-30T06:10:00Z".to_string(),
+            wiki_page_id: "source-card-anthropic-reply".to_string(),
+            content_sha256: "sha".to_string(),
+            metadata: json!({
+                "created_at": "2026-06-30T06:10:00Z",
+                "source_owner": "x.com"
+            }),
+            created_at: now(),
+            updated_at: now(),
+        },
+        SourceCard {
+            id: "src-anthropic-thanks".to_string(),
+            title: "@bcherny on X".to_string(),
+            url: "https://x.com/bcherny/status/2071671424968966240".to_string(),
+            source_type: "x".to_string(),
+            provider: "x".to_string(),
+            summary: "@_david_cooley Have you tried the Claude Desktop app? Thank you for joining us.".to_string(),
+            claims: Vec::new(),
+            retrieved_at: "2026-06-30T06:12:00Z".to_string(),
+            wiki_page_id: "source-card-anthropic-thanks".to_string(),
+            content_sha256: "sha".to_string(),
+            metadata: json!({
+                "created_at": "2026-06-30T06:12:00Z",
+                "source_owner": "x.com"
+            }),
+            created_at: now(),
+            updated_at: now(),
+        },
+        SourceCard {
+            id: "src-crux-rss".to_string(),
+            title: "Open-world evaluations for measuring frontier AI capabilities".to_string(),
+            url: "https://www.normaltech.ai/p/open-world-evaluations-for-measuring".to_string(),
+            source_type: "rss".to_string(),
+            provider: "rss".to_string(),
+            summary: "Normal Computing introduced CRUX, a project for evaluating AI systems on long, messy tasks that look more like real work than benchmark drills.".to_string(),
+            claims: vec![SourceClaim {
+                claim: "Normal Computing introduced CRUX for open-world AI evaluation.".to_string(),
+                kind: "summary".to_string(),
+                confidence: 0.82,
+            }],
+            retrieved_at: "2026-06-30T06:20:00Z".to_string(),
+            wiki_page_id: "source-card-crux-rss".to_string(),
+            content_sha256: "sha".to_string(),
+            metadata: json!({
+                "published_at": "2026-06-30T06:20:00Z",
+                "source_owner": "www.normaltech.ai"
+            }),
+            created_at: now(),
+            updated_at: now(),
+        },
+    ];
+    let reports = vec![
+        KnowledgeReport {
+            id: "krpt-anthropic-replies".to_string(),
+            cluster_id: "kcl-anthropic-replies".to_string(),
+            title: "Knowledge Cluster Expansion: Anthropic: community reaction".to_string(),
+            body_markdown: "# Anthropic: community reaction\n\n## Executive Read\nAnthropic: community reaction is worth tracking because 2 linked sources point at the same subject. 2 community or reaction sources show people discussing the topic, but the underlying claim still needs official confirmation.".to_string(),
+            status: "draft".to_string(),
+            source_card_ids: vec![
+                "src-anthropic-reply".to_string(),
+                "src-anthropic-thanks".to_string(),
+            ],
+            quality_findings: Vec::new(),
+            metadata: json!({ "origin": "knowledge_cluster_editor_v1" }),
+            created_at: now(),
+            updated_at: now(),
+        },
+        KnowledgeReport {
+            id: "krpt-crux".to_string(),
+            cluster_id: "kcl-crux".to_string(),
+            title: "Daily Knowledge Report: Open-world evaluations for measuring frontier AI capabilities".to_string(),
+            body_markdown: "Normal Computing introduced CRUX, an open-world evaluation project for measuring AI systems on long, messy tasks. The interesting tension is that frontier capability measurement is moving away from tidy benchmark drills and toward work that is harder to script, score, and supervise.".to_string(),
+            status: "draft".to_string(),
+            source_card_ids: vec!["src-crux-rss".to_string()],
+            quality_findings: Vec::new(),
+            metadata: json!({}),
+            created_at: now(),
+            updated_at: now(),
+        },
+    ];
+    let text = render_knowledge_daily_briefing(
+        &schedule,
+        &tick,
+        &reports,
+        &cards,
+        "2026-06-29T07:00:00+00:00",
+        "2026-06-30T07:00:00+00:00",
+        &BTreeMap::new(),
+    );
+
+    assert!(text.contains("Today's Stories"), "{text}");
+    assert!(
+        text.contains("Open-world evaluations for measuring frontier AI capabilities"),
+        "{text}"
+    );
+    assert!(text.contains("CRUX"), "{text}");
+    assert!(!text.contains("Anthropic: community reaction"), "{text}");
+    assert!(!text.contains("Watch the full interview"), "{text}");
+    assert!(!text.contains("Thank you for joining"), "{text}");
+    assert!(!text.contains("small but readable signal"), "{text}");
+    assert!(!text.contains("trackable developing story"), "{text}");
+    assert!(
+        !daily_briefing_output_has_forbidden_reader_language(&text),
+        "{text}"
+    );
+}
+
+#[test]
 fn severe_daily_briefing_scans_past_generated_repo_backlog_for_today_story() {
     // CLAIM: a rerun is a last-24-hours briefing, not a delta over the newest
     // generated report rows. Repo-only working notes at the top of the update

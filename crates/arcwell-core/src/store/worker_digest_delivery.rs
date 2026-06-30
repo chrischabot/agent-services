@@ -579,6 +579,7 @@ impl Store {
                 "status": "blocked",
                 "error": error,
                 "forbidden_reader_terms": forbidden_reader_terms,
+                "forbidden_reader_excerpt": excerpt(&body, 2_000),
                 "window_start": window_start.to_rfc3339(),
                 "window_end": window_end.to_rfc3339(),
                 "proof_level": "Blocked: reader-facing daily briefing failed editorial hygiene gate before source-card materialization"

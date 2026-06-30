@@ -1070,6 +1070,16 @@ impl Store {
             validated_endpoint(Some(endpoint), "https://api.openai.com/v1/responses")?;
         }
         let broad_source_card_sweep = knowledge_model_cluster_query_is_broad(&query);
+        let scheduled_max_source_cards = if provider == "openai" && broad_source_card_sweep {
+            max_source_cards.clamp(1, 24)
+        } else {
+            max_source_cards.clamp(1, 80)
+        };
+        let scheduled_timeout_seconds = if provider == "openai" && broad_source_card_sweep {
+            timeout_seconds.or(Some(120))
+        } else {
+            timeout_seconds
+        };
         self.upsert_watch_source(WatchSourceInput {
             source_kind: "knowledge_model_clusters".to_string(),
             locator: query.clone(),
@@ -1081,8 +1091,8 @@ impl Store {
                 "model_provider": provider,
                 "model_name": model_name,
                 "endpoint": endpoint,
-                "timeout_seconds": timeout_seconds,
-                "max_source_cards": max_source_cards.clamp(1, 80),
+                "timeout_seconds": scheduled_timeout_seconds,
+                "max_source_cards": scheduled_max_source_cards,
                 "max_clusters": max_clusters.clamp(1, 12),
                 "broad_source_card_sweep": broad_source_card_sweep,
                 "origin": "knowledge_model_cluster_schedule",

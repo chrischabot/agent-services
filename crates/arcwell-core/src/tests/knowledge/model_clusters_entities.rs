@@ -622,6 +622,80 @@ fn severe_model_cluster_broad_sweep_uses_only_fresh_real_source_cards() {
 }
 
 #[test]
+fn severe_openai_broad_model_cluster_schedule_uses_proven_bounded_envelope() {
+    // CLAIM: unattended OpenAI broad source-card clustering uses the live-
+    // proven bounded envelope rather than a slow 80-card/null-timeout sweep.
+    // ORACLE: scheduling `source-cards` with an oversized card request stores
+    // 24 cards and a 120 second timeout, while still recording the requested
+    // provider/model and review-only boundary.
+    // SEVERITY: Severe because a previous production schedule repeatedly
+    // timed out at 80 cards, leaving source health red and retrying work that
+    // could not complete.
+    let store = test_store("knowledge-model-cluster-openai-schedule-envelope");
+    let source = store
+        .schedule_knowledge_cluster_model_proposals(
+            "source-cards",
+            "openai",
+            Some("gpt-4.1-mini"),
+            None,
+            None,
+            80,
+            12,
+            "warm",
+            "active",
+        )
+        .unwrap();
+    assert_eq!(source.source_kind, "knowledge_model_clusters");
+    assert_eq!(source.locator, "source-cards");
+    assert_eq!(
+        source
+            .metadata
+            .get("model_provider")
+            .and_then(Value::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        source.metadata.get("model_name").and_then(Value::as_str),
+        Some("gpt-4.1-mini")
+    );
+    assert_eq!(
+        source
+            .metadata
+            .get("max_source_cards")
+            .and_then(Value::as_u64),
+        Some(24)
+    );
+    assert_eq!(
+        source.metadata.get("max_clusters").and_then(Value::as_u64),
+        Some(12)
+    );
+    assert_eq!(
+        source
+            .metadata
+            .get("timeout_seconds")
+            .and_then(Value::as_u64),
+        Some(120)
+    );
+    assert_eq!(
+        source
+            .metadata
+            .get("broad_source_card_sweep")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        source
+            .metadata
+            .get("boundary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("review-only"),
+        "{:?}",
+        source.metadata
+    );
+}
+
+#[test]
 fn severe_model_cluster_worker_skips_empty_query_without_provider_or_retry_storm() {
     // CLAIM: scheduled model clustering with no source-card evidence is a
     // bounded no-op, not a provider call or retry storm.
@@ -815,7 +889,10 @@ fn severe_model_cluster_worker_provider_outage_defers_with_source_health() {
         health_error.contains("openai knowledge cluster proposal returned an error status 500"),
         "{health:?}"
     );
-    assert!(health_error.contains("temporary model outage"), "{health:?}");
+    assert!(
+        health_error.contains("temporary model outage"),
+        "{health:?}"
+    );
     assert!(!health_error.contains("test-openai-key"), "{health:?}");
     assert_eq!(
         store.list_knowledge_clusters(10).unwrap().len(),

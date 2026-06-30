@@ -619,6 +619,47 @@ fn severe_ops_ui_escapes_stored_error_text() {
 }
 
 #[test]
+fn severe_ops_ui_distinguishes_backlog_families() {
+    // CLAIM: /ops/ui exposes memory-review, digest-candidate, and knowledge
+    // worker backlogs as separate operator facts.
+    // ORACLE: a fixture with one pending memory candidate, one pending digest
+    // candidate, and one pending knowledge job renders distinct backlog labels.
+    // SEVERITY: Severe because ambiguous backlog counters previously made a
+    // healthy worker queue look like unfinished knowledge pipeline work.
+    let paths = test_paths("ops-ui-backlog-families");
+    let store = Store::open(paths).unwrap();
+    store
+        .extract_memory_candidates_from_text("My cat is called Ophelia.", "ops-ui-backlog")
+        .unwrap();
+    let card = store
+        .add_source_card(SourceCardInput {
+            title: "Ops UI backlog source".to_string(),
+            url: "https://example.com/ops-ui-backlog-source".to_string(),
+            source_type: "article".to_string(),
+            provider: "test".to_string(),
+            summary: "Source evidence for a pending digest candidate.".to_string(),
+            claims: vec![],
+            retrieved_at: None,
+            metadata: json!({}),
+        })
+        .unwrap();
+    store
+        .create_digest_candidate("Ordinary sourced note", std::slice::from_ref(&card.id))
+        .unwrap();
+    store
+        .enqueue_wiki_job(
+            "knowledge_cluster_editorial_decide",
+            json!({ "cluster_id": "kcl-ops-ui-backlog" }),
+        )
+        .unwrap();
+
+    let html = render_ops_ui(&store.ops_snapshot().unwrap());
+    assert!(html.contains("Knowledge pending jobs"), "{html}");
+    assert!(html.contains("Digest candidates pending"), "{html}");
+    assert!(html.contains("Memory review pending"), "{html}");
+}
+
+#[test]
 fn severe_ops_ui_escapes_required_untrusted_domains() {
     // CLAIM: /ops/ui renders untrusted operational text as inert HTML text.
     // PRECONDITIONS: Stored channel/source/project/procedure/work/policy/error data may contain attacker HTML.

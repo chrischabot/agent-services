@@ -653,6 +653,7 @@ pub struct ImportRunFinish {
 pub struct OpsSnapshot {
     pub health: HealthReport,
     pub worker: Option<WorkerHeartbeat>,
+    pub backlog: OpsBacklogSummary,
     pub x_stats: XStatsReport,
     pub radar_runs: Vec<RadarRun>,
     pub radar_source_quality: Vec<RadarSourceQuality>,
@@ -700,4 +701,24 @@ pub struct OpsSnapshot {
     pub policy_approvals: Vec<PolicyApprovalRecord>,
     pub secrets: Vec<SecretRef>,
     pub secret_health: Vec<SecretHealth>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsBacklogSummary {
+    pub memory_candidates_by_status: BTreeMap<String, i64>,
+    pub digest_candidates_by_status: BTreeMap<String, i64>,
+    pub wiki_jobs_by_status: BTreeMap<String, i64>,
+    pub knowledge_jobs_by_status: BTreeMap<String, i64>,
+    pub pending_memory_candidates: i64,
+    pub pending_digest_candidates: i64,
+    pub ready_digest_candidates: i64,
+    pub approved_digest_candidates: i64,
+    pub pending_wiki_jobs: i64,
+    pub failed_wiki_jobs: i64,
+    pub dead_lettered_wiki_jobs: i64,
+    pub pending_knowledge_jobs: i64,
+    pub failed_knowledge_jobs: i64,
+    pub dead_lettered_knowledge_jobs: i64,
+    pub pending_knowledge_editorial_jobs: i64,
+    pub pending_knowledge_expansion_jobs: i64,
 }

@@ -829,8 +829,8 @@ pub(crate) fn render_knowledge_daily_briefing(
         String::new(),
     ];
     if stories.is_empty() {
-        lines.push("## No Issue Today".to_string());
-        lines.push("There was activity in the last 24 hours, but nothing I would call news: no clear announcement, no release note that changed the picture, no credible benchmark shift, and no outside reaction worth weighing. A few repo updates can be useful background, but they are not a newsletter item by themselves.".to_string());
+        lines.push("## Quiet Day".to_string());
+        lines.push("The scan was not empty; it just did not produce a clean story. The apparent activity was old feed items, reply-level social chatter, and routine code-hosting updates. None of that changes the picture for model access, agents, evaluation, or developer workflow on its own.".to_string());
         lines.push(String::new());
     } else {
         lines.push("## Today's Stories".to_string());
@@ -1009,21 +1009,21 @@ pub(crate) fn daily_briefing_source_cards_are_github_repo_only(
 
 fn daily_briefing_issue_read(stories: &[DailyBriefingReaderStory<'_>]) -> String {
     if stories.is_empty() {
-        return "The right call is to hold the issue rather than pad it.".to_string();
+        return "The useful conclusion is negative: nothing fresh and well-sourced changed the picture today.".to_string();
     }
     "The useful read is whether the primary links are backed by docs, releases, benchmarks, or credible developer use.".to_string()
 }
 
 fn daily_briefing_watch_next(stories: &[DailyBriefingReaderStory<'_>]) -> String {
     if stories.is_empty() {
-        return "For the next issue, look for primary announcements, release notes, benchmarks, shipping details, or credible developer reaction from the last 24 hours.".to_string();
+        return "The next real issue should start from a primary announcement, release note, benchmark, shipping detail, or credible developer reaction dated inside the last 24 hours.".to_string();
     }
     "Check official release notes or docs first, then look for independent developer use before promoting any item into a trend.".to_string()
 }
 
 pub(crate) fn daily_briefing_lede_for_titles(titles: &[&str]) -> String {
     match titles {
-        [] => "No issue today. I scanned the last 24 hours and did not find a clean AI story worth sending as news.".to_string(),
+        [] => "Quiet day. The last 24 hours had activity, but not a clean AI story worth elevating; old feed items, reply-level social chatter, and routine code-hosting updates did not clear the bar.".to_string(),
         [lead] => format!(
             "The cleanest item today is {lead}. I would treat it as a story to watch, not a settled claim, and read it for what the evidence actually changes."
         ),

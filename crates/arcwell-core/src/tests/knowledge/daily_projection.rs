@@ -603,11 +603,11 @@ fn severe_daily_briefing_projection_ledger_does_not_become_fake_story() {
         &BTreeMap::new(),
     );
 
-    assert!(text.contains("No Issue Today"), "{text}");
-    assert!(text.contains("No issue today"), "{text}");
+    assert!(text.contains("Quiet Day"), "{text}");
+    assert!(text.contains("Quiet day"), "{text}");
     assert!(text.contains("last 24 hours"), "{text}");
     assert!(
-        text.contains("not a newsletter item by themselves"),
+        text.contains("old feed items, reply-level social chatter"),
         "{text}"
     );
     assert!(!text.contains("Today's Stories"), "{text}");
@@ -1033,11 +1033,11 @@ priority = 15
         "{text}"
     );
     assert!(text.contains("last 24 hours"), "{text}");
-    assert!(!text.contains("No Issue Today"), "{text}");
+    assert!(!text.contains("Quiet Day"), "{text}");
     assert!(!text.contains("noise-org"), "{text}");
     assert!(!text.contains("GitHub activity around"), "{text}");
     assert!(
-        !text.contains("not a newsletter item by themselves"),
+        !text.contains("old feed items, reply-level social chatter"),
         "{text}"
     );
     assert!(
@@ -1493,6 +1493,108 @@ fn severe_unified_knowledge_ops_snapshot_surfaces_pipeline_state() {
     );
     assert_eq!(snapshot.knowledge_editorial_decisions.len(), 1);
     assert_eq!(snapshot.knowledge_reports.len(), 1);
+}
+
+#[test]
+fn severe_ops_backlog_summary_distinguishes_candidate_and_worker_backlogs() {
+    // CLAIM: ops backlog visibility separates memory-review inventory,
+    // digest-candidate review, and knowledge worker jobs instead of collapsing
+    // them into one ambiguous "pending candidates" number.
+    // ORACLE: seeded memory candidates, digest candidates, generic wiki jobs,
+    // and knowledge jobs produce independent durable counts and status maps.
+    // SEVERITY: Severe because ambiguous backlog metrics made a healthy
+    // knowledge worker queue look like unfinished editorial/expansion work.
+    let store = test_store("ops-backlog-summary");
+    let memory = store
+        .extract_memory_candidates_from_text(
+            "My cat is called Ophelia. I prefer direct answers.",
+            "ops-backlog:test",
+        )
+        .unwrap();
+    assert_eq!(memory.candidates_created, 2);
+
+    let card_a = seed_knowledge_source_card(
+        &store,
+        "ops-backlog-a",
+        "Ops backlog evidence says an ordinary sourced note exists.",
+    );
+    let card_b = seed_knowledge_source_card(
+        &store,
+        "ops-backlog-b",
+        "Ops backlog evidence says OpenAI launch coverage exists for an MCP release.",
+    );
+    let pending_digest = store
+        .create_digest_candidate("Ordinary sourced note", std::slice::from_ref(&card_a.id))
+        .unwrap();
+    assert_eq!(pending_digest.status, "pending");
+    let ready_digest = store
+        .create_digest_candidate("OpenAI MCP launch release", &[card_a.id.clone(), card_b.id])
+        .unwrap();
+    assert_eq!(ready_digest.status, "ready");
+    store
+        .approve_digest_candidate(&ready_digest.id, Some("ops-test"), Some("approved fixture"))
+        .unwrap();
+
+    store
+        .insert_wiki_job_with_status(
+            "knowledge_cluster_editorial_decide",
+            "pending",
+            json!({ "cluster_id": "kcl-ops-backlog-editorial" }),
+        )
+        .unwrap();
+    store
+        .insert_wiki_job_with_status(
+            "knowledge_cluster_expand",
+            "pending",
+            json!({ "cluster_id": "kcl-ops-backlog-expand" }),
+        )
+        .unwrap();
+    store
+        .insert_wiki_job_with_status(
+            "ingest_url",
+            "pending",
+            json!({ "url": "https://example.com" }),
+        )
+        .unwrap();
+
+    let snapshot = store.ops_snapshot().unwrap();
+    assert_eq!(snapshot.health.pending_candidates, 2);
+    assert_eq!(snapshot.backlog.pending_memory_candidates, 2);
+    assert_eq!(snapshot.backlog.pending_digest_candidates, 1);
+    assert_eq!(snapshot.backlog.approved_digest_candidates, 1);
+    assert_eq!(snapshot.backlog.ready_digest_candidates, 0);
+    assert_eq!(snapshot.backlog.pending_wiki_jobs, 3);
+    assert_eq!(snapshot.backlog.pending_knowledge_jobs, 2);
+    assert_eq!(snapshot.backlog.pending_knowledge_editorial_jobs, 1);
+    assert_eq!(snapshot.backlog.pending_knowledge_expansion_jobs, 1);
+    assert_eq!(
+        snapshot
+            .backlog
+            .memory_candidates_by_status
+            .get("pending")
+            .copied(),
+        Some(2)
+    );
+    assert_eq!(
+        snapshot
+            .backlog
+            .digest_candidates_by_status
+            .get("approved")
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        snapshot.backlog.wiki_jobs_by_status.get("pending").copied(),
+        Some(3)
+    );
+    assert_eq!(
+        snapshot
+            .backlog
+            .knowledge_jobs_by_status
+            .get("pending")
+            .copied(),
+        Some(2)
+    );
 }
 
 #[test]

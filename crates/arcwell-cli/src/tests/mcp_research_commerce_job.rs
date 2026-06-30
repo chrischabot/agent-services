@@ -80,6 +80,15 @@ fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
         }),
     )
     .unwrap();
+    call_mcp_tool(
+        &paths,
+        "memory_extract_candidates",
+        json!({
+            "text": "My cat is called Ophelia. I prefer direct answers.",
+            "source_ref": "mcp-compact-ops"
+        }),
+    )
+    .unwrap();
 
     let result = dispatch_mcp(
         &paths,
@@ -98,8 +107,14 @@ fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
         Some("Compact MCP ops snapshot. Use `arcwell ops` for the full local JSON payload.")
     );
     assert!(structured["health"].is_object());
+    assert!(structured["backlog"].is_object());
+    assert_eq!(
+        structured["backlog"]["pending_memory_candidates"].as_i64(),
+        Some(2)
+    );
     assert!(structured["counts"]["source_cards"].as_u64().unwrap_or(0) >= 1);
     assert!(structured.get("source_cards").is_none());
+    assert!(structured.get("memory_candidates").is_none());
 }
 
 #[test]

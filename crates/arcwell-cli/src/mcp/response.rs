@@ -31,6 +31,7 @@ pub(crate) fn mcp_compact_ops_snapshot(value: Value) -> Value {
     json!({
         "summary": "Compact MCP ops snapshot. Use `arcwell ops` for the full local JSON payload.",
         "health": object.get("health").cloned().unwrap_or_else(|| json!({})),
+        "backlog": object.get("backlog").cloned().unwrap_or_else(|| json!({})),
         "secret_health": object.get("secret_health").cloned().unwrap_or_else(|| json!({})),
         "x_stats": object.get("x_stats").cloned().unwrap_or_else(|| json!({})),
         "counts": counts

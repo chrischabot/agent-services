@@ -149,6 +149,10 @@ code,pre{white-space:pre-wrap;word-break:break-word}
             snapshot.knowledge_editorial_decisions.len(),
         ),
         ("Knowledge reports", snapshot.knowledge_reports.len()),
+        (
+            "Knowledge pending jobs",
+            snapshot.backlog.pending_knowledge_jobs as usize,
+        ),
         ("X clusters", snapshot.x_knowledge_clusters.len()),
         (
             "X editorial decisions",
@@ -165,7 +169,18 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Job privacy blocks", job_privacy_blocks),
         ("Job follow-ups", snapshot.job_hunting.follow_up_count),
         ("Import runs", snapshot.import_runs.len()),
-        ("Memory candidates", snapshot.memory_candidates.len()),
+        (
+            "Digest candidates ready",
+            snapshot.backlog.ready_digest_candidates as usize,
+        ),
+        (
+            "Digest candidates pending",
+            snapshot.backlog.pending_digest_candidates as usize,
+        ),
+        (
+            "Memory review pending",
+            snapshot.backlog.pending_memory_candidates as usize,
+        ),
         ("Procedure candidates", snapshot.procedure_candidates.len()),
         ("Work runs", snapshot.work_runs.len()),
         ("Policy approvals", snapshot.policy_approvals.len()),

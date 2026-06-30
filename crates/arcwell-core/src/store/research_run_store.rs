@@ -7,6 +7,7 @@ impl Store {
         Ok(OpsSnapshot {
             health,
             worker,
+            backlog: self.ops_backlog_summary()?,
             x_stats: self.x_stats()?,
             radar_runs: self.list_radar_runs()?.into_iter().take(50).collect(),
             radar_source_quality: self.list_all_radar_source_quality()?,
@@ -55,6 +56,56 @@ impl Store {
             policy_approvals: self.list_policy_approvals(Some("pending"))?,
             secrets: self.list_secret_refs()?,
             secret_health: self.secret_health()?,
+        })
+    }
+
+    pub fn ops_backlog_summary(&self) -> Result<OpsBacklogSummary> {
+        Ok(OpsBacklogSummary {
+            memory_candidates_by_status: self.grouped_counts(
+                "SELECT status, COUNT(*) FROM candidates GROUP BY status ORDER BY status",
+            )?,
+            digest_candidates_by_status: self.grouped_counts(
+                "SELECT status, COUNT(*) FROM digest_candidates GROUP BY status ORDER BY status",
+            )?,
+            wiki_jobs_by_status: self.grouped_counts(
+                "SELECT status, COUNT(*) FROM wiki_jobs GROUP BY status ORDER BY status",
+            )?,
+            knowledge_jobs_by_status: self.grouped_counts(
+                "SELECT status, COUNT(*) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' GROUP BY status ORDER BY status",
+            )?,
+            pending_memory_candidates: self.count_query(
+                "SELECT COUNT(*) FROM candidates WHERE status = 'pending'",
+            )?,
+            pending_digest_candidates: self.count_query(
+                "SELECT COUNT(*) FROM digest_candidates WHERE status = 'pending'",
+            )?,
+            ready_digest_candidates: self.count_query(
+                "SELECT COUNT(*) FROM digest_candidates WHERE status = 'ready'",
+            )?,
+            approved_digest_candidates: self.count_query(
+                "SELECT COUNT(*) FROM digest_candidates WHERE status = 'approved'",
+            )?,
+            pending_wiki_jobs: self
+                .count_query("SELECT COUNT(*) FROM wiki_jobs WHERE status = 'pending'")?,
+            failed_wiki_jobs: self
+                .count_query("SELECT COUNT(*) FROM wiki_jobs WHERE status = 'failed'")?,
+            dead_lettered_wiki_jobs: self
+                .count_query("SELECT COUNT(*) FROM wiki_jobs WHERE status = 'dead_lettered'")?,
+            pending_knowledge_jobs: self.count_query(
+                "SELECT COUNT(*) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' AND status = 'pending'",
+            )?,
+            failed_knowledge_jobs: self.count_query(
+                "SELECT COUNT(*) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' AND status = 'failed'",
+            )?,
+            dead_lettered_knowledge_jobs: self.count_query(
+                "SELECT COUNT(*) FROM wiki_jobs WHERE kind LIKE 'knowledge_%' AND status = 'dead_lettered'",
+            )?,
+            pending_knowledge_editorial_jobs: self.count_query(
+                "SELECT COUNT(*) FROM wiki_jobs WHERE kind = 'knowledge_cluster_editorial_decide' AND status = 'pending'",
+            )?,
+            pending_knowledge_expansion_jobs: self.count_query(
+                "SELECT COUNT(*) FROM wiki_jobs WHERE kind IN ('knowledge_cluster_expand', 'knowledge_cluster_investigation_execute', 'knowledge_cluster_model_write') AND status = 'pending'",
+            )?,
         })
     }
 

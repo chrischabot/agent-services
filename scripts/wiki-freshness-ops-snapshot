@@ -119,17 +119,41 @@ def source_health_snapshot(
 ) -> dict[str, Any]:
     if not table_exists(conn, "source_health"):
         return {"available": False}
-    all_rows = rows(
-        conn,
-        """
-        SELECT key, provider, source_kind, locator, status, last_success_at,
-               last_failure_at, last_error, last_item_id, last_item_date,
-               cursor_key, cursor_value, next_run_at, updated_at
-        FROM source_health
-        ORDER BY updated_at DESC
-        """,
-    )
+    if table_exists(conn, "watch_sources"):
+        all_rows = rows(
+            conn,
+            """
+            SELECT sh.key, sh.provider, sh.source_kind, sh.locator, sh.status,
+                   sh.last_success_at, sh.last_failure_at, sh.last_error,
+                   sh.last_item_id, sh.last_item_date, sh.cursor_key,
+                   sh.cursor_value, sh.next_run_at, sh.updated_at,
+                   COALESCE(ws.status, 'missing') AS watch_status,
+                   ws.id AS watch_source_id,
+                   ws.label AS watch_label
+            FROM source_health sh
+            LEFT JOIN watch_sources ws
+              ON ws.source_kind = sh.source_kind
+             AND ws.locator = sh.locator
+            ORDER BY sh.updated_at DESC
+            """,
+        )
+    else:
+        all_rows = rows(
+            conn,
+            """
+            SELECT key, provider, source_kind, locator, status, last_success_at,
+                   last_failure_at, last_error, last_item_id, last_item_date,
+                   cursor_key, cursor_value, next_run_at, updated_at
+            FROM source_health
+            ORDER BY updated_at DESC
+            """,
+        )
+        for row in all_rows:
+            row["watch_status"] = "unknown"
+            row["watch_source_id"] = None
+            row["watch_label"] = None
     by_status = Counter(str(row.get("status") or "unknown") for row in all_rows)
+    by_watch_status = Counter(str(row.get("watch_status") or "unknown") for row in all_rows)
     by_kind_status = Counter(
         (
             str(row.get("source_kind") or "unknown"),
@@ -137,10 +161,20 @@ def source_health_snapshot(
         )
         for row in all_rows
     )
-    attention = [
+    non_healthy = [
         row
         for row in all_rows
         if str(row.get("status") or "").lower() not in {"healthy", "ok", "success"}
+    ]
+    active_attention = [
+        row
+        for row in non_healthy
+        if str(row.get("watch_status") or "unknown").lower() in {"active", "unknown"}
+    ]
+    inactive_attention = [
+        row
+        for row in non_healthy
+        if str(row.get("watch_status") or "unknown").lower() not in {"active", "unknown"}
     ]
     stale_healthy = []
     for row in all_rows:
@@ -149,7 +183,15 @@ def source_health_snapshot(
         last_success = parse_time(row.get("last_success_at"))
         if last_success is None or last_success < stale_cutoff:
             stale_healthy.append(row)
-    attention.sort(
+    active_attention.sort(
+        key=lambda row: (
+            parse_time(row.get("last_failure_at"))
+            or parse_time(row.get("updated_at"))
+            or datetime.min.replace(tzinfo=UTC)
+        ),
+        reverse=True,
+    )
+    inactive_attention.sort(
         key=lambda row: (
             parse_time(row.get("last_failure_at"))
             or parse_time(row.get("updated_at"))
@@ -165,13 +207,17 @@ def source_health_snapshot(
         "available": True,
         "total": len(all_rows),
         "by_status": dict(sorted(by_status.items())),
+        "by_watch_status": dict(sorted(by_watch_status.items())),
         "by_source_kind_status": [
             {"source_kind": kind, "status": status, "count": count}
             for (kind, status), count in sorted(by_kind_status.items())
         ],
-        "attention_rows": len(attention),
+        "attention_rows": len(active_attention),
+        "all_non_healthy_rows": len(non_healthy),
+        "inactive_attention_rows": len(inactive_attention),
         "stale_healthy_rows": len(stale_healthy),
-        "recent_attention": attention[:failure_limit],
+        "recent_attention": active_attention[:failure_limit],
+        "recent_inactive_attention": inactive_attention[:failure_limit],
         "oldest_stale_healthy": stale_healthy[:failure_limit],
     }
 
@@ -210,10 +256,69 @@ def cursor_snapshot(
     if not table_exists(conn, "cursors"):
         return {"available": False}
     all_rows = rows(conn, "SELECT key, value, updated_at FROM cursors ORDER BY updated_at DESC")
+    watch_status_by_key: dict[tuple[str, str], str] = {}
+    if table_exists(conn, "watch_sources"):
+        for source in rows(conn, "SELECT source_kind, locator, status FROM watch_sources"):
+            watch_status_by_key[
+                (
+                    str(source.get("source_kind") or "").lower(),
+                    str(source.get("locator") or "").lower(),
+                )
+            ] = str(source.get("status") or "unknown")
+
+    def cursor_watch_status(key: str) -> tuple[str, str, str | None]:
+        if key.startswith("x:watch:"):
+            return (
+                "x_handle",
+                key[len("x:watch:") :],
+                watch_status_by_key.get(("x_handle", key[len("x:watch:") :].lower()), "missing"),
+            )
+        if key.startswith("github-owner:"):
+            return (
+                "github_owner",
+                key[len("github-owner:") :],
+                watch_status_by_key.get(
+                    ("github_owner", key[len("github-owner:") :].lower()), "missing"
+                ),
+            )
+        if key.startswith("rss:"):
+            return (
+                "rss",
+                key[len("rss:") :],
+                watch_status_by_key.get(("rss", key[len("rss:") :].lower()), "missing"),
+            )
+        if key.startswith("github:") and key.endswith(":commits"):
+            locator = key[len("github:") : -len(":commits")]
+            return (
+                "github_repo",
+                locator,
+                watch_status_by_key.get(("github_repo", locator.lower()), "missing"),
+            )
+        if key.startswith("github:") and key.endswith(":releases"):
+            locator = key[len("github:") : -len(":releases")]
+            return (
+                "github_repo",
+                locator,
+                watch_status_by_key.get(("github_repo", locator.lower()), "missing"),
+            )
+        if key.startswith("arxiv:"):
+            return (
+                "arxiv_query",
+                key[len("arxiv:") :],
+                watch_status_by_key.get(("arxiv_query", key[len("arxiv:") :].lower()), "unknown"),
+            )
+        return ("unknown", key, "unknown")
+
     by_prefix: dict[str, dict[str, Any]] = {}
     stale = []
+    active_stale = []
+    inactive_stale = []
     for row in all_rows:
         key = str(row.get("key") or "")
+        source_kind, locator, watch_status = cursor_watch_status(key)
+        row["watch_source_kind"] = source_kind
+        row["watch_locator"] = locator
+        row["watch_status"] = watch_status
         prefix = key.split(":", 1)[0] if ":" in key else key
         bucket = by_prefix.setdefault(
             prefix,
@@ -235,12 +340,28 @@ def cursor_snapshot(
             if current_oldest is None or updated_at < current_oldest:
                 bucket["oldest_updated_at"] = iso(updated_at)
             if updated_at < stale_cutoff:
-                bucket["stale_count"] += 1
                 stale.append(row)
+                if str(watch_status).lower() in {"active", "unknown"}:
+                    bucket["stale_count"] += 1
+                    active_stale.append(row)
+                else:
+                    inactive_stale.append(row)
         else:
-            bucket["stale_count"] += 1
             stale.append(row)
+            if str(watch_status).lower() in {"active", "unknown"}:
+                bucket["stale_count"] += 1
+                active_stale.append(row)
+            else:
+                inactive_stale.append(row)
     stale.sort(
+        key=lambda row: parse_time(row.get("updated_at"))
+        or datetime.min.replace(tzinfo=UTC)
+    )
+    active_stale.sort(
+        key=lambda row: parse_time(row.get("updated_at"))
+        or datetime.min.replace(tzinfo=UTC)
+    )
+    inactive_stale.sort(
         key=lambda row: parse_time(row.get("updated_at"))
         or datetime.min.replace(tzinfo=UTC)
     )
@@ -248,8 +369,11 @@ def cursor_snapshot(
         "available": True,
         "total": len(all_rows),
         "by_prefix": sorted(by_prefix.values(), key=lambda row: (-row["count"], row["prefix"])),
-        "stale_rows": len(stale),
-        "oldest_stale": stale[:failure_limit],
+        "stale_rows": len(active_stale),
+        "all_stale_rows": len(stale),
+        "inactive_stale_rows": len(inactive_stale),
+        "oldest_stale": active_stale[:failure_limit],
+        "oldest_inactive_stale": inactive_stale[:failure_limit],
     }
 
 
@@ -426,10 +550,12 @@ def write_markdown(path: Path, summary: dict[str, Any]) -> None:
         "## Health",
         "",
         f"- Source-health rows: `{health.get('total', 0)}`",
-        f"- Attention rows: `{health.get('attention_rows', 0)}`",
+        f"- Active attention rows: `{health.get('attention_rows', 0)}`",
+        f"- Inactive non-healthy rows: `{health.get('inactive_attention_rows', 0)}`",
         f"- Stale healthy rows: `{health.get('stale_healthy_rows', 0)}`",
         f"- Cursor rows: `{cursors.get('total', 0)}`",
-        f"- Stale cursor rows: `{cursors.get('stale_rows', 0)}`",
+        f"- Active stale cursor rows: `{cursors.get('stale_rows', 0)}`",
+        f"- Inactive stale cursor rows: `{cursors.get('inactive_stale_rows', 0)}`",
         "",
         "## Latest Workflow",
         "",
@@ -451,16 +577,29 @@ def write_markdown(path: Path, summary: dict[str, Any]) -> None:
     lines.extend(["", "## Top Attention Rows", ""])
     attention = health.get("recent_attention") or []
     if attention:
-        lines.append("| Status | Kind | Locator | Last Failure | Error |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append("| Status | Watch | Kind | Locator | Last Failure | Error |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
         for row in attention[:20]:
             error = str(row.get("last_error") or "").replace("\n", " ")[:120]
             lines.append(
-                f"| {row.get('status', '')} | {row.get('source_kind', '')} | "
+                f"| {row.get('status', '')} | {row.get('watch_status', '')} | "
+                f"{row.get('source_kind', '')} | "
                 f"`{row.get('locator', '')}` | {row.get('last_failure_at', '')} | {error} |"
             )
     else:
-        lines.append("No non-healthy source-health rows.")
+        lines.append("No active non-healthy source-health rows.")
+    inactive = health.get("recent_inactive_attention") or []
+    if inactive:
+        lines.extend(["", "## Inactive Non-Healthy Rows", ""])
+        lines.append("| Status | Watch | Kind | Locator | Last Failure | Error |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for row in inactive[:20]:
+            error = str(row.get("last_error") or "").replace("\n", " ")[:120]
+            lines.append(
+                f"| {row.get('status', '')} | {row.get('watch_status', '')} | "
+                f"{row.get('source_kind', '')} | "
+                f"`{row.get('locator', '')}` | {row.get('last_failure_at', '')} | {error} |"
+            )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -481,10 +620,14 @@ def assessment(summary: dict[str, Any]) -> dict[str, Any]:
         add(
             "hold",
             "source health",
-            f"{health['attention_rows']} source-health rows are not healthy.",
+            f"{health['attention_rows']} active source-health rows are not healthy.",
         )
     else:
-        add("pass", "source health", "No non-healthy source-health rows found.")
+        inactive = health.get("inactive_attention_rows", 0)
+        detail = "No active non-healthy source-health rows found."
+        if inactive:
+            detail += f" {inactive} paused, missing, or otherwise inactive rows remain visible."
+        add("pass", "source health", detail)
 
     if health.get("stale_healthy_rows", 0):
         add(
@@ -494,9 +637,17 @@ def assessment(summary: dict[str, Any]) -> dict[str, Any]:
         )
 
     if cursors.get("stale_rows", 0):
-        add("hold", "cursors", f"{cursors['stale_rows']} cursors are older than the stale threshold.")
+        add(
+            "hold",
+            "cursors",
+            f"{cursors['stale_rows']} active/unknown cursors are older than the stale threshold.",
+        )
     else:
-        add("pass", "cursors", "No stale cursors by the configured threshold.")
+        inactive = cursors.get("inactive_stale_rows", 0)
+        detail = "No active/unknown stale cursors by the configured threshold."
+        if inactive:
+            detail += f" {inactive} missing or paused source cursors remain visible."
+        add("pass", "cursors", detail)
 
     if cards.get("recent", 0):
         add("pass", "recent source cards", f"{cards['recent']} source cards are inside the recent window.")
@@ -576,7 +727,11 @@ def main() -> int:
         "summary_md": str(args.proof_dir / "wiki_freshness_ops_snapshot.md"),
         "watch_sources_csv": str(args.proof_dir / "watch_sources_by_kind_status.csv"),
         "source_health_attention_csv": str(args.proof_dir / "source_health_attention.csv"),
+        "source_health_inactive_attention_csv": str(
+            args.proof_dir / "source_health_inactive_attention.csv"
+        ),
         "stale_cursors_csv": str(args.proof_dir / "stale_cursors.csv"),
+        "inactive_stale_cursors_csv": str(args.proof_dir / "inactive_stale_cursors.csv"),
         "source_cards_by_provider_csv": str(args.proof_dir / "source_cards_by_provider.csv"),
     }
     summary["artifacts"] = artifacts
@@ -588,7 +743,15 @@ def main() -> int:
         Path(artifacts["source_health_attention_csv"]),
         summary["source_health"].get("recent_attention", []),
     )
+    write_csv(
+        Path(artifacts["source_health_inactive_attention_csv"]),
+        summary["source_health"].get("recent_inactive_attention", []),
+    )
     write_csv(Path(artifacts["stale_cursors_csv"]), summary["cursors"].get("oldest_stale", []))
+    write_csv(
+        Path(artifacts["inactive_stale_cursors_csv"]),
+        summary["cursors"].get("oldest_inactive_stale", []),
+    )
     write_csv(
         Path(artifacts["source_cards_by_provider_csv"]),
         summary["source_cards"].get("by_provider_source_type", []),
@@ -606,7 +769,11 @@ def main() -> int:
                 "proof_dir": str(args.proof_dir),
                 "watch_sources": summary["watch_sources"].get("total", 0),
                 "source_health_attention_rows": summary["source_health"].get("attention_rows", 0),
+                "source_health_inactive_attention_rows": summary["source_health"].get(
+                    "inactive_attention_rows", 0
+                ),
                 "stale_cursors": summary["cursors"].get("stale_rows", 0),
+                "inactive_stale_cursors": summary["cursors"].get("inactive_stale_rows", 0),
                 "recent_source_cards": summary["source_cards"].get("recent", 0),
                 "decision_ledger_rows": summary["decision_ledger"].get("rows", 0),
                 "latest_workflow": summary["latest_workflow"].get("path"),

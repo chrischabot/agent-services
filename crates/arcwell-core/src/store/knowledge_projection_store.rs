@@ -369,7 +369,7 @@ impl Store {
                 digest_candidate_id: None,
                 source_card_ids: cluster.source_card_ids.clone(),
                 reason: format!(
-                    "Created a source-card-backed human-readable report for `{}` from {} sources.",
+                    "Created a working knowledge note for `{}` from {} linked sources.",
                     cluster.topic,
                     cluster.source_card_ids.len()
                 ),
@@ -389,7 +389,7 @@ impl Store {
         );
         let report = self.record_knowledge_report(KnowledgeReportInput {
             cluster_id: cluster.id.clone(),
-            title: format!("Knowledge Report: {}", cluster.topic),
+            title: cluster.topic.clone(),
             body_markdown: report_body,
             status: "draft".to_string(),
             source_card_ids: cluster.source_card_ids.clone(),

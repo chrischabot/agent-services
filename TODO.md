@@ -1,6 +1,6 @@
 # Arcwell Remaining Work
 
-Last updated: 2026-06-29
+Last updated: 2026-06-30
 
 This file is intentionally only unfinished work. Completed historical checklist
 items were removed. Existing unchecked items from the prior `TODO.md` have been
@@ -223,6 +223,13 @@ PR, implementation note, or final report:
       worker, stale GitHub rate-limit dead letters recovered to zero, and
       source-health attention is down to 15 rows. Remaining before this checkbox
       can close:
+      2026-06-30 follow-up: deterministic projection reports and
+      knowledge-cluster wiki pages now avoid reader-facing provider-bucket,
+      source-family, `Knowledge Report:` title-prefix, and pipeline-ledger
+      prose while preserving audit IDs; this is covered by severe knowledge
+      tests and full `cargo test --all --all-features`. Remaining editorial
+      quality work is broad production-corpus judgment and recurrence proof, not
+      basic wiki/report persistence.
       replace the remaining Codex-side six-hour catch-up wrapper with native
       fixed-time scan scheduling or prove watch-source cadence is sufficient,
       record multi-day sleep/shutdown/restart catch-up proof, work down

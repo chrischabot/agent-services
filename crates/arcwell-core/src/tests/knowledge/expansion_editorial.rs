@@ -64,12 +64,26 @@ fn severe_knowledge_cluster_expansion_writes_wiki_report_and_deduped_digest() {
     assert!(first.wiki_page.content.contains(&release.id));
     assert!(first.wiki_page.content.contains(&reaction.id));
     assert!(first.wiki_page.content.contains("Executive Read"));
+    assert!(first.wiki_page.content.contains("## Evidence"));
     assert!(
         first
             .wiki_page
             .content
             .contains("Confidence And Uncertainty")
     );
+    for forbidden in [
+        "Arcwell expanded this shared knowledge cluster",
+        "provider buckets",
+        "Source family:",
+        "source_card_backlog_clustering",
+        "unified knowledge system",
+    ] {
+        assert!(
+            !first.wiki_page.content.contains(forbidden),
+            "wiki page leaked internal phrasing `{forbidden}`:\n{}",
+            first.wiki_page.content
+        );
+    }
     assert!(first.report.body_markdown.contains(&release.id));
     assert!(first.report.body_markdown.contains(&reaction.id));
     assert!(
@@ -925,7 +939,7 @@ fn severe_large_knowledge_cluster_expansion_bounds_prose_without_losing_citation
         expansion
             .wiki_page
             .content
-            .contains("additional source cards are omitted from this prose synthesis")
+            .contains("additional sources are omitted from this readable section")
     );
     assert!(
         expansion

@@ -1072,20 +1072,38 @@ impl Store {
             let previous_cursor = self.get_cursor(&cursor_key)?.map(|cursor| cursor.value);
             previous_cursor_for_run = previous_cursor.clone();
             let base = validated_x_api_base(endpoint)?;
-            let mut url = base.join("/2/tweets/search/recent")?;
-            {
-                let mut pairs = url.query_pairs_mut();
-                pairs
-                    .append_pair("query", query)
-                    .append_pair("max_results", &max_results.clamp(10, 100).to_string())
-                    .append_pair("tweet.fields", "created_at,author_id,public_metrics")
-                    .append_pair("expansions", "author_id")
-                    .append_pair("user.fields", "username,name");
-                if let Some(since_id) = &previous_cursor {
-                    pairs.append_pair("since_id", since_id);
+            let build_url = |since_id: Option<&str>| -> Result<url::Url> {
+                let mut url = base.join("/2/tweets/search/recent")?;
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    pairs
+                        .append_pair("query", query)
+                        .append_pair("max_results", &max_results.clamp(10, 100).to_string())
+                        .append_pair("tweet.fields", "created_at,author_id,public_metrics")
+                        .append_pair("expansions", "author_id")
+                        .append_pair("user.fields", "username,name");
+                    if let Some(since_id) = since_id {
+                        pairs.append_pair("since_id", since_id);
+                    }
                 }
-            }
-            let value = fetch_x_json(url.as_str(), Some(&token))?;
+                Ok(url)
+            };
+            let url = build_url(previous_cursor.as_deref())?;
+            let value = match fetch_x_json(url.as_str(), Some(&token)) {
+                Ok(value) => value,
+                Err(error)
+                    if previous_cursor.is_some()
+                        && x_recent_search_error_is_stale_since_id(&error.to_string()) =>
+                {
+                    let retry_url = build_url(None)?;
+                    fetch_x_json(retry_url.as_str(), Some(&token)).with_context(|| {
+                        format!(
+                            "retrying X recent search without stale since_id for query {query:?}"
+                        )
+                    })?
+                }
+                Err(error) => return Err(error),
+            };
             x_fail_on_response_errors(&value)?;
             let import_value =
                 x_search_response_to_import_items(&value, "recent_search", Some(query))?;
@@ -1460,4 +1478,9 @@ impl Store {
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
         self.x_import_following_watch_sources_with_base(max_users, &endpoint)
     }
+}
+
+fn x_recent_search_error_is_stale_since_id(error: &str) -> bool {
+    error.contains("'since_id' must be a tweet id created after")
+        || error.contains("\"since_id\" must be a tweet id created after")
 }

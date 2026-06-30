@@ -1141,6 +1141,11 @@ fn severe_knowledge_projection_from_source_card_query_creates_human_report() {
     assert_eq!(report.cluster.source_card_ids.len(), 2);
     assert_eq!(report.editorial_decision.status, "completed");
     assert_eq!(report.report.status, "draft");
+    assert_eq!(
+        report.report.title,
+        "Projection bridge agent infrastructure trend"
+    );
+    assert!(!report.report.title.starts_with("Knowledge Report:"));
     assert!(report.report.body_markdown.contains(&card_a.id));
     assert!(report.report.body_markdown.contains(&card_b.id));
     assert!(

@@ -140,12 +140,27 @@ fn severe_source_card_backlog_clustering_splits_topics_and_skips_replay() {
             Some("source_card_backlog_clustering")
         );
         assert!(projection.report.body_markdown.contains("## What happened"));
+        assert_eq!(projection.report.title, projection.cluster.topic);
         assert!(
             !projection
                 .report
                 .body_markdown
                 .contains("Arcwell digest candidate")
         );
+        for forbidden in [
+            "provider buckets",
+            "source family/families",
+            "Roles present",
+            "GitHub repositories:",
+            "External domains:",
+            "unified knowledge pipeline",
+        ] {
+            assert!(
+                !projection.report.body_markdown.contains(forbidden),
+                "report leaked internal phrasing `{forbidden}`:\n{}",
+                projection.report.body_markdown
+            );
+        }
     }
 
     let replay = store.cluster_source_card_backlog(20, 2, 10).unwrap();
@@ -363,13 +378,13 @@ fn severe_source_card_backlog_clustering_preserves_ai_signal_mix_without_topic_c
         openai_projection
             .report
             .body_markdown
-            .contains("## Signal mix")
+            .contains("## Evidence")
     );
     assert!(
         openai_projection
             .report
             .body_markdown
-            .contains("reaction/community item(s)")
+            .contains("community/reaction")
     );
 
     let karpathy_ids = report

@@ -205,6 +205,10 @@ PR, implementation note, or final report:
       and tick `8c3ad3bd-9759-41b6-83a9-78154ba1d33a`, after fixing due-job
       priority and briefing email body capping; the older June 29 oversized
       tick remains a historical blocked row. High-confidence breaking
+      2026-06-30 follow-up: `ops_snapshot`, compact MCP ops, and `/ops/ui` now
+      expose issue schedule tick counts/latest sent/latest blocked state, which
+      proves local scheduler/delivery ledger visibility, not future inbox
+      placement or multi-day recurrence.
       candidates route through the Arcwell digest-alert schedule `Breaking AI
       knowledge alerts`. The worker now filters due sources before applying the
       batch cap, advances source health using watch-source cadence, reuses an
@@ -230,6 +234,21 @@ PR, implementation note, or final report:
       tests and full `cargo test --all --all-features`. Remaining editorial
       quality work is broad production-corpus judgment and recurrence proof, not
       basic wiki/report persistence.
+      2026-06-30 repair-plan follow-up: X stale `since_id` recovery now retries
+      without the stale cursor and clears an empty successful retry cursor under
+      severe coverage; a fresh real-home backup
+      `/Users/chabotc/.arcwell/backups/20260630T125652Z` verifies and strict
+      doctor passes; generic non-daily digest candidate delivery capping is
+      covered by the provider-path severe test; `scripts/wiki-job-dedupe-test`
+      covers deferred active duplicates and the real GitHub dedupe dry run found
+      0 active duplicate GitHub jobs; generated daily briefing source-card
+      revisions now share a stable date-keyed knowledge entity while true alias
+      collisions still fail; four live failed/dead-lettered daily-briefing
+      backlog rows were requeued and completed after worker restart, and the
+      editorial/expansion/investigation backlog drained to 0 pending/failed/
+      dead-lettered knowledge jobs. Remaining work is recurring proof over
+      time, stale RSS/GitHub source cleanup, broad provider freshness, and
+      review/digest candidate backlog policy, not this alias-collision failure.
       replace the remaining Codex-side six-hour catch-up wrapper with native
       fixed-time scan scheduling or prove watch-source cadence is sufficient,
       record multi-day sleep/shutdown/restart catch-up proof, work down
@@ -1428,11 +1447,17 @@ PR, implementation note, or final report:
       controlled Cloudflare Email-compatible provider path using configured
       delivery settings. Follow-up severe tests prove the delivered email body
       is the trimmed `Job Scan` view, is rendered as HTML for email providers,
-      hides internal shortlist/tier sections, uses percent scores instead of
-      tier labels, filters out US/Canada-only roles for a UK-plausible reader,
-      and groups same-title regional duplicates. This does not prove live
-      external email delivery, one-day recurrence, broad job-source coverage,
-      application delivery, warm intros, or outcomes.
+      omits profile/generated metadata, elides empty New/Removed sections,
+      uses bold linked role titles plus explicit apply URLs, uses percent scores
+      instead of tier labels, filters out US/Canada/Switzerland-only roles for a
+      UK-plausible reader, groups same-title regional duplicates, shows
+      geographically plausible unscored open leads as `Needs scoring`, and keeps
+      stale/closed latest-role events out of `Currently open roles`. Real-home
+      no-send preview `jweek-3cdf1afed0854e7c` /
+      `jweekdel-2daff15f06ff464e8fbb558146994313` showed 78 live ledger rows
+      and 14 current open groups after filtering. This does not prove a fresh
+      live external email send, one-day recurrence, application delivery, warm
+      intros, or outcomes.
 - [x] Add bounded scheduled live-fetch proof for selected direct-role sources
       without promoting job radar to operational. Proof at
       `.arcwell-dev/proofs/job-radar-live-fetch-proof-20260629T053332Z-16818/artifacts/proof-packet.json`
@@ -1495,12 +1520,12 @@ PR, implementation note, or final report:
       plus intro path, and shows application status, intro status, and next
       actions plus a controlled role-status change in weekly-report output for
       scored roles in the requested profile. The weekly report now renders
-      `warm_intro_ready: 0`, `identify: 1`, and role-change counts, and excludes
-      unscored role noise from the reader-facing shortlist while keeping
-      unscored rows visible in tier counts. This does not prove real user
-      approval, operational-home tracking, Google Docs draft creation,
-      sent/submitted applications, warm intros, live freshness, recurrence, or
-      predictive outcome learning.
+      `warm_intro_ready: 0`, `identify: 1`, and role-change counts, hides
+      latest stale/closed roles from the current-open reader section, and keeps
+      unscored open leads out of the scored shortlist/tier-count statistics.
+      This does not prove real user approval, operational-home tracking, Google
+      Docs draft creation, sent/submitted applications, warm intros, live
+      freshness, recurrence, or predictive outcome learning.
 - [x] Add controlled outreach-readiness proof without claiming outreach was
       sent or that a real introduction exists. Proof at
       `.arcwell-dev/proofs/job-outreach-readiness-proof-20260629T074806Z-87604/artifacts/proof-packet.json`

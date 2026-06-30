@@ -853,6 +853,108 @@ fn severe_knowledge_entity_alias_collision_requires_review() {
 }
 
 #[test]
+fn severe_generated_daily_briefing_revisions_share_source_item_entity() {
+    // CLAIM: Generated daily briefing source-card revisions for the same day
+    // are one evolving local source item, not many unrelated URL entities
+    // that collide on the same reader-facing title.
+    // PRECONDITIONS: Two generated daily briefing cards have the same title
+    // and date but different content-hash URLs.
+    // POSTCONDITIONS: projection succeeds, durable source-card evidence is
+    // merged onto one stable source_item entity, and the true alias-collision
+    // guard still remains available for unrelated entities.
+    // ORACLE: knowledge entity canonical key, aliases, source-card id set, and
+    // absence of the alias-collision error for same-day generated revisions.
+    // SEVERITY: Severe because scheduled daily briefing retries otherwise
+    // create failed backlog jobs while the system looks operational.
+    let store = test_store("knowledge-daily-briefing-revision-entity");
+    let first = store
+        .add_source_card(SourceCardInput {
+            title: "Arcwell AI daily briefing 2026-06-30".to_string(),
+            url: "https://example.com/arcwell/knowledge-daily-briefing/oldhash".to_string(),
+            source_type: "knowledge_daily_briefing".to_string(),
+            provider: "arcwell".to_string(),
+            summary: "Generated daily briefing revision one with source-backed report context."
+                .to_string(),
+            claims: vec![SourceClaim {
+                claim:
+                    "Daily briefing revision one summarizes source-backed AI ecosystem activity."
+                        .to_string(),
+                kind: "summary".to_string(),
+                confidence: 0.7,
+            }],
+            retrieved_at: Some("2026-06-30T07:00:00Z".to_string()),
+            metadata: json!({
+                "source_kind": "knowledge_daily_briefing",
+                "generated": true,
+                "extracted_dates": ["2026-06-30"],
+                "provenance_strength": "generated"
+            }),
+        })
+        .unwrap();
+    let second = store
+        .add_source_card(SourceCardInput {
+            title: "Arcwell AI daily briefing 2026-06-30".to_string(),
+            url: "https://example.com/arcwell/knowledge-daily-briefing/newhash".to_string(),
+            source_type: "knowledge_daily_briefing".to_string(),
+            provider: "arcwell".to_string(),
+            summary:
+                "Generated daily briefing revision two with updated source-backed report context."
+                    .to_string(),
+            claims: vec![SourceClaim {
+                claim:
+                    "Daily briefing revision two updates the same day briefing with more evidence."
+                        .to_string(),
+                kind: "summary".to_string(),
+                confidence: 0.7,
+            }],
+            retrieved_at: Some("2026-06-30T08:00:00Z".to_string()),
+            metadata: json!({
+                "source_kind": "knowledge_daily_briefing",
+                "generated": true,
+                "extracted_dates": ["2026-06-30"],
+                "provenance_strength": "generated"
+            }),
+        })
+        .unwrap();
+
+    store
+        .project_knowledge_from_source_cards(
+            "Daily briefing generated revision projection",
+            vec![first.clone(), second.clone()],
+            "severe_daily_briefing_revision",
+            "Local Proof",
+            "generated_daily_briefing_revision",
+            Vec::new(),
+            json!({ "test": true }),
+        )
+        .unwrap();
+
+    let entity = store
+        .conn
+        .query_row(
+            "SELECT canonical_key, aliases_json, source_card_ids_json FROM knowledge_entities WHERE entity_type = 'source_item' AND name = 'Arcwell AI daily briefing 2026-06-30'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(entity.0, "arcwell:knowledge_daily_briefing:2026-06-30");
+    let aliases: Vec<String> = serde_json::from_str(&entity.1).unwrap();
+    assert_eq!(
+        aliases,
+        vec!["Arcwell AI daily briefing 2026-06-30".to_string()]
+    );
+    let source_card_ids: Vec<String> = serde_json::from_str(&entity.2).unwrap();
+    assert!(source_card_ids.contains(&first.id), "{source_card_ids:?}");
+    assert!(source_card_ids.contains(&second.id), "{source_card_ids:?}");
+}
+
+#[test]
 fn severe_knowledge_adapter_contract_records_success_and_failure() {
     // CLAIM: Source adapters share one durable contract at the job boundary.
     // ORACLE: completed and failed jobs write knowledge_adapter_runs with

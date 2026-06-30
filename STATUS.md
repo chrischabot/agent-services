@@ -77,7 +77,11 @@ Knowledge worker chaining and deterministic backlog update: completed `knowledge
 
 2026-06-30 freshness backlog visibility and safe-batch note: live wiki freshness workflow `.arcwell-dev/proofs/wiki-freshness-workflow-20260630T123445Z` applied 9 gated safe-batch updates to existing wiki pages, wrote backups, refreshed page metadata/FTS rows, and a follow-up dry run `.arcwell-dev/proofs/wiki-freshness-workflow-20260630T123531Z` reported 0 remaining safe-batch candidates, 0 blocked source rows, and 249 pending manual review decisions. `ops_snapshot`/MCP and `/ops/ui` now expose backlog counts separately from worker health: current real-home health has 0 pending/failed/dead-lettered wiki jobs and 0 pending/failed/dead-lettered knowledge jobs, while the review backlog remains visible at 2,286 memory candidates, 681 ready digest candidates, 271 pending digest candidates, and 14 approved digest candidates. The same backlog summary now includes oldest-created and next-runnable timestamps for memory-review, digest, wiki-job, and knowledge-job queues; a rebuilt `target/debug/arcwell ops` real-home smoke showed oldest pending memory candidate `2026-06-22T02:26:33.698900+00:00`, oldest pending digest candidate `2026-06-23T08:52:33.520572+00:00`, oldest ready digest candidate `2026-06-23T08:52:27.046497+00:00`, oldest approved digest candidate `2026-06-25T10:10:07.025499+00:00`, and no pending wiki/knowledge jobs. Severe tests cover the backlog summary timestamps and compact MCP/UI exposure, and `cargo test --all --all-features` passed before the timestamp extension; follow-up targeted checks for the timestamp extension passed. This is production-data proof for safe automatic page annotation and backlog visibility, not automatic approval of the remaining editorial/manual-review queues.
 
+2026-06-30 issue-schedule ops summary note: `ops_snapshot`, compact MCP `ops_snapshot`, and `/ops/ui` now expose an `issue_schedule_summary`/Issue Schedule Summary view with per-schedule tick status counts, latest tick due/status, latest sent tick, and latest blocked tick/error. A rebuilt real-home `target/debug/arcwell ops` smoke showed the active `Arcwell AI daily briefing` schedule first, with `tick_status_counts` `{blocked: 1, sent: 5}`, latest tick `2026-06-30T12:32:48Z` marked `sent`, and latest blocked tick `2026-06-29T06:00:00+00:00` carrying the redacted `notes are too long` delivery error. Severe tests cover the derived ops summary and compact MCP/UI exposure. This proves local operational visibility over durable schedule/tick rows, not Gmail inbox placement, external provider deliverability beyond recorded delivery attempts, or future wall-clock recurrence.
+
 2026-06-30 X stale cursor recovery note: recent-search ingestion now detects X's stale `since_id` rejection both as HTTP fetch failure text and as provider error JSON, retries once without `since_id`, and treats the retry as a cursor reset boundary. If the retry returns a newer `newest_id`, the cursor advances only after durable import/source-health writes; if the retry succeeds with no replacement cursor, the stale cursor is deleted so scheduled scans do not repeat the same doomed 400 forever. Severe regression coverage proves the empty-retry case preserves existing durable X rows, clears the cursor, records healthy source health with no cursor value, and records the sync-run previous/new cursor transition. A live real-home source-health query found no current X `since_id` failure rows to repair. This is local severe proof plus current-state inspection, not a wall-clock proof that a future live scheduled stale cursor has recovered unattended.
+
+2026-06-30 repair-plan live cleanup note: a fresh real-home backup was created at `/Users/chabotc/.arcwell/backups/20260630T125652Z`, verified successfully, and strict doctor accepted it. Generic digest candidate body capping was re-audited through the severe non-daily Cloudflare Email provider-path test. `scripts/wiki-job-dedupe-test` proves deferred active duplicate handling, and a live GitHub-only dedupe dry run reported 0 active GitHub duplicates. A live worker failure exposed generated daily briefing source cards as legacy URL-keyed knowledge entities; the source-item canonical key now uses `arcwell:knowledge_daily_briefing:<date>`, legacy URL-keyed daily briefing entities are migrated in place, and severe tests prove true alias collisions still fail. After restarting the resident worker on the rebuilt binary, four failed/dead-lettered `knowledge_cluster_backlog` rows were requeued and completed, followed by a bounded drain that completed pending expansion and investigation jobs. Current ops shows 0 pending/failed/dead-lettered knowledge jobs and 0 pending/failed/dead-lettered wiki jobs; review queues remain visible at 2,286 memory candidates, 272 pending digest candidates, 689 ready digest candidates, and 14 approved digest candidates. This is live recovery and local severe proof for the repaired failure class, not proof of multi-day unattended recurrence or broad provider freshness.
 
 2026-06-26 knowledge recurrence lineage note: auto-enqueued `knowledge_cluster_backlog`, `knowledge_cluster_editorial_decide`, `knowledge_cluster_expand`, and `knowledge_cluster_investigation_execute` jobs now carry durable `input_json.lineage` with parent job ids, watch-source health keys, source-card ids, cluster ids/topics, and investigation/report ids where available. Local severe tests assert scheduled backlog recurrence, adapter-completion chaining, backlog-to-editorial chaining, editorial-to-expansion chaining, expansion-to-investigation chaining, and policy-denied follow-ups remain explainable from stored job rows. This is still Local Proof, not wall-clock production recurrence or live external delivery recurrence.
 
@@ -295,13 +299,21 @@ Job-hunting scheduled-report email addendum: severe test
 `severe_job_radar_schedule_replay_refreshes_sources_and_reports` now covers
 `job_radar` schedule/enqueue delivery metadata. The worker carries optional
 email delivery metadata from CLI/MCP scheduling into `job_radar_refresh`,
-compiles the job report with `New openings found`, `Currently open roles`, and
-`Roles removed` sections, prepares the report delivery, and sends it through a
-controlled Cloudflare Email-compatible provider path using configured delivery
-settings. This proves the scheduled-report email path under controlled provider
-conditions; it is not live external email proof, broad job-source coverage,
-one-day recurrence, operational-home monitoring, application delivery, warm
-intros, or outcome proof.
+compiles the job report, prepares the trimmed `Job Scan` delivery body, and
+sends it through a controlled Cloudflare Email-compatible provider path using
+configured delivery settings. Follow-up severe tests prove the email body omits
+profile/generated metadata, elides empty `New openings found` and
+`Roles removed` sections, renders bold linked role titles as HTML, includes
+explicit apply URLs, keeps score percentages without reader-facing tier labels,
+groups same-title regional duplicates, includes geographically plausible
+unscored open leads as `Needs scoring`, excludes stale/closed latest-role
+events from `Currently open roles`, and rejects US/Canada/Switzerland-only
+locations for the UK-plausible reader. Real-home no-send preview
+`jweek-3cdf1afed0854e7c` / `jweekdel-2daff15f06ff464e8fbb558146994313`
+showed 78 live ledger rows and 14 current open groups after filtering. This
+proves the scheduled-report email path under controlled provider and prepared
+real-home preview conditions; it is not a fresh live external send, one-day
+recurrence, application delivery, warm intros, or outcome proof.
 
 Job-hunting live-radar recurrence addendum: preserved controlled proof root
 `.arcwell-dev/proofs/job-radar-live-recurrence-controlled-proof/artifacts/proof-packet.json`

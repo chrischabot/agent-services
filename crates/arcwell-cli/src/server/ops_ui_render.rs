@@ -195,6 +195,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
     }
     html.push_str("</section>");
     html.push_str(&render_backlog_age_table(snapshot));
+    html.push_str(&render_issue_schedule_summary_table(snapshot));
     html.push_str(&render_ops_summary(snapshot, &health_score));
     if let Some(detail) = &options.detail {
         html.push_str(&render_ops_detail(snapshot, detail));
@@ -1115,6 +1116,47 @@ fn render_backlog_age_table(snapshot: &OpsSnapshot) -> String {
                     .unwrap_or_default(),
             ],
         ],
+    )
+}
+
+fn render_issue_schedule_summary_table(snapshot: &OpsSnapshot) -> String {
+    ops_table(
+        "Issue Schedule Summary",
+        &[
+            "name",
+            "status",
+            "time",
+            "tick counts",
+            "latest due",
+            "latest status",
+            "latest sent",
+            "latest blocked",
+            "error",
+        ],
+        snapshot
+            .issue_schedule_summary
+            .iter()
+            .take(25)
+            .map(|schedule| {
+                vec![
+                    schedule.name.clone(),
+                    schedule.status.clone(),
+                    format!(
+                        "{} {:02}:{:02}",
+                        schedule.time_zone, schedule.hour, schedule.minute
+                    ),
+                    serde_json::to_string(&schedule.tick_status_counts).unwrap_or_default(),
+                    schedule.latest_tick_due_at.clone().unwrap_or_default(),
+                    schedule.latest_tick_status.clone().unwrap_or_default(),
+                    schedule.latest_sent_due_at.clone().unwrap_or_default(),
+                    schedule.latest_blocked_due_at.clone().unwrap_or_default(),
+                    schedule
+                        .latest_tick_error
+                        .clone()
+                        .or_else(|| schedule.latest_blocked_error.clone())
+                        .unwrap_or_default(),
+                ]
+            }),
     )
 }
 

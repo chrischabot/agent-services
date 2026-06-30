@@ -684,10 +684,6 @@ impl Store {
             metadata: input.metadata,
         };
         validate_knowledge_entity_input(&normalized)?;
-        self.ensure_knowledge_entity_aliases_available(
-            &normalized.canonical_key,
-            &normalized.aliases,
-        )?;
         Ok(normalized)
     }
 
@@ -695,6 +691,7 @@ impl Store {
         &self,
         canonical_key: &str,
         aliases: &[String],
+        ignore_entity_id: Option<&str>,
     ) -> Result<()> {
         let aliases = normalize_knowledge_aliases(aliases, None);
         if aliases.is_empty() {
@@ -715,6 +712,9 @@ impl Store {
             .collect::<BTreeSet<_>>();
         for entity in existing {
             if entity.canonical_key == canonical_key {
+                continue;
+            }
+            if ignore_entity_id == Some(entity.id.as_str()) {
                 continue;
             }
             let mut entity_aliases =

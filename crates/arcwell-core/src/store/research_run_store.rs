@@ -1,5 +1,13 @@
 use super::*;
 
+fn issue_schedule_status_rank(status: &str) -> u8 {
+    match status {
+        "active" => 0,
+        "paused" | "inactive" => 1,
+        _ => 2,
+    }
+}
+
 impl Store {
     pub fn ops_snapshot(&self) -> Result<OpsSnapshot> {
         let health = self.health()?;
@@ -8,6 +16,7 @@ impl Store {
             health,
             worker,
             backlog: self.ops_backlog_summary()?,
+            issue_schedule_summary: self.issue_schedule_ops_summary()?,
             x_stats: self.x_stats()?,
             radar_runs: self.list_radar_runs()?.into_iter().take(50).collect(),
             radar_source_quality: self.list_all_radar_source_quality()?,
@@ -134,6 +143,73 @@ impl Store {
 
     fn single_string_query(&self, sql: &str) -> Result<Option<String>> {
         Ok(self.conn.query_row(sql, [], |row| row.get(0))?)
+    }
+
+    pub fn issue_schedule_ops_summary(&self) -> Result<Vec<IssueScheduleOpsSummary>> {
+        let schedules = self.list_issue_schedules()?;
+        let ticks = self.list_issue_schedule_ticks(None)?;
+        let mut summaries = Vec::with_capacity(schedules.len());
+
+        for schedule in schedules {
+            let mut schedule_ticks: Vec<&IssueScheduleTick> = ticks
+                .iter()
+                .filter(|tick| tick.schedule_id == schedule.id)
+                .collect();
+            schedule_ticks.sort_by(|left, right| {
+                left.due_at
+                    .cmp(&right.due_at)
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+
+            let mut tick_status_counts = BTreeMap::new();
+            for tick in &schedule_ticks {
+                *tick_status_counts.entry(tick.status.clone()).or_insert(0) += 1;
+            }
+
+            let latest_tick = schedule_ticks.last().copied();
+            let latest_sent_tick = schedule_ticks
+                .iter()
+                .rev()
+                .copied()
+                .find(|tick| tick.status == "sent");
+            let latest_blocked_tick = schedule_ticks
+                .iter()
+                .rev()
+                .copied()
+                .find(|tick| tick.status == "blocked");
+
+            summaries.push(IssueScheduleOpsSummary {
+                schedule_id: schedule.id,
+                name: schedule.name,
+                status: schedule.status,
+                kind: schedule.kind,
+                channel: schedule.channel,
+                recipient_ref: schedule.recipient_ref,
+                time_zone: schedule.time_zone,
+                hour: schedule.hour,
+                minute: schedule.minute,
+                catch_up_hours: schedule.catch_up_hours,
+                tick_status_counts,
+                latest_tick_due_at: latest_tick.map(|tick| tick.due_at.clone()),
+                latest_tick_status: latest_tick.map(|tick| tick.status.clone()),
+                latest_tick_created_at: latest_tick.map(|tick| tick.created_at.clone()),
+                latest_tick_updated_at: latest_tick.map(|tick| tick.updated_at.clone()),
+                latest_tick_delivery_id: latest_tick.and_then(|tick| tick.delivery_id.clone()),
+                latest_tick_error: latest_tick.and_then(|tick| tick.error.clone()),
+                latest_sent_due_at: latest_sent_tick.map(|tick| tick.due_at.clone()),
+                latest_sent_delivery_id: latest_sent_tick.and_then(|tick| tick.delivery_id.clone()),
+                latest_blocked_due_at: latest_blocked_tick.map(|tick| tick.due_at.clone()),
+                latest_blocked_error: latest_blocked_tick.and_then(|tick| tick.error.clone()),
+            });
+        }
+
+        summaries.sort_by(|left, right| {
+            issue_schedule_status_rank(&left.status)
+                .cmp(&issue_schedule_status_rank(&right.status))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(summaries)
     }
 
     pub fn create_research_plan(&self, query: &str, max_sources: usize) -> Result<ResearchPlan> {

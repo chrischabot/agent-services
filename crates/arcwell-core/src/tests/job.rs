@@ -1400,11 +1400,23 @@ fn severe_job_weekly_report_preserves_application_status_and_source_health() {
         "{}",
         report.body
     );
+    let currently_open = report
+        .body
+        .split("## Currently open roles")
+        .nth(1)
+        .and_then(|tail| tail.split("## Roles removed").next())
+        .unwrap();
     assert!(
-        !report.body.contains("Unscored Parser Noise"),
+        !currently_open.contains("Staff Agent Platform Engineer"),
         "{}",
         report.body
     );
+    assert!(
+        currently_open.contains("Unscored Parser Noise"),
+        "{}",
+        report.body
+    );
+    assert!(currently_open.contains("Needs scoring."), "{}", report.body);
     assert!(
         report.body.contains("warm_intro_ready: 0"),
         "{}",
@@ -1517,6 +1529,14 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
             "Remote",
         ))
         .unwrap();
+    let _unscored_uk = store
+        .record_job_role_card(role_input(
+            "Tailscale",
+            "solutions-engineer-uk",
+            "Solutions Engineer Remote (United Kingdom)",
+            "Remote",
+        ))
+        .unwrap();
     let mixed_anthropic = store
         .record_job_role_card(role_input(
             "Anthropic",
@@ -1533,6 +1553,14 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
             "",
         ))
         .unwrap();
+    let zurich_only_anthropic = store
+        .record_job_role_card(role_input(
+            "Anthropic",
+            "research-engineer-zurich",
+            "Research Engineer, Production Model Post-Training Z\u{00FC}rich, CH",
+            "Z\u{00FC}rich",
+        ))
+        .unwrap();
     for role in [
         &uk_role,
         &eu_role,
@@ -1540,6 +1568,7 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
         &us_only,
         &mixed_anthropic,
         &sf_only_anthropic,
+        &zurich_only_anthropic,
     ] {
         store
             .record_job_fit_score(job_fixture_score_input(&role.id, &profile.id, &evidence.id))
@@ -1561,7 +1590,7 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
     assert!(
         report
             .body
-            .contains("Locations: Europe; remote, United Kingdom; remote."),
+            .contains("**[Senior Developer Advocate at Tailscale](https://tailscale.com/careers/senior-developer-advocate-uk)**  Europe; remote, United Kingdom; remote"),
         "{}",
         report.body
     );
@@ -1571,6 +1600,14 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
         report.body
     );
     assert!(report.body.contains("Score: 97%."), "{}", report.body);
+    assert!(
+        report
+            .body
+            .contains("**[Solutions Engineer at Tailscale](https://tailscale.com/careers/solutions-engineer-uk)**  United Kingdom; remote"),
+        "{}",
+        report.body
+    );
+    assert!(report.body.contains("Needs scoring."), "{}", report.body);
     assert!(
         report
             .body
@@ -1585,6 +1622,8 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
             && !report.body.contains("Ontario")
             && !report.body.contains("San Francisco")
             && !report.body.contains("Product Engineer, Computer Use")
+            && !report.body.contains("Z\u{00FC}rich")
+            && !report.body.contains("research-engineer-zurich")
             && !report.body.contains("Senior Infrastructure Engineer"),
         "{}",
         report.body
@@ -1655,8 +1694,10 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
     assert_eq!(prepared.delivery.status, "prepared");
     let prepared_body = &prepared.channel_message.as_ref().unwrap().body;
     assert!(prepared_body.starts_with("# Job Scan"), "{prepared_body}");
+    assert!(!prepared_body.contains("Profile:"), "{prepared_body}");
+    assert!(!prepared_body.contains("Generated:"), "{prepared_body}");
     assert!(
-        prepared_body.contains("## New openings found"),
+        !prepared_body.contains("## New openings found"),
         "{prepared_body}"
     );
     assert!(
@@ -1664,11 +1705,20 @@ fn severe_job_weekly_report_delivery_requires_authorization_and_privacy_pass() {
         "{prepared_body}"
     );
     assert!(
-        prepared_body.contains("## Roles removed"),
+        !prepared_body.contains("## Roles removed"),
         "{prepared_body}"
     );
     assert!(!prepared_body.contains("## Shortlist"), "{prepared_body}");
     assert!(!prepared_body.contains("tier_"), "{prepared_body}");
+    assert!(
+        prepared_body.contains("**[Staff Agent Platform Engineer at Example AI](https://example.com/careers/staff-agent-platform-engineer)**"),
+        "{prepared_body}"
+    );
+    assert!(
+        prepared_body.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
+        "{prepared_body}"
+    );
+    assert!(prepared_body.contains("Score: 97%."), "{prepared_body}");
     assert_eq!(
         prepared.privacy_check.as_ref().unwrap().decision,
         "pass",
@@ -1945,13 +1995,34 @@ priority = 10
     let text = body_json.get("text").and_then(Value::as_str).unwrap();
     let html = body_json.get("html").and_then(Value::as_str).unwrap();
     assert!(text.contains("# Job Scan"), "{text}");
+    assert!(!text.contains("Profile:"), "{text}");
+    assert!(!text.contains("Generated:"), "{text}");
+    assert!(!text.contains("## New openings found"), "{text}");
+    assert!(!text.contains("## Roles removed"), "{text}");
     assert!(!text.contains("## Shortlist"), "{text}");
     assert!(!text.contains("tier_"), "{text}");
+    assert!(
+        text.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
+        "{text}"
+    );
     assert!(html.contains("<h1"), "{html}");
     assert!(html.contains("Job Scan"), "{html}");
-    assert!(html.contains("New openings found"), "{html}");
+    assert!(!html.contains("Profile:"), "{html}");
+    assert!(!html.contains("Generated:"), "{html}");
+    assert!(!html.contains("New openings found"), "{html}");
+    assert!(!html.contains("Roles removed"), "{html}");
     assert!(!html.contains("Shortlist"), "{html}");
     assert!(!html.contains("tier_"), "{html}");
+    assert!(
+        html.contains(
+            "<strong><a href=\"https://example.com/careers/staff-agent-platform-engineer\""
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("Apply: https://example.com/careers/staff-agent-platform-engineer"),
+        "{html}"
+    );
     assert!(
         !html.starts_with("# Job Scan"),
         "html must not be raw Markdown: {html}"

@@ -1658,6 +1658,9 @@ pub(crate) fn knowledge_event_type_for_card(card: &SourceCard) -> String {
 }
 
 pub(crate) fn knowledge_canonical_key_for_card(card: &SourceCard) -> String {
+    if let Some(key) = knowledge_daily_briefing_entity_key_for_card(card) {
+        return key;
+    }
     let source_kind = card
         .metadata
         .get("source_kind")
@@ -1701,6 +1704,9 @@ pub(crate) fn knowledge_canonical_key_for_card(card: &SourceCard) -> String {
 }
 
 pub(crate) fn knowledge_primary_entity_key_for_card(card: &SourceCard) -> Option<String> {
+    if let Some(key) = knowledge_daily_briefing_entity_key_for_card(card) {
+        return Some(key);
+    }
     if card.provider == "github" {
         let owner = card.metadata.get("owner").and_then(Value::as_str);
         let repo = card
@@ -1716,6 +1722,49 @@ pub(crate) fn knowledge_primary_entity_key_for_card(card: &SourceCard) -> Option
         .get("source_detail")
         .and_then(Value::as_str)
         .map(|detail| format!("{}:{detail}", card.provider))
+}
+
+pub(crate) fn knowledge_daily_briefing_entity_key_for_card(card: &SourceCard) -> Option<String> {
+    if !card.provider.eq_ignore_ascii_case("arcwell")
+        || !card
+            .source_type
+            .eq_ignore_ascii_case("knowledge_daily_briefing")
+    {
+        return None;
+    }
+    let source_kind = card
+        .metadata
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if source_kind != "knowledge_daily_briefing" {
+        return None;
+    }
+    let date = card
+        .metadata
+        .get("extracted_dates")
+        .and_then(Value::as_array)
+        .and_then(|dates| {
+            dates
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|date| date.len() == 10)
+        })
+        .or_else(|| {
+            card.title
+                .split_whitespace()
+                .find(|part| part.len() == 10 && part.chars().filter(|ch| *ch == '-').count() == 2)
+        })
+        .map(str::trim)
+        .filter(|date| !date.is_empty());
+    let suffix = date
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| slugify_key(&card.title));
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(format!("arcwell:knowledge_daily_briefing:{suffix}"))
+    }
 }
 
 pub(crate) fn knowledge_projected_primary_entity_key_for_card(card: &SourceCard) -> Option<String> {

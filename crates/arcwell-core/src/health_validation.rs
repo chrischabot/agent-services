@@ -2858,18 +2858,18 @@ pub(crate) fn render_job_weekly_report(
         .iter()
         .map(|contact| (contact.id.clone(), contact.name.clone()))
         .collect::<BTreeMap<_, _>>();
-    let grouped_open_roles = job_report_open_role_groups(&shortlist.entries);
+    let latest_role_statuses = job_report_latest_role_statuses(role_events);
+    let grouped_open_roles = job_report_open_role_groups(&shortlist.entries, &latest_role_statuses);
+    let scored_open_role_groups = grouped_open_roles
+        .iter()
+        .filter(|group| group.primary.score.is_some())
+        .collect::<Vec<_>>();
     let mut tier_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for group in &grouped_open_roles {
-        let tier = group
-            .primary
-            .score
-            .as_ref()
-            .map(|score| score.tier.clone())
-            .unwrap_or_else(|| "unscored".to_string());
+    for group in &scored_open_role_groups {
+        let tier = group.primary.score.as_ref().unwrap().tier.clone();
         *tier_counts.entry(tier).or_insert(0) += 1;
     }
-    let top_roles = grouped_open_roles
+    let top_roles = scored_open_role_groups
         .iter()
         .take(10)
         .map(|group| {
@@ -2878,7 +2878,7 @@ pub(crate) fn render_job_weekly_report(
                 .score
                 .as_ref()
                 .map(|score| format!("{} ({:.1})", score.tier, score.weighted_score))
-                .unwrap_or_else(|| "unscored".to_string());
+                .unwrap();
             let outcome_warnings = if entry.outcome_warnings.is_empty() {
                 String::new()
             } else {
@@ -2928,11 +2928,51 @@ pub(crate) fn render_job_weekly_report(
 }
 
 pub(crate) fn render_job_weekly_report_delivery_body(body: &str) -> String {
-    let mut delivery_body = body.to_string();
-    if let Some(index) = delivery_body.find("\n\n## Shortlist\n") {
-        delivery_body.truncate(index);
+    let delivery_source = body.split("\n\n## Shortlist\n").next().unwrap_or(body);
+    let mut sections = Vec::<(String, Vec<String>)>::new();
+    let mut current_title: Option<String> = None;
+    let mut current_lines = Vec::<String>::new();
+    for line in delivery_source.lines() {
+        if line.starts_with("# ") {
+            continue;
+        }
+        if let Some(title) = line.strip_prefix("## ") {
+            if let Some(previous_title) = current_title.take() {
+                sections.push((previous_title, std::mem::take(&mut current_lines)));
+            }
+            current_title = Some(title.trim().to_string());
+            continue;
+        }
+        if current_title.is_some() {
+            current_lines.push(line.to_string());
+        }
     }
-    delivery_body.replacen("# Job Weekly Report", "# Job Scan", 1)
+    if let Some(previous_title) = current_title {
+        sections.push((previous_title, current_lines));
+    }
+
+    let mut delivery_body = String::from("# Job Scan");
+    for (title, lines) in sections {
+        let content = lines.join("\n").trim().to_string();
+        if matches!(title.as_str(), "New openings found" | "Roles removed")
+            && job_report_delivery_section_is_empty(&content)
+        {
+            continue;
+        }
+        delivery_body.push_str("\n\n## ");
+        delivery_body.push_str(&title);
+        delivery_body.push_str("\n\n");
+        if content.is_empty() {
+            delivery_body.push_str("- none");
+        } else {
+            delivery_body.push_str(&content);
+        }
+    }
+    delivery_body
+}
+
+fn job_report_delivery_section_is_empty(content: &str) -> bool {
+    matches!(content.trim(), "" | "- none" | "none")
 }
 
 struct JobReportRoleGroup<'a> {
@@ -2948,10 +2988,16 @@ struct JobReportRoleEventGroup<'a> {
     location_labels: BTreeSet<String>,
 }
 
-fn job_report_open_role_groups(entries: &[JobShortlistEntry]) -> Vec<JobReportRoleGroup<'_>> {
+fn job_report_open_role_groups<'a>(
+    entries: &'a [JobShortlistEntry],
+    latest_role_statuses: &BTreeMap<String, String>,
+) -> Vec<JobReportRoleGroup<'a>> {
     collect_job_report_role_groups(entries.iter().filter(|entry| {
         entry.role.current_status == "live"
-            && entry.score.is_some()
+            && !latest_role_statuses
+                .get(&entry.role.id)
+                .map(|status| matches!(status.as_str(), "closed" | "stale"))
+                .unwrap_or(false)
             && entry
                 .score
                 .as_ref()
@@ -2959,6 +3005,28 @@ fn job_report_open_role_groups(entries: &[JobShortlistEntry]) -> Vec<JobReportRo
                 .unwrap_or(true)
             && job_report_role_is_uk_plausible(&entry.role)
     }))
+}
+
+fn job_report_latest_role_statuses(role_events: &[JobRoleStatusEvent]) -> BTreeMap<String, String> {
+    let mut latest = BTreeMap::<String, (String, String, String)>::new();
+    for event in role_events {
+        let key = (
+            event.created_at.clone(),
+            event.id.clone(),
+            event.status.clone(),
+        );
+        if latest
+            .get(&event.role_id)
+            .map(|previous| key > *previous)
+            .unwrap_or(true)
+        {
+            latest.insert(event.role_id.clone(), key);
+        }
+    }
+    latest
+        .into_iter()
+        .map(|(role_id, (_, _, status))| (role_id, status))
+        .collect()
 }
 
 fn render_job_current_open_roles_from_groups(groups: &[JobReportRoleGroup<'_>]) -> String {
@@ -3100,54 +3168,160 @@ fn render_job_role_digest_entry_with_locations(
     grouped_count: usize,
 ) -> String {
     let role = &entry.role;
-    let mut details = Vec::new();
-    if let Some(labels) = location_labels.filter(|labels| !labels.is_empty()) {
-        details.push(format!(
-            "Locations: {}.",
-            labels.iter().cloned().collect::<Vec<_>>().join(", ")
-        ));
-    } else if let Some(label) = job_report_location_label(role) {
-        details.push(label);
-    }
-    if let Some(stage) = role
-        .company_stage_or_size
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        details.push(stage.clone());
-    }
-    if let Some(problem) = role
-        .implied_business_problem
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        details.push(problem.clone());
-    } else if let Some(why) = role
-        .why_they_might_need_user
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        details.push(why.clone());
-    } else if let Some(requirement) = role.core_requirements.first() {
-        details.push(requirement.clone());
-    }
+    let location = location_labels
+        .filter(|labels| !labels.is_empty())
+        .map(|labels| labels.iter().cloned().collect::<Vec<_>>().join(", "))
+        .or_else(|| job_report_location_label(role));
+    let title = job_report_linked_role_title(role);
+    let title_line = match location {
+        Some(location) if !location.is_empty() => format!("{title}  {location}"),
+        _ => title,
+    };
+    let summary = job_report_role_summary_paragraph(entry);
+    let mut status = Vec::new();
     if let Some(score) = &entry.score {
-        details.push(format!("Score: {:.0}%.", score.weighted_score));
+        status.push(format!("Score: {:.0}%.", score.weighted_score));
+    } else {
+        status.push("Needs scoring.".to_string());
     }
     if grouped_count > 1 {
-        details.push(format!("Grouped {grouped_count} location postings."));
+        status.push(format!("Grouped {grouped_count} location postings."));
     }
-    let details = if details.is_empty() {
-        "No brief description recorded yet.".to_string()
-    } else {
-        details.join(" ")
-    };
-    format!(
-        "- {} at {}\n  {}",
+    if let Some(url) = job_report_role_url(role) {
+        status.push(format!("Apply: {url}"));
+    }
+    format!("{title_line}\n\n{summary}\n\n{}", status.join(" "))
+}
+
+fn job_report_linked_role_title(role: &JobRoleCard) -> String {
+    let label = format!(
+        "{} at {}",
         job_report_display_role_title(role),
-        role.company,
-        details
-    )
+        role.company
+    );
+    if let Some(url) = job_report_role_url(role) {
+        format!("**[{label}]({url})**")
+    } else {
+        format!("**{label}**")
+    }
+}
+
+fn job_report_role_url(role: &JobRoleCard) -> Option<&str> {
+    role.canonical_url
+        .as_deref()
+        .or(Some(role.source_url.as_str()))
+        .filter(|url| {
+            Url::parse(url)
+                .map(|parsed| matches!(parsed.scheme(), "http" | "https"))
+                .unwrap_or(false)
+        })
+}
+
+fn job_report_role_summary_paragraph(entry: &JobShortlistEntry) -> String {
+    let role = &entry.role;
+    let category = job_report_role_category(role);
+    let article = job_report_role_category_article(category);
+    let mut sentences = Vec::new();
+    sentences.push(format!(
+        "This is {article} {category} role at {}.",
+        role.company
+    ));
+    if role.source_confidence == "canonical_confirmed" {
+        sentences.push("The apply link points at a direct company or ATS posting.".to_string());
+    }
+    if let Some(signal) = job_report_role_signal(role) {
+        sentences.push(format!("What stands out: {signal}."));
+    }
+    if entry.score.is_none() {
+        sentences.push(
+            "It has not been scored against the profile yet, so treat it as an open lead rather than a recommendation."
+                .to_string(),
+        );
+    }
+    sentences.join(" ")
+}
+
+fn job_report_role_signal(role: &JobRoleCard) -> Option<String> {
+    role.implied_business_problem
+        .as_deref()
+        .filter(|value| job_report_role_text_is_useful_signal(value))
+        .map(job_report_clean_sentence)
+        .or_else(|| {
+            role.why_they_might_need_user
+                .as_deref()
+                .filter(|value| job_report_role_text_is_useful_signal(value))
+                .map(job_report_clean_sentence)
+        })
+        .or_else(|| {
+            let requirements = role
+                .core_requirements
+                .iter()
+                .filter(|value| job_report_role_text_is_useful_signal(value))
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>();
+            if requirements.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "the stored requirements emphasize {}",
+                    requirements.join(", ")
+                ))
+            }
+        })
+}
+
+fn job_report_role_text_is_useful_signal(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case("role requirements require manual review")
+        && !trimmed.eq_ignore_ascii_case("manual review")
+}
+
+fn job_report_clean_sentence(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_string()
+}
+
+fn job_report_role_category(role: &JobRoleCard) -> &'static str {
+    let normalized = job_report_canonical_key_text(&role.role_title);
+    if normalized.contains("developer relations")
+        || normalized.contains("developer advocate")
+        || normalized.contains("devrel")
+        || normalized.contains("developer experience")
+    {
+        "developer-facing engineering"
+    } else if normalized.contains("research engineer")
+        || normalized.contains("machine learning")
+        || normalized.contains(" ai ")
+        || normalized.contains("pretraining")
+        || normalized.contains("post training")
+    {
+        "AI research engineering"
+    } else if normalized.contains("security") {
+        "security engineering"
+    } else if normalized.contains("infrastructure")
+        || normalized.contains("platform")
+        || normalized.contains("backend")
+        || normalized.contains("frontend")
+        || normalized.contains("networking")
+    {
+        "engineering"
+    } else if normalized.contains("solutions engineer")
+        || normalized.contains("customer engineering")
+    {
+        "technical customer engineering"
+    } else if normalized.contains("product engineer") {
+        "product engineering"
+    } else {
+        "open"
+    }
+}
+
+fn job_report_role_category_article(category: &str) -> &'static str {
+    match category.chars().next().map(|ch| ch.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    }
 }
 
 fn collect_job_report_role_groups<'a, I>(entries: I) -> Vec<JobReportRoleGroup<'a>>
@@ -3208,6 +3382,13 @@ fn job_report_location_label(role: &JobRoleCard) -> Option<String> {
     let work_mode = role.work_mode.as_deref().filter(|value| !value.is_empty());
     if locations.is_empty() {
         match (role.location.as_deref(), work_mode) {
+            (Some(location), Some(work_mode))
+                if !location.is_empty()
+                    && job_report_canonical_key_text(location)
+                        == job_report_canonical_key_text(work_mode) =>
+            {
+                Some(work_mode.to_string())
+            }
             (Some(location), Some(work_mode)) if !location.is_empty() => {
                 Some(format!("{location}; {work_mode}"))
             }
@@ -3370,9 +3551,19 @@ fn job_report_geo_suffix_is_location(text: &str) -> bool {
 fn job_report_normalized_geo_text(text: &str) -> String {
     let mut out = String::from(" ");
     let mut previous_space = true;
-    for ch in text.to_ascii_lowercase().chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
+    for ch in text.to_lowercase().chars() {
+        let normalized = match ch {
+            'á' | 'à' | 'â' | 'ä' | 'å' | 'ã' => 'a',
+            'ç' => 'c',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            _ => ch,
+        };
+        if normalized.is_ascii_alphanumeric() {
+            out.push(normalized);
             previous_space = false;
         } else if !previous_space {
             out.push(' ');
@@ -3478,6 +3669,11 @@ fn job_report_geo_text_has_excluded_region(text: &str) -> bool {
         " india ",
         " singapore ",
         " japan ",
+        " switzerland ",
+        " swiss ",
+        " zurich ",
+        " geneva ",
+        " ch ",
         " san francisco ",
         " new york ",
         " nyc ",

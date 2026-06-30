@@ -108,12 +108,14 @@ fn severe_mcp_ops_snapshot_is_compact_for_tool_clients() {
     );
     assert!(structured["health"].is_object());
     assert!(structured["backlog"].is_object());
+    assert!(structured["issue_schedule_summary"].is_array());
     assert_eq!(
         structured["backlog"]["pending_memory_candidates"].as_i64(),
         Some(2)
     );
     assert!(structured["counts"]["source_cards"].as_u64().unwrap_or(0) >= 1);
     assert!(structured.get("source_cards").is_none());
+    assert!(structured.get("issue_schedule_ticks").is_none());
     assert!(structured.get("memory_candidates").is_none());
 }
 

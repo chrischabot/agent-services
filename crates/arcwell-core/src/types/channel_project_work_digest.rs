@@ -654,6 +654,7 @@ pub struct OpsSnapshot {
     pub health: HealthReport,
     pub worker: Option<WorkerHeartbeat>,
     pub backlog: OpsBacklogSummary,
+    pub issue_schedule_summary: Vec<IssueScheduleOpsSummary>,
     pub x_stats: XStatsReport,
     pub radar_runs: Vec<RadarRun>,
     pub radar_source_quality: Vec<RadarSourceQuality>,
@@ -729,4 +730,29 @@ pub struct OpsBacklogSummary {
     pub oldest_pending_knowledge_job_at: Option<String>,
     pub next_pending_wiki_job_at: Option<String>,
     pub next_pending_knowledge_job_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueScheduleOpsSummary {
+    pub schedule_id: String,
+    pub name: String,
+    pub status: String,
+    pub kind: String,
+    pub channel: String,
+    pub recipient_ref: String,
+    pub time_zone: String,
+    pub hour: i64,
+    pub minute: i64,
+    pub catch_up_hours: i64,
+    pub tick_status_counts: BTreeMap<String, i64>,
+    pub latest_tick_due_at: Option<String>,
+    pub latest_tick_status: Option<String>,
+    pub latest_tick_created_at: Option<String>,
+    pub latest_tick_updated_at: Option<String>,
+    pub latest_tick_delivery_id: Option<String>,
+    pub latest_tick_error: Option<String>,
+    pub latest_sent_due_at: Option<String>,
+    pub latest_sent_delivery_id: Option<String>,
+    pub latest_blocked_due_at: Option<String>,
+    pub latest_blocked_error: Option<String>,
 }

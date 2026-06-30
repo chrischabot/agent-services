@@ -317,9 +317,15 @@ impl Store {
 
     pub fn upsert_knowledge_entity(&self, input: KnowledgeEntityInput) -> Result<KnowledgeEntity> {
         let input = self.normalize_knowledge_entity_input(input)?;
-        let id = format!("kent-{}", &sha256(input.canonical_key.as_bytes())[..16]);
         let timestamp = now();
-        let existing = self.get_knowledge_entity_by_canonical_key(&input.canonical_key)?;
+        let existing = match self.get_knowledge_entity_by_canonical_key(&input.canonical_key)? {
+            Some(entity) => Some(entity),
+            None => self.legacy_daily_briefing_entity_for_input(&input)?,
+        };
+        let id = existing
+            .as_ref()
+            .map(|entity| entity.id.clone())
+            .unwrap_or_else(|| format!("kent-{}", &sha256(input.canonical_key.as_bytes())[..16]));
         let aliases = existing
             .as_ref()
             .map(|entity| merge_string_sets(&entity.aliases, &input.aliases))
@@ -332,40 +338,126 @@ impl Store {
             .as_ref()
             .map(|entity| entity.confidence.max(input.confidence))
             .unwrap_or(input.confidence);
-        self.ensure_knowledge_entity_aliases_available(&input.canonical_key, &aliases)?;
-        self.conn.execute(
-            r#"
-            INSERT INTO knowledge_entities
-              (id, entity_type, name, canonical_key, aliases_json, homepage_url,
-               source_card_ids_json, wiki_page_id, confidence, metadata_json, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-            ON CONFLICT(canonical_key) DO UPDATE SET
-              entity_type = excluded.entity_type,
-              name = excluded.name,
-              aliases_json = excluded.aliases_json,
-              homepage_url = COALESCE(excluded.homepage_url, knowledge_entities.homepage_url),
-              source_card_ids_json = excluded.source_card_ids_json,
-              wiki_page_id = COALESCE(excluded.wiki_page_id, knowledge_entities.wiki_page_id),
-              confidence = MAX(knowledge_entities.confidence, excluded.confidence),
-              metadata_json = excluded.metadata_json,
-              updated_at = excluded.updated_at
-            "#,
-            params![
-                id,
-                input.entity_type,
-                input.name,
-                input.canonical_key,
-                serde_json::to_string(&aliases)?,
-                input.homepage_url,
-                serde_json::to_string(&source_card_ids)?,
-                input.wiki_page_id,
-                confidence,
-                input.metadata.to_string(),
-                timestamp,
-            ],
+        self.ensure_knowledge_entity_aliases_available(
+            &input.canonical_key,
+            &aliases,
+            existing.as_ref().map(|entity| entity.id.as_str()),
         )?;
+        if existing
+            .as_ref()
+            .is_some_and(|entity| entity.canonical_key != input.canonical_key)
+        {
+            self.conn.execute(
+                r#"
+                UPDATE knowledge_entities
+                SET entity_type = ?2,
+                    name = ?3,
+                    canonical_key = ?4,
+                    aliases_json = ?5,
+                    homepage_url = COALESCE(?6, homepage_url),
+                    source_card_ids_json = ?7,
+                    wiki_page_id = COALESCE(?8, wiki_page_id),
+                    confidence = MAX(confidence, ?9),
+                    metadata_json = ?10,
+                    updated_at = ?11
+                WHERE id = ?1
+                "#,
+                params![
+                    id,
+                    input.entity_type,
+                    input.name,
+                    input.canonical_key,
+                    serde_json::to_string(&aliases)?,
+                    input.homepage_url,
+                    serde_json::to_string(&source_card_ids)?,
+                    input.wiki_page_id,
+                    confidence,
+                    input.metadata.to_string(),
+                    timestamp,
+                ],
+            )?;
+        } else {
+            self.conn.execute(
+                r#"
+                INSERT INTO knowledge_entities
+                  (id, entity_type, name, canonical_key, aliases_json, homepage_url,
+                   source_card_ids_json, wiki_page_id, confidence, metadata_json, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                  entity_type = excluded.entity_type,
+                  name = excluded.name,
+                  aliases_json = excluded.aliases_json,
+                  homepage_url = COALESCE(excluded.homepage_url, knowledge_entities.homepage_url),
+                  source_card_ids_json = excluded.source_card_ids_json,
+                  wiki_page_id = COALESCE(excluded.wiki_page_id, knowledge_entities.wiki_page_id),
+                  confidence = MAX(knowledge_entities.confidence, excluded.confidence),
+                  metadata_json = excluded.metadata_json,
+                  updated_at = excluded.updated_at
+                "#,
+                params![
+                    id,
+                    input.entity_type,
+                    input.name,
+                    input.canonical_key,
+                    serde_json::to_string(&aliases)?,
+                    input.homepage_url,
+                    serde_json::to_string(&source_card_ids)?,
+                    input.wiki_page_id,
+                    confidence,
+                    input.metadata.to_string(),
+                    timestamp,
+                ],
+            )?;
+        }
         self.get_knowledge_entity(&id)?
             .with_context(|| format!("inserted knowledge entity not found: {id}"))
+    }
+
+    fn legacy_daily_briefing_entity_for_input(
+        &self,
+        input: &KnowledgeEntityInput,
+    ) -> Result<Option<KnowledgeEntity>> {
+        if input.entity_type != "source_item"
+            || !input
+                .canonical_key
+                .starts_with("arcwell:knowledge_daily_briefing:")
+        {
+            return Ok(None);
+        }
+        let wanted = normalize_knowledge_aliases(&input.aliases, Some(&input.name))
+            .into_iter()
+            .map(|alias| normalize_knowledge_alias_key(&alias))
+            .collect::<BTreeSet<_>>();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, entity_type, name, canonical_key, aliases_json, homepage_url,
+                   source_card_ids_json, wiki_page_id, confidence, metadata_json,
+                   created_at, updated_at
+            FROM knowledge_entities
+            WHERE entity_type = 'source_item'
+              AND canonical_key LIKE 'url:%/knowledge-daily-briefing/%'
+            "#,
+        )?;
+        let entities = rows(stmt.query_map([], knowledge_entity_from_row)?)?;
+        for entity in entities {
+            if entity.metadata.get("provider").and_then(Value::as_str) != Some("arcwell")
+                || entity.metadata.get("source_type").and_then(Value::as_str)
+                    != Some("knowledge_daily_briefing")
+            {
+                continue;
+            }
+            let entity_aliases = normalize_knowledge_aliases(&entity.aliases, Some(&entity.name))
+                .into_iter()
+                .map(|alias| normalize_knowledge_alias_key(&alias))
+                .collect::<BTreeSet<_>>();
+            if wanted.intersection(&entity_aliases).next().is_some() {
+                return Ok(Some(entity));
+            }
+        }
+        Ok(None)
     }
 
     pub fn get_knowledge_entity(&self, id: &str) -> Result<Option<KnowledgeEntity>> {

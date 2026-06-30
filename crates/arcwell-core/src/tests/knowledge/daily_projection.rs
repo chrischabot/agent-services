@@ -82,6 +82,91 @@ fn severe_issue_schedule_worker_enqueues_native_daily_briefing_once() {
 }
 
 #[test]
+fn severe_ops_issue_schedule_summary_surfaces_latest_sent_and_blocked_ticks() {
+    // CLAIM: ops visibility explains issue schedule catch-up/delivery state
+    // without forcing operators or agents to scan raw tick rows.
+    // ORACLE: a schedule with sent and blocked ticks reports status counts,
+    // latest tick state, latest sent due time, and latest blocked error.
+    // SEVERITY: Severe because missed morning briefings can otherwise look
+    // like scheduler failure, delivery failure, or Gmail placement with no
+    // compact operational evidence.
+    let store = test_store("issue-schedule-ops-summary");
+    let (input, _, _) = due_utc_schedule_input(
+        "Native daily briefing ops summary",
+        "email:friend@example.com",
+        json!({ "window_hours": 24, "max_catch_up_ticks": 3 }),
+    );
+    let schedule = store.upsert_issue_schedule(input).unwrap();
+    let sent_tick = store
+        .create_issue_schedule_tick(
+            &schedule.id,
+            "issue-ops-summary-sent",
+            "2026-06-30T06:00:00Z",
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(&sent_tick.id, "sent", None, None, None)
+        .unwrap();
+    let blocked_tick = store
+        .create_issue_schedule_tick(
+            &schedule.id,
+            "issue-ops-summary-blocked",
+            "2026-07-01T06:00:00Z",
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(
+            &blocked_tick.id,
+            "blocked",
+            None,
+            None,
+            Some("digest candidate Email delivery blocked: notes are too long"),
+        )
+        .unwrap();
+
+    let summary = store.issue_schedule_ops_summary().unwrap();
+    let schedule_summary = summary
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(schedule_summary.tick_status_counts.get("sent"), Some(&1));
+    assert_eq!(schedule_summary.tick_status_counts.get("blocked"), Some(&1));
+    assert_eq!(
+        schedule_summary.latest_tick_due_at.as_deref(),
+        Some("2026-07-01T06:00:00Z")
+    );
+    assert_eq!(
+        schedule_summary.latest_tick_status.as_deref(),
+        Some("blocked")
+    );
+    assert_eq!(
+        schedule_summary.latest_sent_due_at.as_deref(),
+        Some("2026-06-30T06:00:00Z")
+    );
+    assert_eq!(
+        schedule_summary.latest_blocked_due_at.as_deref(),
+        Some("2026-07-01T06:00:00Z")
+    );
+    assert!(
+        schedule_summary
+            .latest_blocked_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("notes are too long"),
+        "{schedule_summary:#?}"
+    );
+
+    let snapshot = store.ops_snapshot().unwrap();
+    assert!(
+        snapshot
+            .issue_schedule_summary
+            .iter()
+            .any(|item| item.schedule_id == schedule.id
+                && item.latest_tick_status.as_deref() == Some("blocked"))
+    );
+}
+
+#[test]
 fn severe_due_delivery_jobs_do_not_wait_behind_bulk_backlog() {
     // CLAIM: user-facing scheduled delivery jobs are claimed before bulk
     // source ingestion backlog, even when the bulk jobs are older.

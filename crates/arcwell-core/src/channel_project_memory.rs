@@ -307,6 +307,19 @@ pub(crate) fn render_email_inline_markdown(input: &str) -> String {
             idx += end + 2;
             continue;
         }
+        if chars[idx] == '*'
+            && chars.get(idx + 1) == Some(&'*')
+            && let Some(end) = chars[idx + 2..]
+                .windows(2)
+                .position(|window| window == ['*', '*'])
+        {
+            let inner = chars[idx + 2..idx + 2 + end].iter().collect::<String>();
+            out.push_str("<strong>");
+            out.push_str(&render_email_inline_markdown(&inner));
+            out.push_str("</strong>");
+            idx += end + 4;
+            continue;
+        }
         if chars[idx] == '['
             && let Some(close_label_rel) = chars[idx + 1..].iter().position(|ch| *ch == ']')
         {

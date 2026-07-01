@@ -25,9 +25,9 @@ arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 10
 arcwell x recent-search "from:openai" --max-results 25
 arcwell x recent-search "from:openai" --max-results 25 --transport xurl-token-api
 arcwell x recent-search "from:openai" --max-results 25 --transport x-api-mcp
-arcwell x import-bookmarks --max-bookmarks 100 --transport x-api-mcp
+arcwell x import-bookmarks --max-bookmarks 100
 arcwell x enqueue-recent-search "from:openai" --max-results 25
-arcwell x schedule-bookmarks --max-bookmarks 150 --transport x-api-mcp
+arcwell x schedule-bookmarks --max-bookmarks 150
 arcwell x monitor-watch-sources --max-sources 25 --max-results-per-source 10
 arcwell x repair-health --defer-rate-limited-hours 24 --limit 10000
 arcwell x search-tweets eve --limit 20
@@ -164,15 +164,19 @@ Boundary:
   with `tools/list`, and imports only X API-shaped JSON responses through the
   same canonical Arcwell import path. Transportless recent search now uses
   hosted `x-api-mcp` when an app-only bearer alias is configured, otherwise it
-  falls back to the broad `direct-api` default. MCP recent search uses the
-  hosted `search_posts_all` tool and prefers app-only bearer aliases
+  uses `direct-api`. Transportless bookmark imports and scheduled bookmark
+  jobs now use hosted `x-api-mcp` when user-context bearer or refresh/client
+  material is configured, then fall back to `direct-api` if the hosted route
+  fails. Explicit `--transport` choices are strict and do not take fallback
+  routes. MCP recent search uses the hosted `search_posts_all` tool and prefers app-only bearer aliases
   `ARCWELL_X_MCP_APP_BEARER_TOKEN`, `X_APP_BEARER_TOKEN`, or
   `TWITTER_BEARER_TOKEN`; MCP bookmarks use user-context `X_BEARER_TOKEN` /
   refresh material through hosted `get_users_me` and `get_users_bookmarks`.
   Prose-only or non-X-shaped MCP tool output fails without advancing cursors.
   Bookmark MCP import follows returned `next_token` pagination until provider
   exhaustion or the requested limit, and scheduled bookmark watch sources can
-  persist `transport=x-api-mcp` into worker jobs. `scripts/x-mcp-xurl-proof`
+  either omit transport for the runtime default route or persist a strict
+  `transport=x-api-mcp` into worker jobs. `scripts/x-mcp-xurl-proof`
   records a redacted xurl/MCP discovery packet,
   `scripts/x-transport-comparison-proof` compares direct API, xurl-token, and
   x-api-mcp recent-search transports in copied homes, and
@@ -191,7 +195,9 @@ Boundary:
   `xurl mcp` setup for that full bridge. Current hosted-MCP proof status:
   local severe tests prove recent-search success, prose failure without cursor
   advance, bookmark `get_users_me`/`get_users_bookmarks` chaining, canonical
-  edge/source metadata, bookmark pagination, scheduled worker transport
+  edge/source metadata, bookmark pagination, transportless bookmark MCP
+  adoption, direct fallback after hosted MCP failure, strict explicit MCP
+  behavior, scheduled worker default fallback, scheduled worker transport
   preservation, provider-rejected MCP bearer refresh retry, and selector
   resistance to misleading `search_news` and username tools. Copied-home live
   comparison

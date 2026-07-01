@@ -365,12 +365,25 @@ pub enum XProviderTransport {
 
 impl XProviderTransport {
     pub fn parse(value: Option<&str>) -> Result<Self> {
-        let value = value
+        Ok(Self::requested(value)?.unwrap_or(Self::DirectApi))
+    }
+
+    pub fn requested(value: Option<&str>) -> Result<Option<Self>> {
+        value
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| std::env::var("ARCWELL_X_TRANSPORT").ok())
-            .unwrap_or_else(|| "direct-api".to_string());
+            .or_else(|| {
+                std::env::var("ARCWELL_X_TRANSPORT")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .map(|value| Self::parse_name(&value))
+            .transpose()
+    }
+
+    fn parse_name(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
             "direct-api" | "x-api" | "api" => Ok(Self::DirectApi),
             "xurl-token-api" | "xurl-token" | "xurl" => Ok(Self::XurlTokenApi),

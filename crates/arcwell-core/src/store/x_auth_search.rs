@@ -1091,14 +1091,7 @@ impl Store {
     ) -> Result<XImportReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let explicit_transport = transport
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-            || std::env::var("ARCWELL_X_TRANSPORT")
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty());
-        if explicit_transport {
-            let transport = XProviderTransport::parse(transport)?;
+        if let Some(transport) = XProviderTransport::requested(transport)? {
             return self.x_recent_search_with_base_transport_and_job_id(
                 query,
                 max_results,
@@ -1150,7 +1143,11 @@ impl Store {
         endpoint: &str,
         job_id: Option<&str>,
     ) -> Result<XImportReport> {
-        if self.has_x_mcp_app_bearer_token_alias()? {
+        if self
+            .x_default_recent_search_transports()?
+            .first()
+            .is_some_and(|transport| *transport == XProviderTransport::XApiMcp)
+        {
             match self.x_recent_search_with_base_transport_and_job_id(
                 query,
                 max_results,
@@ -1184,6 +1181,28 @@ impl Store {
             XProviderTransport::DirectApi,
             job_id,
         )
+    }
+
+    pub(crate) fn x_default_recent_search_transports(&self) -> Result<Vec<XProviderTransport>> {
+        if self.has_x_mcp_app_bearer_token_alias()? {
+            Ok(vec![
+                XProviderTransport::XApiMcp,
+                XProviderTransport::DirectApi,
+            ])
+        } else {
+            Ok(vec![XProviderTransport::DirectApi])
+        }
+    }
+
+    pub(crate) fn x_default_bookmark_transports(&self) -> Result<Vec<XProviderTransport>> {
+        if self.has_x_user_context_bearer_route()? {
+            Ok(vec![
+                XProviderTransport::XApiMcp,
+                XProviderTransport::DirectApi,
+            ])
+        } else {
+            Ok(vec![XProviderTransport::DirectApi])
+        }
     }
 
     pub(crate) fn x_recent_search_with_base_transport_and_job_id(
@@ -1708,7 +1727,13 @@ impl Store {
     ) -> Result<XImportReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let transport = XProviderTransport::parse(transport)?;
+        let Some(transport) = XProviderTransport::requested(transport)? else {
+            return self.x_import_bookmarks_with_base_default(
+                bookmark_days,
+                max_bookmarks,
+                &endpoint,
+            );
+        };
         self.x_import_bookmarks_with_base_and_transport(
             bookmark_days,
             max_bookmarks,
@@ -1717,12 +1742,56 @@ impl Store {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn x_import_bookmarks_with_base(
         &self,
         bookmark_days: i64,
         max_bookmarks: usize,
         endpoint: &str,
     ) -> Result<XImportReport> {
+        self.x_import_bookmarks_with_base_and_transport(
+            bookmark_days,
+            max_bookmarks,
+            endpoint,
+            XProviderTransport::DirectApi,
+        )
+    }
+
+    pub(crate) fn x_import_bookmarks_with_base_default(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        endpoint: &str,
+    ) -> Result<XImportReport> {
+        if self
+            .x_default_bookmark_transports()?
+            .first()
+            .is_some_and(|transport| *transport == XProviderTransport::XApiMcp)
+        {
+            match self.x_import_bookmarks_with_base_and_transport(
+                bookmark_days,
+                max_bookmarks,
+                endpoint,
+                XProviderTransport::XApiMcp,
+            ) {
+                Ok(report) => return Ok(report),
+                Err(mcp_error) => {
+                    let mcp_error = redact_secret_like_text(&mcp_error.to_string());
+                    return self
+                        .x_import_bookmarks_with_base_and_transport(
+                            bookmark_days,
+                            max_bookmarks,
+                            endpoint,
+                            XProviderTransport::DirectApi,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "x-api-mcp default bookmark import failed before direct-api fallback also failed: {mcp_error}"
+                            )
+                        });
+                }
+            }
+        }
         self.x_import_bookmarks_with_base_and_transport(
             bookmark_days,
             max_bookmarks,

@@ -851,6 +851,26 @@ impl Store {
         Ok(false)
     }
 
+    pub(crate) fn has_x_user_context_bearer_route(&self) -> Result<bool> {
+        if let Ok(token) = std::env::var("X_BEARER_TOKEN")
+            && !token.trim().is_empty()
+        {
+            return Ok(true);
+        }
+        match self.get_usable_secret_value("X_BEARER_TOKEN") {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) => {
+                let error_text = error.to_string();
+                if !(error_text.contains("X_BEARER_TOKEN") && error_text.contains("expired")) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(self.get_usable_secret_value("X_REFRESH_TOKEN")?.is_some()
+            && self.resolve_x_client_id()?.is_some())
+    }
+
     pub(crate) fn xurl_bearer_token(&self, endpoint: &str) -> Result<String> {
         self.policy_guard(PolicyRequest {
             action: "provider.oauth".to_string(),

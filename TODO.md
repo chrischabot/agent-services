@@ -739,23 +739,31 @@ PR, implementation note, or final report:
 - [ ] Promote the X MCP/xurl path beyond `Partial` only after broader quota,
       tier, and multi-day recurrence gaps are closed. Current implemented slice:
       `direct-api` remains the broad fallback/default for X surfaces that do not
-      explicitly opt into MCP. Recent search now defaults to hosted
-      `x-api-mcp` when an app-only bearer alias such as `TWITTER_BEARER_TOKEN`
-      is configured, otherwise it uses direct API. `xurl-token-api` is wired
+      have a credential-specific hosted default route. Recent search now
+      defaults to hosted `x-api-mcp` when an app-only bearer alias such as
+      `TWITTER_BEARER_TOKEN` is configured, otherwise it uses direct API.
+      Transportless bookmark imports and scheduled bookmark worker jobs now
+      default to hosted `x-api-mcp` when user-context bearer or refresh/client
+      material is configured, then fall back to direct API if the hosted route
+      fails. Explicit transport choices stay strict. `xurl-token-api` is wired
       through CLI and MCP for recent search and bookmark import, delegates only
       token acquisition to `xurl token`, and keeps Arcwell policy, cost,
       source-card/wiki projection, cursor, source-health, and sync-run writes.
       `x-api-mcp` now calls hosted X MCP directly: recent search uses
       `search_posts_all`, while bookmark import uses user-context
       `X_BEARER_TOKEN` through hosted `get_users_me` and paginated
-      `get_users_bookmarks`. Scheduled X bookmark watch sources can persist
+      `get_users_bookmarks`. Scheduled X bookmark watch sources can omit
+      transport for the runtime default route or persist strict
       `transport=x-api-mcp` into resident worker jobs. Severe tests prove
       xurl-token local token acquisition, hosted MCP recent-search canonical
       writes, transportless recent-search MCP adoption with app bearer aliases,
+      transportless bookmark MCP adoption with user-context bearer material,
+      direct fallback after hosted MCP failure, strict explicit MCP behavior,
       prose/non-JSON fail-closed cursor safety, misleading-tool selection
       resistance, hosted MCP bookmark pagination/canonical collections/edge
-      metadata, and bounded local worker recurrence with x-api-mcp transport
-      preserved. Hosted MCP bookmark import now retries once after a refreshable
+      metadata, scheduled worker default fallback, and bounded local worker
+      recurrence with x-api-mcp transport preserved. Hosted MCP bookmark import
+      now retries once after a refreshable
       MCP 401 by refreshing stored X OAuth material; severe tests cover the
       provider-rejected-bearer retry path. `scripts/x-api-mcp-recurrence-proof`
       writes back rotated X bearer/refresh rows only after a successful

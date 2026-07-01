@@ -121,6 +121,28 @@ fn x_mcp_tools_list_response_for_tools(tools: Vec<(&str, &str, Vec<&str>)>) -> &
     )
 }
 
+fn x_mcp_bookmark_tools_list_response() -> &'static str {
+    x_mcp_tools_list_response_for_tools(vec![
+        (
+            "get_users_me",
+            "Get Users Me",
+            vec!["user.fields", "post.fields", "expansions"],
+        ),
+        (
+            "get_users_bookmarks",
+            "Get Users Bookmarks",
+            vec![
+                "id",
+                "max_results",
+                "pagination_token",
+                "post.fields",
+                "expansions",
+                "user.fields",
+            ],
+        ),
+    ])
+}
+
 #[test]
 fn x_recent_search_uses_sqlite_secret_and_updates_cursor() {
     let store = test_store("x-live-mock");
@@ -1512,6 +1534,318 @@ priority = 20
 }
 
 #[test]
+fn severe_x_import_bookmarks_defaults_to_x_api_mcp_when_user_bearer_exists() {
+    // CLAIM: Transportless bookmark imports prefer hosted x-api-mcp when
+    // user-context X OAuth material is configured.
+    // ORACLE: public transportless entry point sends only MCP JSON-RPC
+    // requests, records x_api_mcp sync state, and writes canonical bookmark
+    // collection/source metadata.
+    // SEVERITY: Severe because default-route adoption is hollow if bookmarks
+    // still require callers to remember --transport x-api-mcp.
+    without_x_transport_env(|| {
+        without_x_mcp_env(|| {
+            clear_x_bearer_env();
+            let store = test_store("x-bookmarks-defaults-to-x-api-mcp");
+            store
+                .set_secret_value("X_BEARER_TOKEN", "default-mcp-bookmark-token", "x")
+                .unwrap();
+            write_policy(
+                &store,
+                r#"
+[[rules]]
+id = "allow-x-mcp-default-bookmarks-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow hosted MCP default bookmark import test"
+priority = 20
+
+[[rules]]
+id = "allow-x-mcp-default-bookmarks-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in hosted MCP default bookmark import test"
+priority = 20
+"#,
+            );
+            let recent = (Utc::now() - chrono::Duration::days(2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let me_response = x_mcp_tool_call_content_response(
+                &json!({
+                    "data": {
+                        "id": "me",
+                        "username": "me",
+                        "name": "Me"
+                    }
+                })
+                .to_string(),
+            );
+            let page = x_mcp_tool_call_content_response(
+                &json!({
+                    "data": [
+                        {
+                            "id": "bdefaultmcp1",
+                            "author_id": "u1",
+                            "text": "Default bookmark import through hosted X MCP.",
+                            "created_at": recent
+                        }
+                    ],
+                    "includes": {
+                        "users": [
+                            { "id": "u1", "username": "openai", "name": "OpenAI" }
+                        ]
+                    },
+                    "meta": {}
+                })
+                .to_string(),
+            );
+            let (base, requests) =
+                mock_recording_sequence_server(x_mcp_response_sequence_for_calls(
+                    x_mcp_bookmark_tools_list_response(),
+                    vec![me_response, page],
+                ));
+
+            let report = with_x_api_base(&base, || {
+                store.x_import_bookmarks_with_transport(92, 10, None)
+            })
+            .unwrap();
+
+            assert_eq!(report.imported, 1);
+            assert_eq!(report.pages_fetched, Some(1));
+            assert_eq!(report.stop_reason.as_deref(), Some("provider_exhausted"));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 9);
+            assert!(
+                captured
+                    .iter()
+                    .all(|request| request.contains("POST /mcp ")),
+                "{captured:#?}"
+            );
+            assert!(
+                captured.iter().all(|request| {
+                    request.contains("authorization: Bearer default-mcp-bookmark-token")
+                        || request.contains("Authorization: Bearer default-mcp-bookmark-token")
+                }),
+                "{captured:#?}"
+            );
+            let item = store
+                .list_x_items(Some("Default bookmark import through hosted X MCP"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(item.sources[0].metadata["imported_from"], "x_api_mcp");
+            assert_eq!(
+                item.sources[0].metadata["x_mcp_tool"],
+                "get_users_bookmarks"
+            );
+            let stats = store.x_stats().unwrap();
+            assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+            assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+            assert_eq!(stats.latest_sync_runs[0].status, "completed");
+        });
+    });
+}
+
+#[test]
+fn severe_x_import_bookmarks_default_falls_back_to_direct_api_after_mcp_failure() {
+    // CLAIM: Transportless bookmark imports keep direct-api as an operational
+    // fallback when the default hosted MCP route fails.
+    // ORACLE: the first MCP request fails, direct /2/users/... requests import
+    // the bookmark, and sync runs preserve both the failed MCP attempt and the
+    // completed direct fallback.
+    // SEVERITY: Severe because a hosted-default migration must not turn one MCP
+    // outage into lost bookmark ingestion.
+    without_x_transport_env(|| {
+        without_x_mcp_env(|| {
+            clear_x_bearer_env();
+            let store = test_store("x-bookmarks-default-fallback-direct-api");
+            store
+                .set_secret_value("X_BEARER_TOKEN", "fallback-bookmark-token", "x")
+                .unwrap();
+            write_policy(
+                &store,
+                r#"
+[[rules]]
+id = "allow-x-bookmarks-default-fallback-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow bookmark MCP default fallback network test"
+priority = 20
+
+[[rules]]
+id = "allow-x-bookmarks-default-fallback-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in bookmark MCP default fallback test"
+priority = 20
+"#,
+            );
+            let recent = (Utc::now() - chrono::Duration::days(2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let direct_page = Box::leak(
+                format!(
+                    r#"{{
+                      "data": [
+                        {{
+                          "id": "bfallback1",
+                          "author_id": "u1",
+                          "text": "Bookmark imported through direct fallback.",
+                          "created_at": "{recent}"
+                        }}
+                      ],
+                      "includes": {{
+                        "users": [
+                          {{ "id": "u1", "username": "openai", "name": "OpenAI" }}
+                        ]
+                      }},
+                      "meta": {{}}
+                    }}"#
+                )
+                .into_boxed_str(),
+            );
+            let (base, requests) = mock_recording_sequence_server(vec![
+                (
+                    "503 Service Unavailable",
+                    "",
+                    r#"{"error":"hosted MCP unavailable"}"#,
+                    "application/json",
+                ),
+                (
+                    "200 OK",
+                    "",
+                    r#"{"data":{"id":"me","username":"me","name":"Me"}}"#,
+                    "application/json",
+                ),
+                ("200 OK", "", direct_page, "application/json"),
+            ]);
+
+            let report = with_x_api_base(&base, || {
+                store.x_import_bookmarks_with_transport(92, 10, None)
+            })
+            .unwrap();
+
+            assert_eq!(report.imported, 1);
+            assert_eq!(report.pages_fetched, Some(1));
+            assert_eq!(report.stop_reason.as_deref(), Some("provider_exhausted"));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 3);
+            assert!(captured[0].contains("POST /mcp "), "{}", captured[0]);
+            assert!(captured[1].contains("GET /2/users/me?"), "{}", captured[1]);
+            assert!(
+                captured[2].contains("GET /2/users/me/bookmarks?"),
+                "{}",
+                captured[2]
+            );
+            let item = store
+                .list_x_items(Some("Bookmark imported through direct fallback"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_ne!(item.sources[0].metadata["imported_from"], "x_api_mcp");
+            let failed_mcp_runs: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'bookmarks' AND transport = 'x_api_mcp' AND status = 'failed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(failed_mcp_runs, 1);
+            let completed_direct_runs: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'bookmarks' AND transport = 'x_api' AND status = 'completed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(completed_direct_runs, 1);
+            let stats = store.x_stats().unwrap();
+            assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+            assert_eq!(stats.latest_sync_runs[0].transport, "x_api");
+            assert_eq!(stats.latest_sync_runs[0].status, "completed");
+        });
+    });
+}
+
+#[test]
+fn severe_x_import_bookmarks_explicit_x_api_mcp_does_not_direct_fallback() {
+    // CLAIM: Explicit bookmark transport selection stays strict; fallback only
+    // applies to omitted/default routes.
+    // ORACLE: an explicit x-api-mcp import fails on the MCP response and never
+    // consumes the queued direct-api responses.
+    // SEVERITY: Severe because operators need explicit transports for targeted
+    // debugging and provider comparison without hidden retries.
+    without_x_transport_env(|| {
+        without_x_mcp_env(|| {
+            clear_x_bearer_env();
+            let store = test_store("x-bookmarks-explicit-mcp-no-fallback");
+            store
+                .set_secret_value("X_BEARER_TOKEN", "strict-bookmark-token", "x")
+                .unwrap();
+            write_policy(
+                &store,
+                r#"
+[[rules]]
+id = "allow-x-bookmarks-explicit-mcp-strict-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow explicit hosted MCP strictness test"
+priority = 20
+"#,
+            );
+            let (base, requests) = mock_recording_sequence_server(vec![
+                (
+                    "503 Service Unavailable",
+                    "",
+                    r#"{"error":"hosted MCP unavailable"}"#,
+                    "application/json",
+                ),
+                (
+                    "200 OK",
+                    "",
+                    r#"{"data":{"id":"me","username":"me","name":"Me"}}"#,
+                    "application/json",
+                ),
+                ("200 OK", "", r#"{"data":[],"meta":{}}"#, "application/json"),
+            ]);
+
+            let error = with_x_api_base(&base, || {
+                store.x_import_bookmarks_with_transport(92, 10, Some("x-api-mcp"))
+            })
+            .unwrap_err()
+            .to_string();
+
+            assert!(
+                error.contains("503") || error.to_ascii_lowercase().contains("unavailable"),
+                "{error}"
+            );
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert!(captured[0].contains("POST /mcp "), "{}", captured[0]);
+            assert!(
+                !captured.iter().any(|request| request.contains("GET /2/")),
+                "{captured:#?}"
+            );
+        });
+    });
+}
+
+#[test]
 fn severe_x_import_bookmarks_x_api_mcp_refreshes_provider_rejected_bearer() {
     // CLAIM: Hosted MCP bookmark import refreshes a locally usable bearer
     // token when the MCP server rejects it as unauthorized, then retries the
@@ -1909,7 +2243,13 @@ fn severe_worker_x_import_bookmarks_reports_completeness() {
         )
         .into_boxed_str(),
     );
-    let base = mock_sequence_server(vec![
+    let (base, requests) = mock_recording_sequence_server(vec![
+        (
+            "503 Service Unavailable",
+            "",
+            r#"{"error":"hosted MCP unavailable"}"#,
+            "application/json",
+        ),
         (
             "200 OK",
             "",
@@ -1919,7 +2259,10 @@ fn severe_worker_x_import_bookmarks_reports_completeness() {
         ("200 OK", "", bookmarks_body, "application/json"),
     ]);
     let job = store.enqueue_x_import_bookmarks_job(92, 1).unwrap();
-    let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
+    let report = without_x_transport_env(|| {
+        without_x_mcp_env(|| with_x_api_base(&base, || store.run_worker_once(1)))
+    })
+    .unwrap();
     assert_eq!(report.processed, 1);
     assert_eq!(report.completed, 1);
     assert_eq!(report.jobs[0].id, job.id);
@@ -1933,6 +2276,24 @@ fn severe_worker_x_import_bookmarks_reports_completeness() {
     assert_eq!(result["stop_reason"], "requested_limit_reached");
     assert_eq!(result["next_token"], "WORKER_NEXT");
     assert_eq!(result["source_card_projections"], 1);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 3);
+    assert!(captured[0].contains("POST /mcp "), "{}", captured[0]);
+    assert!(captured[1].contains("GET /2/users/me?"), "{}", captured[1]);
+    assert!(
+        captured[2].contains("GET /2/users/me/bookmarks?"),
+        "{}",
+        captured[2]
+    );
+    let failed_mcp_runs: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'bookmarks' AND transport = 'x_api_mcp' AND status = 'failed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed_mcp_runs, 1);
     let items = store
         .list_x_items_filtered(None, Some("bookmark"), Some(5))
         .unwrap();
@@ -1959,14 +2320,25 @@ fn severe_worker_x_import_bookmarks_auth_failure_defers_without_retry_storm() {
     store
         .set_secret_value("X_BEARER_TOKEN", "provider-rejected-token", "x")
         .unwrap();
-    let base = mock_status_server(
-        "401 Unauthorized",
-        "",
-        r#"{"title":"Unauthorized","status":401,"detail":"Unauthorized"}"#,
-        "application/json",
-    );
+    let (base, requests) = mock_recording_sequence_server(vec![
+        (
+            "401 Unauthorized",
+            "",
+            r#"{"title":"Unauthorized","status":401,"detail":"Unauthorized"}"#,
+            "application/json",
+        ),
+        (
+            "401 Unauthorized",
+            "",
+            r#"{"title":"Unauthorized","status":401,"detail":"Unauthorized"}"#,
+            "application/json",
+        ),
+    ]);
     let job = store.enqueue_x_import_bookmarks_job(92, 10).unwrap();
-    let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
+    let report = without_x_transport_env(|| {
+        without_x_mcp_env(|| with_x_api_base(&base, || store.run_worker_once(1)))
+    })
+    .unwrap();
     assert_eq!(report.processed, 1);
     assert_eq!(report.deferred, 1, "{report:#?}");
     assert_eq!(report.jobs[0].id, job.id);
@@ -1978,6 +2350,10 @@ fn severe_worker_x_import_bookmarks_auth_failure_defers_without_retry_storm() {
     assert_eq!(result["status"], "deferred");
     assert_eq!(result["source_health_key"], "x:bookmarks");
     assert_eq!(result["provider_health_status"], "auth_failed");
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].contains("POST /mcp "), "{}", captured[0]);
+    assert!(captured[1].contains("GET /2/users/me?"), "{}", captured[1]);
 
     let health = store
         .get_source_health("x:bookmarks")

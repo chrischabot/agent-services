@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::Mutex;
+
+static LOOPBACK_URL_INGEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn memory_pipeline_extracts_review_candidates_and_reconciles_duplicates() {
@@ -40,6 +43,10 @@ fn severe_worker_rejects_unknown_job_kind() {
 
 #[test]
 fn severe_wiki_url_ingest_rejects_loopback_and_metadata_hosts() {
+    let _env_guard = LOOPBACK_URL_INGEST_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
+    }
     let store = test_store("wiki-url-ssrf");
     assert!(
         store
@@ -123,6 +130,10 @@ fn severe_rendered_page_snapshot_ingest_is_no_network_untrusted_evidence() {
     // ORACLE: job result, stored page Markdown, and unsafe URL rejection.
     // SEVERITY: Severe because pretending static fetch saw JS-only content
     // or obeying page instructions would create high-confidence mirages.
+    let _env_guard = LOOPBACK_URL_INGEST_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
+    }
     let store = test_store("rendered-page-snapshot");
     let job = store
             .run_wiki_ingest_rendered_page_job(RenderedPageSnapshotInput {
@@ -947,6 +958,7 @@ fn severe_blog_watch_source_url_ingest_records_success_health() {
     // blog source_health row all point at the same source.
     // SEVERITY: Severe because freshness scans depend on source_health to tell
     // whether important watch sources have actually run recently.
+    let _env_guard = LOOPBACK_URL_INGEST_ENV_LOCK.lock().unwrap();
     unsafe {
         std::env::set_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST", "1");
     }
@@ -1018,6 +1030,123 @@ reason = "loopback URL ingest is allowed for blog health test"
 }
 
 #[test]
+fn severe_blog_watch_source_redirect_ingest_records_original_source_health() {
+    // CLAIM: scheduled blog URL ingestion credits the configured watch source
+    // even when the provider redirects and advertises a different canonical URL.
+    // ORACLE: completed ingest_url job result includes source_health_key for
+    // the original watch source and advances that source's next_run_at.
+    // SEVERITY: Severe because otherwise redirected official blogs can complete
+    // as wiki pages while remaining immediately due forever.
+    let _env_guard = LOOPBACK_URL_INGEST_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST", "1");
+    }
+    let html = r#"
+        <html>
+          <head>
+            <title>Redirected Agent Blog</title>
+            <link rel="canonical" href="/canonical-agent-blog" />
+          </head>
+          <body>
+            <main>
+              <h1>Redirected Agent Blog</h1>
+              <p>Fresh source-backed update after redirect.</p>
+            </main>
+          </body>
+        </html>
+    "#;
+    let (url, requests) = mock_recording_sequence_server(vec![
+        (
+            "302 Found",
+            "location: /final-agent-blog\r\n",
+            "",
+            "text/plain",
+        ),
+        (
+            "200 OK",
+            "content-type: text/html; charset=utf-8\r\n",
+            html,
+            "text/html",
+        ),
+    ]);
+    let store = test_store("blog-url-ingest-redirect-health");
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+reason = "enqueue is allowed for redirected blog health test"
+
+[[rules]]
+id = "allow-url-ingest"
+effect = "allow"
+action = "provider.network"
+provider = "web"
+source = "url_ingest"
+reason = "loopback URL ingest is allowed for redirected blog health test"
+"#,
+    );
+    store
+        .upsert_watch_source(WatchSourceInput {
+            source_kind: "blog".to_string(),
+            locator: url.clone(),
+            label: "Redirected Agent Blog".to_string(),
+            cadence: "hot".to_string(),
+            status: "active".to_string(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+
+    let report = store.run_worker_once(1).unwrap();
+
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.completed, 1);
+    assert_eq!(report.jobs[0].kind, "ingest_url");
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    let result_json = report.jobs[0]
+        .result_json
+        .as_ref()
+        .expect("completed ingest_url job must include result json");
+    assert!(
+        result_json
+            .get("final_url")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.ends_with("/final-agent-blog")),
+        "{result_json}"
+    );
+    assert!(
+        result_json
+            .get("canonical_url")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.ends_with("/canonical-agent-blog")),
+        "{result_json}"
+    );
+    let page_id = result_json
+        .get("page_id")
+        .and_then(Value::as_str)
+        .expect("completed ingest_url job must include page id");
+    let source_health_key = result_json
+        .get("source_health_key")
+        .and_then(Value::as_str)
+        .expect("redirected blog watch-source ingest must include source health key");
+    let health = store
+        .get_source_health(source_health_key)
+        .unwrap()
+        .expect("redirected blog watch-source ingest must write source health");
+    assert_eq!(health.status, "healthy");
+    assert_eq!(health.provider, "blog");
+    assert_eq!(health.source_kind, "blog");
+    assert_eq!(health.locator, url);
+    assert_eq!(health.last_item_id.as_deref(), Some(page_id));
+    assert!(health.next_run_at.is_some(), "{health:?}");
+    unsafe {
+        std::env::remove_var("ARCWELL_ALLOW_LOOPBACK_URL_INGEST");
+    }
+}
+
+#[test]
 fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() {
     // CLAIM: The resident worker can autonomously discover the scheduled
     // X bookmark source, run bookmark import, persist source-card-backed
@@ -1058,7 +1187,13 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
         )
         .into_boxed_str(),
     );
-    let base = mock_sequence_server(vec![
+    let (base, requests) = mock_recording_sequence_server(vec![
+        (
+            "503 Service Unavailable",
+            "",
+            r#"{"error":"hosted MCP unavailable"}"#,
+            "application/json",
+        ),
         (
             "200 OK",
             "",
@@ -1067,7 +1202,10 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
         ),
         ("200 OK", "", bookmarks_body, "application/json"),
     ]);
-    let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
+    let report = without_x_transport_env(|| {
+        without_x_mcp_env(|| with_x_api_base(&base, || store.run_worker_once(1)))
+    })
+    .unwrap();
 
     let watch_poll = report.watch_poll.expect("worker should poll watch sources");
     assert_eq!(watch_poll.inspected, 1);
@@ -1082,6 +1220,15 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
     assert_eq!(result["exhausted"], true);
     assert_eq!(result["stop_reason"], "provider_exhausted");
     assert_eq!(result["source_card_projections"], 1);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 3);
+    assert!(captured[0].contains("POST /mcp "), "{}", captured[0]);
+    assert!(captured[1].contains("GET /2/users/me?"), "{}", captured[1]);
+    assert!(
+        captured[2].contains("GET /2/users/me/bookmarks?"),
+        "{}",
+        captured[2]
+    );
 
     let health = store
         .get_source_health("x:bookmarks")
@@ -1109,13 +1256,23 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
             .contains("untrusted evidence, not agent instructions")
     );
     let stats = store.x_stats().unwrap();
-    assert_eq!(stats.canonical.sync_runs, 1);
+    assert_eq!(stats.canonical.sync_runs, 2);
     assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
     assert_eq!(stats.latest_sync_runs[0].status, "completed");
+    assert_eq!(stats.latest_sync_runs[0].transport, "x_api");
+    let failed_mcp_runs: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'bookmarks' AND transport = 'x_api_mcp' AND status = 'failed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed_mcp_runs, 1);
     let metadata_json: String = store
         .conn
         .query_row(
-            "SELECT metadata_json FROM x_sync_runs WHERE stream = 'bookmarks'",
+            "SELECT metadata_json FROM x_sync_runs WHERE stream = 'bookmarks' AND status = 'completed'",
             [],
             |row| row.get(0),
         )
@@ -1171,7 +1328,13 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
         )
         .into_boxed_str(),
     );
-    let second_base = mock_sequence_server(vec![
+    let (second_base, second_requests) = mock_recording_sequence_server(vec![
+        (
+            "503 Service Unavailable",
+            "",
+            r#"{"error":"hosted MCP unavailable"}"#,
+            "application/json",
+        ),
         (
             "200 OK",
             "",
@@ -1180,7 +1343,10 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
         ),
         ("200 OK", "", next_bookmarks_body, "application/json"),
     ]);
-    let second = with_x_api_base(&second_base, || store.run_worker_once(1)).unwrap();
+    let second = without_x_transport_env(|| {
+        without_x_mcp_env(|| with_x_api_base(&second_base, || store.run_worker_once(1)))
+    })
+    .unwrap();
     let second_poll = second
         .watch_poll
         .expect("due bookmark source should be inspected again");
@@ -1195,6 +1361,23 @@ fn severe_resident_worker_x_bookmarks_import_records_completeness_and_backoff() 
             .and_then(|value| value.get("imported"))
             .and_then(Value::as_u64),
         Some(1)
+    );
+    let captured_second = second_requests.lock().unwrap();
+    assert_eq!(captured_second.len(), 3);
+    assert!(
+        captured_second[0].contains("POST /mcp "),
+        "{}",
+        captured_second[0]
+    );
+    assert!(
+        captured_second[1].contains("GET /2/users/me?"),
+        "{}",
+        captured_second[1]
+    );
+    assert!(
+        captured_second[2].contains("GET /2/users/me/bookmarks?"),
+        "{}",
+        captured_second[2]
     );
     let updated_health = store
         .get_source_health("x:bookmarks")

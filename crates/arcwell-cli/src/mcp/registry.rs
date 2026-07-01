@@ -1937,7 +1937,7 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_import_bookmarks",
-            "Import authenticated X bookmarks as full X items with source provenance and public metrics through Arcwell's owned X provider transport. x-api-mcp uses hosted X MCP user-context tools.",
+            "Import authenticated X bookmarks as full X items with source provenance and public metrics through Arcwell's owned X provider transport. With no explicit transport, Arcwell uses hosted x-api-mcp when user-context bearer or refresh/client material is configured, then falls back to direct-api if the hosted route fails. Explicit transports are strict.",
             [
                 (
                     "bookmark_days",
@@ -1948,13 +1948,13 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                 (
                     "transport",
                     "string",
-                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp. The hosted MCP bookmark path follows returned next_token pagination until provider exhaustion or the requested limit.",
+                    "Optional strict transport: direct-api, xurl-token-api, or x-api-mcp. The hosted MCP bookmark path follows returned next_token pagination until provider exhaustion or the requested limit.",
                 ),
             ],
         ),
         tool(
             "x_schedule_bookmarks",
-            "Create or update the resident worker watch source that periodically imports authenticated X bookmarks. Set transport=x-api-mcp to make the scheduled worker use hosted MCP bookmark tools; omitted transport keeps the broad direct-api default.",
+            "Create or update the resident worker watch source that periodically imports authenticated X bookmarks. Omitted transport lets worker execution use the bookmark default route: hosted x-api-mcp when user-context bearer or refresh/client material is configured, then direct-api fallback. Set transport to direct-api, xurl-token-api, or x-api-mcp to pin a strict transport.",
             [
                 (
                     "bookmark_days",
@@ -1967,7 +1967,7 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                 (
                     "transport",
                     "string",
-                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp.",
+                    "Optional strict transport: direct-api, xurl-token-api, or x-api-mcp.",
                 ),
             ],
         ),

@@ -17,11 +17,7 @@ impl Store {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
         let transport = input.get("transport").and_then(Value::as_str);
-        let response = if transport
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        {
-            let transport = XProviderTransport::parse(transport)?;
+        let response = if let Some(transport) = XProviderTransport::requested(transport)? {
             self.x_recent_search_with_base_transport_and_job_id(
                 query,
                 max_results,
@@ -52,11 +48,7 @@ impl Store {
         let transport = input.get("transport").and_then(Value::as_str);
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let response = if transport
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        {
-            let transport = XProviderTransport::parse(transport)?;
+        let response = if let Some(transport) = XProviderTransport::requested(transport)? {
             self.x_import_bookmarks_with_base_and_transport(
                 bookmark_days,
                 max_bookmarks,
@@ -64,7 +56,7 @@ impl Store {
                 transport,
             )?
         } else {
-            self.x_import_bookmarks_with_base(bookmark_days, max_bookmarks, &endpoint)?
+            self.x_import_bookmarks_with_base_default(bookmark_days, max_bookmarks, &endpoint)?
         };
         if let Some(lineage) = input.get("lineage")
             && let Some(source_key) = lineage.get("watch_source_key").and_then(Value::as_str)

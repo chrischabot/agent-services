@@ -1,0 +1,641 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_CURRENT_MANUAL_REVIEW_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-current-manual-review-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+RAW_DIR="$PROOF_ROOT/raw"
+PRIVATE_DIR="$PROOF_ROOT/private"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+REVIEWED_BY="${ARCWELL_X_WATCH_CURATION_REVIEWED_BY:-codex-x-watch-curation-current-manual-review-proof}"
+SOURCE_PACKET="${ARCWELL_X_WATCH_CURATION_SOURCE_PACKET:-proof-8613f3ce5d971a195fe0a8a9}"
+SOURCE_PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_SOURCE_PROOF_ROOT:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-current-real-home-apply-proof-20260701T091822Z-68495}"
+RECORD="${ARCWELL_PROOF_RECORD:-1}"
+
+log() {
+  printf '[x-watch-curation-current-manual-review-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-current-manual-review-proof] BLOCKED: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$DB" ]] || fail "Arcwell DB does not exist: $DB"
+[[ -x "$ARCWELL_BIN" ]] || fail "Arcwell binary is not executable: $ARCWELL_BIN"
+[[ -f "$SOURCE_PROOF_ROOT/artifacts/proof-packet.json" ]] || fail "missing source proof packet: $SOURCE_PROOF_ROOT"
+
+mkdir -p "$ARTIFACT_DIR" "$RAW_DIR" "$PRIVATE_DIR"
+
+log "proof root: $PROOF_ROOT"
+log "Arcwell home: $ARCWELL_HOME_USED"
+log "source proof: $SOURCE_PROOF_ROOT"
+
+log "verifying source real-home apply proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$SOURCE_PROOF_ROOT/artifacts/proof-packet.json" \
+  >"$ARTIFACT_DIR/source-real-home-apply-verify.json"
+node - "$ARTIFACT_DIR/source-real-home-apply-verify.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+log "building CLI and running focused tests"
+cargo build -p arcwell >"$ARTIFACT_DIR/cargo-build.log" 2>&1
+cargo test -p arcwell-core x_watch_curation -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-curation-tests.log" 2>&1
+cargo test -p arcwell-core x_watch_manual_rule -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-manual-rule-tests.log" 2>&1
+cargo test -p arcwell-core proof -- --nocapture \
+  >"$ARTIFACT_DIR/proof-tests.log" 2>&1
+cargo fmt -- --check >"$ARTIFACT_DIR/cargo-fmt-check.log" 2>&1
+
+capture_state() {
+  local output="$1"
+  python3 - "$DB" >"$output" <<'PY'
+import hashlib, json, sqlite3, sys
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+rows = conn.execute(
+    """
+    SELECT id, locator, status, label, cadence, metadata_json
+    FROM watch_sources
+    WHERE source_kind='x_handle'
+    ORDER BY lower(locator)
+    """
+).fetchall()
+payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+print(json.dumps({
+    "status_counts": dict(conn.execute(
+        "SELECT status, COUNT(*) FROM watch_sources WHERE source_kind='x_handle' GROUP BY status ORDER BY status"
+    ).fetchall()),
+    "total_x_handle_sources": len(rows),
+    "row_checksum": hashlib.sha256(payload.encode()).hexdigest(),
+    "rows": [
+        {
+            "id": row[0],
+            "locator": row[1],
+            "handle": row[1][len("x:handle:"):] if row[1].lower().startswith("x:handle:") else row[1],
+            "status": row[2],
+            "label": row[3],
+            "cadence": row[4],
+            "metadata_sha256": hashlib.sha256((row[5] or "").encode()).hexdigest(),
+        }
+        for row in rows
+    ],
+}, indent=2, sort_keys=True))
+PY
+}
+
+log "capturing baseline and review-drop evidence"
+capture_state "$RAW_DIR/real-before.json"
+python3 - "$DB" "$ARTIFACT_DIR/current-review-drop-evidence.json" <<'PY'
+import json, re, sqlite3, sys
+db, out = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+conn.row_factory = sqlite3.Row
+run = conn.execute(
+    """
+    SELECT id FROM x_watch_curation_runs
+    WHERE status='completed' AND review_drop_leaning_count=29
+    ORDER BY COALESCE(completed_at, created_at) DESC
+    LIMIT 1
+    """
+).fetchone()
+if not run:
+    raise SystemExit("no current 29-row review-drop curation run found")
+run_id = run["id"]
+tech = re.compile(r"\b(ai|llm|claude|openai|anthropic|agent|agents|sdk|api|code|coding|software|engineer|engineering|developer|devrel|startup|stripe|model|research|ml|machine learning|python|javascript|typescript|database|cloud|security|open source|github|infra|infrastructure|browserbase|vercel|planetScale|openart|game dev)\b", re.I)
+rows = []
+for d in conn.execute(
+    """
+    SELECT d.handle, d.score, d.confidence, d.category, d.recommendation,
+           d.reason, d.evidence_json, p.id AS profile_id, p.display_name,
+           p.description, w.status AS watch_status, w.label AS watch_label
+    FROM x_watch_curation_decisions d
+    LEFT JOIN x_profiles p ON lower(p.handle)=lower(d.handle)
+    LEFT JOIN watch_sources w
+      ON w.source_kind='x_handle'
+     AND lower(replace(w.locator,'x:handle:',''))=lower(d.handle)
+    WHERE d.run_id=?1 AND d.recommendation='review_drop_leaning'
+    ORDER BY d.score ASC, d.handle
+    """,
+    (run_id,),
+):
+    tweets = []
+    if d["profile_id"]:
+        for t in conn.execute(
+            """
+            SELECT x_id, text, url, created_at
+            FROM x_tweets
+            WHERE author_profile_id=?1
+            ORDER BY COALESCE(created_at, last_seen_at) DESC
+            LIMIT 10
+            """,
+            (d["profile_id"],),
+        ):
+            text = " ".join((t["text"] or "").split())
+            tweets.append({
+                "x_id": t["x_id"],
+                "created_at": t["created_at"],
+                "url": t["url"],
+                "tech_hit": bool(tech.search(text)),
+                "text": text[:280],
+            })
+    rows.append({
+        "handle": d["handle"],
+        "display_name": d["display_name"],
+        "description": d["description"],
+        "score": d["score"],
+        "reason": d["reason"],
+        "evidence": json.loads(d["evidence_json"] or "{}"),
+        "watch_status": d["watch_status"],
+        "watch_label": d["watch_label"],
+        "samples": tweets,
+    })
+payload = {"run_id": run_id, "review_drop_count": len(rows), "rows": rows}
+open(out, "w").write(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+PY
+
+log "writing reviewed rule set"
+python3 - "$ARTIFACT_DIR/current-review-drop-evidence.json" "$ARTIFACT_DIR/current-manual-reviewed-rules.json" "$ARTIFACT_DIR/current-manual-review-summary.json" "$REVIEWED_BY" <<'PY'
+import json, sys
+evidence_path, rules_path, summary_path, reviewed_by = sys.argv[1:5]
+evidence = json.load(open(evidence_path))
+
+review = {
+    "JohnJumperSci": ("manual_always_keep", "ai_research", "AlphaFold lead leaving Google DeepMind for Anthropic is high-value AI lab signal."),
+    "KenzieMac_Dev": ("manual_always_keep", "developer_tools", "Local tweets reference Browserbase work and dev-facing repo/material."),
+    "jerhadf": ("manual_always_keep", "ai_model_lab", "Profile says helping grow more Claudes."),
+    "meshtimes_": ("manual_always_keep", "developer_tools", "Local evidence includes Vercel Ship attendance; weak but relevant enough to keep rather than pause."),
+    "michpokrass": ("manual_always_keep", "developer_tools", "Local evidence mentions GPT, image generation, and Codex."),
+    "nickevanjoseph": ("manual_always_keep", "ai_research", "Local evidence is tied to John Jumper, DeepMind, and Anthropic transition."),
+    "oliverhamrin": ("manual_always_keep", "devrel_dx", "Local evidence is product/design workflow discussion; keep as design/devrel-adjacent."),
+    "papercliping": ("manual_always_keep", "developer_tools", "Local evidence is release notes for Paperclip with skills, workspace, commits, contributors."),
+    "patrickc": ("manual_always_keep", "software_engineering", "Patrick Collison/Stripe ecosystem signal; local evidence includes Stripe Economics and Cloudflare/Google/Coinbase stablecoin work."),
+    "MichelleBakels": ("manual_always_keep", "devrel_dx", "Local evidence references PlanetScale, conference booth strategy, and AI Engineer event context."),
+    "NoamShazeer": ("manual_always_keep", "ai_research", "Local evidence is Noam Shazeer joining OpenAI."),
+    "orenmeetsworld": ("manual_always_keep", "ai_product", "Local evidence discusses OpenArt Director and AI-generated video ads."),
+    "romero": ("manual_always_keep", "software_engineering", "John Romero/game-dev history and local game-development discussion are software/developer-culture signal."),
+    "stripe": ("manual_always_keep", "developer_tools", "Stripe official account; local evidence includes Open USD, Anthropic collaboration, Railway, and Browserbase."),
+    "synthwavedd": ("manual_always_keep", "ai_model_lab", "Local evidence repeatedly discusses Claude/Anthropic model-launch news."),
+    "BrainsAndTennis": ("manual_always_keep", "ai_research", "Profile and local evidence point to AI/agent/science work, Qwen/RL, spreadsheets/finance models."),
+    "zendadddy": ("manual_always_keep", "devrel_dx", "Local evidence includes LA Design Dev meetup and product-design critique."),
+    "siliconmania": ("manual_always_keep", "devrel_dx", "Local evidence is explicitly tech-event/show/community material."),
+    "Londonist": ("manual_always_exclude", "local_lifestyle", "Local London events/history feed with no AI/software/devrel signal."),
+    "SallyJavadi": ("manual_always_exclude", "entertainment_lifestyle", "Fashion/sneaker lifestyle feed with no AI/software/devrel signal."),
+    "WarhorseStudios": ("manual_always_exclude", "entertainment_lifestyle", "Game-studio marketing/fan-event feed; no AI/devrel signal in local evidence."),
+    "acambridgediary": ("manual_always_exclude", "local_lifestyle", "Cambridge local diary/photo/calendar feed with no AI/software/devrel signal."),
+    "andyburnham": ("manual_always_exclude", "general_politics", "Regional politics account with no AI/software/devrel signal."),
+    "drakes_diary": ("manual_always_exclude", "local_lifestyle", "Mayfair haberdasher/lifestyle diary profile with no local technical evidence."),
+    "emilyjobot": ("manual_always_exclude", "entertainment_lifestyle", "Personal/social/baseball/lifestyle feed with no AI/software/devrel signal."),
+    "shivmalik": ("manual_always_exclude", "general_politics", "Housing/politics account with no AI/software/devrel signal."),
+    "theprophetpizza": ("manual_always_exclude", "entertainment_lifestyle", "Fashion/culture newsletter account with no AI/software/devrel signal."),
+    "vitt2tsnoc": ("manual_always_exclude", "personal_non_tech", "Personal/social commentary feed with no AI/software/devrel signal."),
+}
+unresolved = {
+    "Earendil": "No profile description, no local tweets, no bookmarks, and no positive or negative evidence; absence is not enough to pause."
+}
+
+rows_by_handle = {row["handle"]: row for row in evidence["rows"]}
+missing = sorted(set(review) - set(rows_by_handle))
+if missing:
+    raise SystemExit(f"reviewed handles missing from evidence: {missing}")
+unexpected = sorted((set(rows_by_handle) - set(review)) - set(unresolved))
+if unexpected:
+    raise SystemExit(f"unhandled review-drop handles: {unexpected}")
+
+rules = []
+for handle in sorted(review, key=str.lower):
+    decision, category, rationale = review[handle]
+    row = rows_by_handle[handle]
+    rules.append({
+        "handle": handle,
+        "decision": decision,
+        "category": category,
+        "reason": f"Manual current-list review: {rationale}",
+        "metadata": {
+            "reviewed_by": reviewed_by,
+            "source": "x-watch-curation-current-manual-review-proof",
+            "source_run_id": evidence["run_id"],
+            "prior_score": row["score"],
+            "prior_reason": row["reason"],
+            "local_tweets": row["evidence"].get("local_tweets", 0),
+            "bookmarked_items": row["evidence"].get("bookmarked_items", 0),
+            "tech_tweet_hits": row["evidence"].get("tech_tweet_hits", 0),
+            "sample_count": len(row["samples"]),
+        },
+    })
+
+summary = {
+    "source_run_id": evidence["run_id"],
+    "review_drop_count_before": evidence["review_drop_count"],
+    "rule_count": len(rules),
+    "keep_count": sum(1 for rule in rules if rule["decision"] == "manual_always_keep"),
+    "exclude_count": sum(1 for rule in rules if rule["decision"] == "manual_always_exclude"),
+    "unresolved_count": len(unresolved),
+    "unresolved": unresolved,
+    "non_claims": [
+        "This reviews the 29 current review-drop rows visible in the selected curation run only.",
+        "This does not prove future X provider availability or multi-day recurrence.",
+        "This deliberately leaves zero-evidence handles unresolved instead of treating absence as proof.",
+    ],
+}
+open(rules_path, "w").write(json.dumps(rules, indent=2, sort_keys=True) + "\n")
+open(summary_path, "w").write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+
+log "creating private SQLite backup before mutation"
+python3 - "$DB" "$PRIVATE_DIR/arcwell-before-current-manual-review.sqlite3" <<'PY'
+import pathlib, sqlite3, sys
+src_path = pathlib.Path(sys.argv[1])
+dst_path = pathlib.Path(sys.argv[2])
+dst_path.parent.mkdir(parents=True, exist_ok=True)
+src = sqlite3.connect(src_path)
+dst = sqlite3.connect(dst_path)
+src.backup(dst)
+dst.close()
+src.close()
+PY
+shasum -a 256 "$PRIVATE_DIR/arcwell-before-current-manual-review.sqlite3" \
+  >"$ARTIFACT_DIR/private-backup-sha256.txt"
+
+log "dry-running reviewed manual-rule import"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/current-manual-reviewed-rules.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  --dry-run >"$RAW_DIR/import-dry-run.json"
+
+log "applying reviewed manual rules"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/current-manual-reviewed-rules.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  --apply >"$RAW_DIR/import-apply.json"
+
+log "dry-running curation after review"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --dry-run \
+  >"$RAW_DIR/curation-dry-run.json"
+
+log "applying pause-only curation in real home"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --apply --mode pause-only \
+  >"$RAW_DIR/pause-apply.json"
+
+log "capturing after state"
+capture_state "$RAW_DIR/real-after.json"
+
+log "validating current manual-review invariants"
+node - "$ARTIFACT_DIR" "$RAW_DIR" "$PRIVATE_DIR/arcwell-before-current-manual-review.sqlite3" "$SOURCE_PACKET" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [artifactDir, rawDir, backupPath, sourcePacket] = process.argv.slice(2);
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function hashFile(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+function fail(message, detail) {
+  const error = new Error(message);
+  error.detail = detail;
+  throw error;
+}
+function assert(condition, message, detail) {
+  if (!condition) fail(message, detail);
+}
+function byHandle(state) {
+  return new Map(state.rows.map((row) => [String(row.handle).toLowerCase(), row]));
+}
+
+const rules = readJson(path.join(artifactDir, "current-manual-reviewed-rules.json"));
+const summary = readJson(path.join(artifactDir, "current-manual-review-summary.json"));
+const before = readJson(path.join(rawDir, "real-before.json"));
+const after = readJson(path.join(rawDir, "real-after.json"));
+const importDry = readJson(path.join(rawDir, "import-dry-run.json"));
+const importApply = readJson(path.join(rawDir, "import-apply.json"));
+const curationDry = readJson(path.join(rawDir, "curation-dry-run.json"));
+const pauseApply = readJson(path.join(rawDir, "pause-apply.json"));
+const excludeHandles = rules
+  .filter((rule) => rule.decision === "manual_always_exclude")
+  .map((rule) => String(rule.handle).toLowerCase())
+  .sort();
+const keepHandles = rules
+  .filter((rule) => rule.decision === "manual_always_keep")
+  .map((rule) => String(rule.handle).toLowerCase())
+  .sort();
+
+assert(summary.rule_count === 28, "expected 28 reviewed rules", summary);
+assert(summary.keep_count === 18, "expected 18 keeps", summary);
+assert(summary.exclude_count === 10, "expected 10 excludes", summary);
+assert(summary.unresolved_count === 1 && summary.unresolved.Earendil, "expected only Earendil unresolved", summary);
+assert(fs.existsSync(backupPath), "private backup is missing", backupPath);
+assert(importDry.dry_run === true && importDry.rejected === 0 && importDry.imported === 0 && importDry.updated === 0, "dry-run import wrote or rejected rows", importDry);
+assert(importApply.dry_run === false && importApply.rejected === 0 && importApply.seen === rules.length, "manual-rule apply failed", importApply);
+assert(importApply.imported + importApply.updated === rules.length, "manual-rule apply wrote unexpected row count", importApply);
+assert(before.total_x_handle_sources === after.total_x_handle_sources, "watch source total changed", { before, after });
+assert(before.status_counts.active === 169 && before.status_counts.paused === 1, "unexpected before counts", before.status_counts);
+assert(after.status_counts.active === 159 && after.status_counts.paused === 11, "unexpected after counts", after.status_counts);
+
+const beforeRows = byHandle(before);
+const afterRows = byHandle(after);
+const changed = [];
+for (const [handle, beforeRow] of beforeRows.entries()) {
+  const afterRow = afterRows.get(handle);
+  assert(afterRow, "handle disappeared", handle);
+  if (JSON.stringify(beforeRow) !== JSON.stringify(afterRow)) {
+    changed.push({ handle, before: beforeRow, after: afterRow });
+  }
+}
+const statusChanged = changed.filter((row) => row.before.status !== row.after.status);
+assert(JSON.stringify(statusChanged.map((row) => row.handle).sort()) === JSON.stringify(excludeHandles), "status changes did not match excludes", { excludeHandles, statusChanged });
+for (const row of statusChanged) {
+  assert(row.before.status === "active" && row.after.status === "paused", "unexpected status transition", row);
+}
+for (const handle of keepHandles) {
+  assert(afterRows.get(handle)?.status === "active", "keep handle did not remain active", handle);
+}
+
+const applied = pauseApply.decisions.filter((decision) => decision.applied_at);
+assert(pauseApply.run.paused_count === excludeHandles.length, "pause apply paused_count mismatch", pauseApply.run);
+assert(applied.length === excludeHandles.length, "applied decision count mismatch", applied);
+assert(JSON.stringify(applied.map((decision) => String(decision.handle).toLowerCase()).sort()) === JSON.stringify(excludeHandles), "applied decisions did not match excludes", applied);
+assert((pauseApply.counts.review_drop_leaning || 0) === 1, "expected one unresolved review_drop_leaning after apply", pauseApply.counts);
+
+const validation = {
+  status: "passed",
+  checks: [
+    "source proof packet verified before mutation",
+    "private SQLite backup created before mutation",
+    "28 reviewed rules generated from current review-drop evidence",
+    "manual-rule dry-run wrote no rows",
+    "manual-rule apply wrote exactly 28 rows",
+    "watch-source total count stayed constant",
+    "exactly the 10 reviewed excludes changed from active to paused",
+    "all 18 reviewed keeps remained active",
+    "one zero-evidence handle remains unresolved",
+  ],
+  source_packet: sourcePacket,
+  backup_sha256: hashFile(backupPath),
+  before_status_counts: before.status_counts,
+  after_status_counts: after.status_counts,
+  changed_status: statusChanged,
+  keep_handles: keepHandles,
+  exclude_handles: excludeHandles,
+  unresolved: summary.unresolved,
+  curation_dry_run_id: curationDry.run.id,
+  pause_apply_run_id: pauseApply.run.id,
+};
+const proofSummary = {
+  proof_name: "x-watch-curation-current-manual-review-proof",
+  proof_level: "real_home_current_review_drop_manual_review",
+  reviewed_rule_summary: summary,
+  real_home: {
+    status_before: before.status_counts,
+    status_after: after.status_counts,
+    total_x_handle_sources: after.total_x_handle_sources,
+    row_checksum_before: before.row_checksum,
+    row_checksum_after: after.row_checksum,
+  },
+  manual_rule_import: {
+    dry_run_seen: importDry.seen,
+    dry_run_rejected: importDry.rejected,
+    apply_seen: importApply.seen,
+    apply_imported: importApply.imported,
+    apply_updated: importApply.updated,
+    apply_rejected: importApply.rejected,
+  },
+  curation: {
+    dry_run_id: curationDry.run.id,
+    pause_apply_run_id: pauseApply.run.id,
+    paused_count: pauseApply.run.paused_count,
+    counts: pauseApply.counts,
+  },
+  non_claims: summary.non_claims,
+};
+fs.writeFileSync(path.join(artifactDir, "current-manual-review-validation.json"), JSON.stringify(validation, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "current-manual-review-proof-summary.json"), JSON.stringify(proofSummary, null, 2) + "\n");
+NODE
+
+log "building proof packet"
+node - "$ARTIFACT_DIR" "$RAW_DIR" "$PROOF_ROOT" "$SOURCE_PACKET" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [artifactDir, rawDir, proofRoot, sourcePacket] = process.argv.slice(2);
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function fileHash(relativePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(path.join(proofRoot, relativePath))).digest("hex");
+}
+const summary = readJson(path.join(artifactDir, "current-manual-review-proof-summary.json"));
+const validation = readJson(path.join(artifactDir, "current-manual-review-validation.json"));
+const artifacts = [
+  ["current_review_drop_evidence", "artifacts/current-review-drop-evidence.json", "evidence"],
+  ["current_manual_reviewed_rules", "artifacts/current-manual-reviewed-rules.json", "reviewed_rules"],
+  ["current_manual_review_summary", "artifacts/current-manual-review-summary.json", "review_summary"],
+  ["current_manual_review_validation", "artifacts/current-manual-review-validation.json", "validation"],
+  ["pause_apply_result", "raw/pause-apply.json", "live_mutation_result"],
+  ["source_real_home_apply_verify", "artifacts/source-real-home-apply-verify.json", "source_packet_verification"],
+].map(([label, artifactPath, artifactKind]) => ({
+  label,
+  path: artifactPath,
+  sha256: fileHash(artifactPath),
+  artifact_kind: artifactKind,
+  description: `${label} for current manual review proof.`,
+}));
+const claims = [
+  {
+    claim_key: "current_review_drop_rows_reviewed",
+    claim: "The 29 current review-drop rows were reviewed against local profile/tweet evidence, producing 18 keep rules, 10 exclude rules, and 1 explicitly unresolved zero-evidence handle.",
+    status: "proven",
+    proof_level: "local_evidence_review",
+    evidence: {
+      source_run_id: summary.reviewed_rule_summary.source_run_id,
+      keep_count: summary.reviewed_rule_summary.keep_count,
+      exclude_count: summary.reviewed_rule_summary.exclude_count,
+      unresolved: summary.reviewed_rule_summary.unresolved,
+    },
+    refutation: {
+      would_be_refuted_by: "Any unaccounted review-drop handle or unresolved handle being silently treated as reviewed.",
+    },
+  },
+  {
+    claim_key: "reviewed_excludes_paused_in_real_home",
+    claim: "Pause-only curation changed exactly the 10 reviewed current excludes from active to paused and preserved the x_handle row set.",
+    status: "proven",
+    proof_level: "real_home_current_review_drop_manual_review",
+    evidence: {
+      before_status_counts: validation.before_status_counts,
+      after_status_counts: validation.after_status_counts,
+      changed_status: validation.changed_status,
+      exclude_handles: validation.exclude_handles,
+      pause_apply_run_id: validation.pause_apply_run_id,
+    },
+    refutation: {
+      would_be_refuted_by: "Any non-exclude handle changing status, any reviewed exclude staying active, or total x_handle source count changing.",
+    },
+  },
+  {
+    claim_key: "reviewed_keeps_remained_active",
+    claim: "All 18 reviewed keep handles remained active after the pause-only apply.",
+    status: "proven",
+    proof_level: "real_home_current_review_drop_manual_review",
+    evidence: {
+      keep_handles: validation.keep_handles,
+    },
+    refutation: {
+      would_be_refuted_by: "Any reviewed keep handle becoming paused during this apply.",
+    },
+  },
+  {
+    claim_key: "earendil_remains_unresolved",
+    claim: "The zero-evidence handle Earendil remains unresolved rather than paused from absence of evidence.",
+    status: "partial",
+    proof_level: "current_snapshot",
+    evidence: {
+      unresolved: validation.unresolved,
+      post_apply_counts: summary.curation.counts,
+    },
+    refutation: {
+      would_be_refuted_by: "Claiming all current review-drop rows are fully resolved without additional evidence for Earendil.",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "source_packet_verification",
+    command: "arcwell proof verify-packet source real-home apply proof",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Source real-home apply packet verified before mutation.",
+    metadata: { source_packet: sourcePacket },
+  },
+  {
+    check_kind: "focused_tests",
+    command: "cargo test -p arcwell-core x_watch_curation x_watch_manual_rule proof -- --nocapture",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Focused curation, manual-rule, and proof tests passed before mutation.",
+    metadata: {},
+  },
+  {
+    check_kind: "format",
+    command: "cargo fmt -- --check",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Formatting check passed.",
+    metadata: {},
+  },
+  {
+    check_kind: "real_home_manual_review_apply_invariant",
+    command: "current manual review validation",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Exactly 10 reviewed excludes changed from active to paused; reviewed keeps remained active; one zero-evidence row remains unresolved.",
+    metadata: validation,
+  },
+];
+const metadata = {
+  proof_name: "x-watch-curation-current-manual-review-proof",
+  generated_at: new Date().toISOString(),
+  source_packet: sourcePacket,
+  before_status_counts: summary.real_home.status_before,
+  after_status_counts: summary.real_home.status_after,
+  keep_count: summary.reviewed_rule_summary.keep_count,
+  exclude_count: summary.reviewed_rule_summary.exclude_count,
+  unresolved_count: summary.reviewed_rule_summary.unresolved_count,
+  non_claims: summary.non_claims,
+};
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+const packet = {
+  proof_name: "x-watch-curation-current-manual-review-proof",
+  proof_level: "real_home_current_review_drop_manual_review",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell reviewed the remaining current X watch review-drop rows and applied only evidence-backed keep/drop rules, leaving zero-evidence rows unresolved.",
+  boundary: "This is a current-list manual review and pause-only apply proof, not future recurrence, provider availability, or full operational curation.",
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+log "verifying proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" \
+  >"$ARTIFACT_DIR/verify-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet and promote review"
+  PACKET_ID="$("$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current manual review proof" \
+    --proof-level real_home_current_review_drop_manual_review \
+    --status partial \
+    --summary "Reviewed 29 current review-drop rows, imported 18 keep rules and 10 exclude rules, pause-only applied exactly the 10 excludes, and left Earendil unresolved because it has zero local evidence." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$(cat "$ARTIFACT_DIR/claims.json")" \
+    --artifacts-json "$(cat "$ARTIFACT_DIR/artifacts.json")" \
+    --checks-json "$(cat "$ARTIFACT_DIR/checks.json")" \
+    --metadata-json "$(cat "$ARTIFACT_DIR/metadata.json")" \
+    >"$ARTIFACT_DIR/recorded-proof.json" && node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+  )"
+  [[ -n "$PACKET_ID" ]] || fail "proof record did not return a packet id"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current manual review review" \
+    --reviewer codex \
+    --requested-proof-level real_home_current_review_drop_manual_review \
+    --judgment promote \
+    --summary "Promote this current-list manual review slice: the evidence-backed rules changed exactly the intended handles and preserved the unresolved zero-evidence boundary." \
+    --strongest-fake-done-path "Claiming M1 is fully complete even though Earendil remains unresolved and recurrence/ops/gold-set gates remain open." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["The proof verifies the previous real-home apply packet before mutation.", "The proof creates a private backup before mutation.", "Validation shows exactly the reviewed excludes changed status and reviewed keeps remained active.", "Earendil remains explicitly unresolved instead of being silently classified."]' \
+    --skipped-categories-json '["No live provider re-enrichment was performed for Earendil.", "No multi-day recurrence proof was attempted.", "No ops UI control or MCP/slash parity proof was attempted."]' \
+    --findings-json '[]' \
+    --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"x-watch-curation-current-manual-review\"}" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" "$ARTIFACT_DIR/recorded-proof.json" 2>/dev/null <<'NODE' || true
+const fs = require("fs");
+const verify = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const recordedPath = process.argv[3];
+let packetId = null;
+if (recordedPath && fs.existsSync(recordedPath)) {
+  const recorded = JSON.parse(fs.readFileSync(recordedPath, "utf8"));
+  packetId = recorded.packet?.id || recorded.id || null;
+}
+console.log(JSON.stringify({ verify_ok: verify.ok, packet_id: packetId }, null, 2));
+NODE

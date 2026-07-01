@@ -9,6 +9,8 @@ fi
 
 MODE="status"
 LIMIT="${ARCWELL_GMAIL_PROOF_LIMIT:-25}"
+ALLOW_INCOMPLETE="${ARCWELL_GMAIL_PROOF_ALLOW_INCOMPLETE:-0}"
+REQUIRE_GMAIL_OAUTH="${ARCWELL_GMAIL_PROOF_REQUIRE_GMAIL_OAUTH:-0}"
 RUN_STAMP="${ARCWELL_GMAIL_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PROOF_ROOT="${ARCWELL_GMAIL_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/gmail-mailbox-proof-$RUN_STAMP}"
 ARTIFACT_DIR="$PROOF_ROOT/artifacts"
@@ -27,11 +29,20 @@ Options:
   --live         Use the configured real Arcwell home and Gmail OAuth material.
   --proof-dir D  Override proof root.
   --limit N      Limit verifier/repair requests. Default 25.
+  --allow-incomplete
+                 Exit 0 for live blocked/incomplete packets after writing artifacts.
+  --require-gmail-oauth
+                 In status mode, exit nonzero unless Gmail API credential material exists.
 
 Safety:
   Status mode does not read Gmail, write Arcwell state, send mail, or repair labels.
+  Status mode with --require-gmail-oauth is a strict readiness gate; it does not
+  call Gmail, but it fails when neither GMAIL_ACCESS_TOKEN nor refresh+client-id
+  material is available.
   Self-test uses a disposable ARCWELL_HOME and mock providers only.
   Live mode records Gmail mailbox observations and requires ARCWELL_GMAIL_PROOF_CONFIRM=verify.
+  Live mode exits nonzero when Gmail OAuth is missing or verification is incomplete,
+  unless --allow-incomplete is passed.
   Live Gmail label repair additionally requires ARCWELL_GMAIL_REPAIR_CONFIRM=repair.
 EOF
 }
@@ -66,6 +77,12 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || fail "--limit requires a value"
       LIMIT="$1"
+      ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      ;;
+    --require-gmail-oauth)
+      REQUIRE_GMAIL_OAUTH=1
       ;;
     -h|--help)
       usage
@@ -108,15 +125,54 @@ const read = (name, fallback) => {
 const recovery = read("recovery-plan.json", {});
 const gaps = read("verification-gaps.json", []);
 const secretHealth = read("secret-health.json", []);
+const secretList = read("secret-list.json", []);
 const ops = read("ops-compact.json", {});
 const gmailWarnings = Array.isArray(secretHealth)
   ? secretHealth.filter((item) => /GMAIL|GOOGLE/.test(String(item.name || "")))
   : [];
+const listedSecretNames = new Set(
+  Array.isArray(secretList)
+    ? secretList.map((item) => String(item.name || "")).filter(Boolean)
+    : []
+);
+const healthByName = new Map(
+  Array.isArray(secretHealth)
+    ? secretHealth
+        .filter((item) => item && item.name)
+        .map((item) => [String(item.name), item])
+    : []
+);
+const hasUsableHealthSecret = (names) =>
+  names.some((name) => {
+    const item = healthByName.get(name);
+    return item && item.present === true && !["missing", "expired", "rejected"].includes(String(item.status || ""));
+  });
+const hasListedSecret = (names) => names.some((name) => listedSecretNames.has(name));
+const envPresent = (names) => names.some((name) => Boolean(process.env[name] && process.env[name].trim()));
+const hasAccessToken =
+  hasUsableHealthSecret(["GMAIL_ACCESS_TOKEN"]) ||
+  hasListedSecret(["GMAIL_ACCESS_TOKEN"]) ||
+  envPresent(["GMAIL_ACCESS_TOKEN"]);
+const hasRefreshToken =
+  hasUsableHealthSecret(["GMAIL_REFRESH_TOKEN"]) ||
+  hasListedSecret(["GMAIL_REFRESH_TOKEN"]) ||
+  envPresent(["GMAIL_REFRESH_TOKEN"]);
+const hasClientId =
+  hasUsableHealthSecret(["GMAIL_CLIENT_ID", "GOOGLE_CLIENT_ID"]) ||
+  hasListedSecret(["GMAIL_CLIENT_ID", "GOOGLE_CLIENT_ID"]) ||
+  envPresent(["GMAIL_CLIENT_ID", "GOOGLE_CLIENT_ID"]);
+const hasClientSecret =
+  hasUsableHealthSecret(["GMAIL_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"]) ||
+  hasListedSecret(["GMAIL_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"]) ||
+  envPresent(["GMAIL_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"]);
+const canAttemptLiveGmailApi = hasAccessToken || (hasRefreshToken && hasClientId);
+const status = canAttemptLiveGmailApi ? "status_only" : "missing_gmail_oauth";
+const proofLevel = canAttemptLiveGmailApi ? "read_only_status" : "read_only_status_missing_gmail_oauth";
 const packet = {
   feature: "gmail_mailbox_verification_and_repair_proof",
   mode,
-  status: "status_only",
-  proof_level: "read_only_status",
+  status,
+  proof_level: proofLevel,
   user_visible_claim: "Arcwell can report current Gmail mailbox recovery readiness without sending mail, reading Gmail, repairing labels, or marking observations.",
   proof_root: proofRoot,
   limit: Number(limit),
@@ -131,11 +187,23 @@ const packet = {
     dead_lettered_jobs: ops.health?.dead_lettered_jobs ?? null,
     gmail_secret_health_rows: gmailWarnings.length,
   },
+  gmail_oauth_readiness: {
+    has_access_token: hasAccessToken,
+    has_refresh_token: hasRefreshToken,
+    has_client_id: hasClientId,
+    has_client_secret: hasClientSecret,
+    can_attempt_live_gmail_api: canAttemptLiveGmailApi,
+    proof: canAttemptLiveGmailApi ? "credential_material_present" : "credential_material_missing",
+    note: canAttemptLiveGmailApi
+      ? "Credential material is present, but live Gmail API behavior still requires --live proof."
+      : "No current gaps are not proof of Gmail API readiness; --live cannot exercise daemon-owned Gmail verification until OAuth material is configured.",
+  },
   boundary: "Read-only status packet. It does not prove live Arcwell-owned Gmail OAuth access unless run in live mode with configured credentials.",
   artifacts: {
     recovery_plan: "artifacts/recovery-plan.json",
     verification_gaps: "artifacts/verification-gaps.json",
     secret_health: "artifacts/secret-health.json",
+    secret_list: "artifacts/secret-list.json",
     ops_compact: "artifacts/ops-compact.json",
   },
   remaining_gate: "Run --live after Gmail OAuth material is configured to prove daemon-owned mailbox verification; set ARCWELL_GMAIL_REPAIR_CONFIRM=repair only when label repair is intended.",
@@ -150,9 +218,15 @@ run_status() {
   run_arcwell email recovery-plan >"$ARTIFACT_DIR/recovery-plan.json"
   run_arcwell email verification-gaps >"$ARTIFACT_DIR/verification-gaps.json"
   run_arcwell secrets health >"$ARTIFACT_DIR/secret-health.json"
+  run_arcwell secret-list >"$ARTIFACT_DIR/secret-list.json"
   run_arcwell ops --compact >"$ARTIFACT_DIR/ops-compact.json"
   write_status_packet
+  local packet_status
+  packet_status="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.status || ""));' "$ARTIFACT_DIR/proof-packet.json")"
   log "status packet: $ARTIFACT_DIR/proof-packet.json"
+  if [ "$REQUIRE_GMAIL_OAUTH" = "1" ] && [ "$packet_status" != "status_only" ]; then
+    fail "Gmail OAuth readiness is $packet_status; configure GMAIL_ACCESS_TOKEN or GMAIL_REFRESH_TOKEN plus GMAIL_CLIENT_ID before treating daemon-owned Gmail verification as ready"
+  fi
 }
 
 run_mock_server() {
@@ -297,6 +371,8 @@ function assert(condition, message, detail) {
   }
 }
 const send = read("email-send.json");
+const statusMissing = read("status-missing-oauth/artifacts/proof-packet.json");
+const statusReady = read("status-with-oauth/artifacts/proof-packet.json");
 const first = read("worker-verify.json");
 const afterVerify = read("recovery-after-verify.json");
 const second = read("worker-repair.json");
@@ -313,6 +389,10 @@ assert(Array.isArray(observations) && observations.some((o) => o.observation_sou
 assert(lines.some((line) => line.url.includes("/email/sending/send")), "missing mock Cloudflare send request", lines);
 assert(lines.some((line) => line.url.startsWith("/gmail/v1/users/me/messages?")), "missing Gmail search request", lines);
 assert(lines.some((line) => line.url.endsWith("/modify")), "missing Gmail label modify request", lines);
+assert(statusMissing.status === "missing_gmail_oauth", "strict status should fail before disposable Gmail token is configured", statusMissing);
+assert(statusMissing.gmail_oauth_readiness?.can_attempt_live_gmail_api === false, "missing strict status should report Gmail API not attemptable", statusMissing);
+assert(statusReady.status === "status_only", "strict status should pass after disposable Gmail token is configured", statusReady);
+assert(statusReady.gmail_oauth_readiness?.can_attempt_live_gmail_api === true, "ready strict status should report Gmail API attemptable", statusReady);
 const packet = {
   feature: "gmail_mailbox_verification_and_repair_proof",
   mode: "self-test",
@@ -338,6 +418,8 @@ const packet = {
     worker_repair: "artifacts/worker-repair.json",
     recovery_final: "artifacts/recovery-final.json",
     provider_requests: "artifacts/provider-requests.jsonl",
+    status_missing_oauth: "artifacts/status-missing-oauth/artifacts/proof-packet.json",
+    status_with_oauth: "artifacts/status-with-oauth/artifacts/proof-packet.json",
   },
   remaining_gate: "Run --live with configured Gmail OAuth material for production-data proof.",
 };
@@ -362,8 +444,19 @@ run_self_test() {
   local mock_base
   mock_base="$(tr -d '\n' <"$base_file")"
   write_self_test_policy
+  set +e
+  "$0" --status --require-gmail-oauth --limit 1 --proof-dir "$ARTIFACT_DIR/status-missing-oauth" >"$ARTIFACT_DIR/status-missing-oauth.out" 2>"$ARTIFACT_DIR/status-missing-oauth.err"
+  local missing_status_code="$?"
+  set -e
+  if [ "$missing_status_code" -ne 2 ]; then
+    fail "strict status should exit 2 before disposable Gmail OAuth material exists, got $missing_status_code"
+  fi
   run_arcwell secrets set-value GMAIL_ACCESS_TOKEN gmail-proof-token-SHOULD_NOT_LEAK --scope email --provider gmail >"$ARTIFACT_DIR/gmail-token-set.json"
   run_arcwell secrets set-value GMAIL_API_BASE "$mock_base" --scope email --provider gmail >"$ARTIFACT_DIR/gmail-base-set.json"
+  "$0" --status --require-gmail-oauth --limit 1 --proof-dir "$ARTIFACT_DIR/status-with-oauth" >"$ARTIFACT_DIR/status-with-oauth.out" 2>"$ARTIFACT_DIR/status-with-oauth.err"
+  if rg -q "gmail-proof-token-SHOULD_NOT_LEAK" "$ARTIFACT_DIR/status-with-oauth" "$ARTIFACT_DIR/status-missing-oauth"; then
+    fail "strict status artifacts leaked disposable Gmail token"
+  fi
   run_arcwell email authorize gmail-proof@example.com --send >"$ARTIFACT_DIR/email-authorization.json"
   run_arcwell email send \
     --from agent@example.com \
@@ -399,11 +492,40 @@ const afterVerify = read("recovery-after-verify.json", {});
 const repairTrash = read("repair-trash.json", null);
 const repairSpam = read("repair-spam.json", null);
 const finalPlan = read("recovery-final.json", {});
+const verifyReport = verify.report ?? verify;
+const verifyErrors = Array.isArray(verifyReport.errors) ? verifyReport.errors : [];
+const missingCredential = verifyReport.missing_credential === true
+  || verifyErrors.some((error) => String(error).includes("GMAIL_ACCESS_TOKEN is not configured"));
+const observed = Number(verifyReport.observed ?? 0);
+const notFound = Number(verifyReport.not_found ?? 0);
+const inspected = Number(verifyReport.inspected ?? 0);
+const ready = Number(verifyReport.ready ?? 0);
+const beforeVerificationCandidates = Number(before.automatic_verification_candidates ?? 0);
+let status = "completed";
+let proofLevel = "live_configured_gmail_attempt";
+let remainingGate = null;
+if (missingCredential && (inspected > 0 || ready > 0 || beforeVerificationCandidates > 0)) {
+  status = "blocked_missing_gmail_oauth";
+  proofLevel = "live_blocked_before_gmail_api";
+  remainingGate = "Store Gmail OAuth material (GMAIL_CLIENT_ID plus GMAIL_REFRESH_TOKEN, or a usable GMAIL_ACCESS_TOKEN) and rerun --live.";
+} else if (missingCredential) {
+  status = "incomplete_missing_gmail_oauth_no_current_gaps";
+  proofLevel = "live_unexercised_gmail_api";
+  remainingGate = "There are no current mailbox gaps, but Arcwell-owned Gmail API access is still unproven because Gmail OAuth material is not configured.";
+} else if (verifyErrors.length > 0) {
+  status = "blocked_gmail_verifier_error";
+  proofLevel = "live_gmail_api_attempt_failed";
+  remainingGate = "Inspect verify-mailbox errors, fix the provider/policy/credential issue, then rerun --live.";
+} else if (inspected > 0 && observed === 0 && notFound === 0) {
+  status = "completed_no_observations";
+  proofLevel = "live_gmail_api_attempt_no_observations";
+  remainingGate = "No mailbox observations were recorded; inspect recovery and Gmail query artifacts before promoting.";
+}
 const packet = {
   feature: "gmail_mailbox_verification_and_repair_proof",
   mode: "live",
-  status: "completed",
-  proof_level: "live_configured_gmail_attempt",
+  status,
+  proof_level: proofLevel,
   user_visible_claim: "Arcwell can use configured Gmail OAuth material to verify current mailbox gaps and, when explicitly confirmed, repair bad placement without resending.",
   proof_root: proofRoot,
   limit: Number(limit),
@@ -413,7 +535,7 @@ const packet = {
     automatic_repair_candidates: before.automatic_repair_candidates ?? null,
   },
   verify_status: verify.status ?? null,
-  verify_report: verify.report ?? verify,
+  verify_report: verifyReport,
   repair_confirmed: repairConfirm === "repair",
   repair_reports: {
     trash: repairTrash?.report ?? repairTrash,
@@ -426,6 +548,7 @@ const packet = {
     explicit_resend_review_candidates: finalPlan.explicit_resend_review_candidates ?? null,
   },
   boundary: "Live mode mutates Arcwell mailbox-observation state. Gmail label repair only runs with ARCWELL_GMAIL_REPAIR_CONFIRM=repair.",
+  remaining_gate: remainingGate,
   artifacts: {
     recovery_before: "artifacts/recovery-before.json",
     verify_mailbox: "artifacts/verify-mailbox.json",
@@ -435,7 +558,7 @@ const packet = {
   },
 };
 fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2));
-fs.writeFileSync(path.join(artifactDir, "proof-packet.md"), `# Gmail Mailbox Proof\n\nStatus: completed\nProof level: live configured Gmail attempt\n\nProof packet: ${path.join(artifactDir, "proof-packet.json")}\n`);
+fs.writeFileSync(path.join(artifactDir, "proof-packet.md"), `# Gmail Mailbox Proof\n\nStatus: ${status}\nProof level: ${proofLevel}\n\nProof packet: ${path.join(artifactDir, "proof-packet.json")}\n`);
 NODE
 }
 
@@ -460,7 +583,12 @@ run_live() {
   run_arcwell email recovery-plan >"$ARTIFACT_DIR/recovery-final.json"
   run_arcwell ops --compact >"$ARTIFACT_DIR/ops-final.json"
   write_live_packet
+  local packet_status
+  packet_status="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.status || ""));' "$ARTIFACT_DIR/proof-packet.json")"
   log "live packet: $ARTIFACT_DIR/proof-packet.json"
+  if [ "$packet_status" != "completed" ] && [ "$ALLOW_INCOMPLETE" != "1" ]; then
+    fail "live Gmail mailbox proof is $packet_status; rerun with --allow-incomplete to preserve artifacts without treating it as a pass"
+  fi
 }
 
 case "$MODE" in

@@ -1606,6 +1606,16 @@ impl Store {
         self.apply_schema_migration(23, "guard_review_ledger", false, None, |conn| {
             ensure_guard_schema_on(conn)
         })?;
+        self.apply_schema_migration(24, "adversarial_review_ledger", false, None, |conn| {
+            ensure_proof_packet_schema_on(conn)
+        })?;
+        self.apply_schema_migration(
+            25,
+            "x_watch_curation_audit_retention",
+            false,
+            None,
+            |conn| migrate_x_watch_curation_audit_retention_on(conn),
+        )?;
         repair_radar_source_quality_run_scope_on(&self.conn)?;
         self.conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",

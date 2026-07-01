@@ -518,6 +518,41 @@ impl Store {
         self.load_policy_rules()
     }
 
+    pub fn ensure_local_ops_ui_policy_rules(&self) -> Result<Vec<String>> {
+        let path = self.paths.home.join("arcwell-policy.toml");
+        let mut policy = if path.exists() {
+            let body =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            toml::from_str::<PolicyFile>(&body)
+                .with_context(|| format!("parsing policy file {}", path.display()))?
+        } else {
+            PolicyFile {
+                rules: default_policy_rules(),
+            }
+        };
+        let seed_rules = local_ops_ui_policy_rules();
+        let existing_ids = policy
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut added = Vec::new();
+        for rule in seed_rules {
+            if existing_ids.contains(&rule.id) {
+                continue;
+            }
+            validate_policy_rule(&rule)?;
+            added.push(rule.id.clone());
+            policy.rules.push(rule);
+        }
+        if !added.is_empty() {
+            let body = toml::to_string_pretty(&policy)?;
+            fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+        }
+        self.load_policy_rules()?;
+        Ok(added)
+    }
+
     pub fn create_policy_allow_override(
         &self,
         mut request: PolicyRequest,
@@ -1024,6 +1059,19 @@ impl Store {
                 bearer.status = "refreshable".to_string();
             }
         }
+        let gmail_issue_schedule_dependency_count = self
+            .list_issue_schedules()?
+            .into_iter()
+            .filter(|schedule| {
+                schedule.status.eq_ignore_ascii_case("active")
+                    && schedule.channel.eq_ignore_ascii_case("email")
+                    && schedule
+                        .recipient_ref
+                        .trim()
+                        .strip_prefix("email:")
+                        .is_some_and(|address| address.to_ascii_lowercase().ends_with("@gmail.com"))
+            })
+            .count();
         let gmail_gaps = self.list_email_delivery_verification_gaps()?;
         let gmail_unverified_count = gmail_gaps
             .iter()
@@ -1038,7 +1086,10 @@ impl Store {
                 )
             })
             .count();
-        if gmail_unverified_count > 0 || gmail_repairable_count > 0 {
+        if gmail_unverified_count > 0
+            || gmail_repairable_count > 0
+            || gmail_issue_schedule_dependency_count > 0
+        {
             let access_ready = by_name
                 .get("GMAIL_ACCESS_TOKEN")
                 .is_some_and(|item| item.present && item.status != "expired");
@@ -1050,7 +1101,7 @@ impl Store {
                 .or_else(|| by_name.get("GOOGLE_CLIENT_ID"))
                 .is_some_and(|item| item.present && item.status != "expired");
             let gmail_scope_warning = format!(
-                "Gmail mailbox verification has {gmail_unverified_count} unverified gap(s) and {gmail_repairable_count} Trash/Spam repairable gap(s); stored Gmail OAuth credentials must include https://www.googleapis.com/auth/gmail.readonly for verification and https://www.googleapis.com/auth/gmail.modify for placement repair."
+                "Gmail mailbox verification has {gmail_unverified_count} unverified gap(s), {gmail_repairable_count} Trash/Spam repairable gap(s), and {gmail_issue_schedule_dependency_count} active Gmail-recipient email issue schedule(s); stored Gmail OAuth credentials must include https://www.googleapis.com/auth/gmail.readonly for verification and https://www.googleapis.com/auth/gmail.modify for placement repair."
             );
             if !access_ready && !(refresh_ready && client_ready) {
                 push_secret_warning(

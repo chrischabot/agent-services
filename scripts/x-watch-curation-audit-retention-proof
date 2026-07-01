@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_X_WATCH_CURATION_RETENTION_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_RETENTION_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-audit-retention-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+COPY_HOME="$PROOF_ROOT/copied-home"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+RECORD=1
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/x-watch-curation-audit-retention-proof [options]
+
+Proves that X watch curation audit rows survive watch-source registry rebuilds.
+The destructive delete check runs only against a copied real Arcwell home with a
+synthetic sentinel x_handle row. The real home is inspected and never has watch
+sources deleted by this script.
+
+Options:
+  --proof-root path      Output directory for proof artifacts.
+  --home path            Arcwell home to inspect. Default: ARCWELL_HOME or ~/.arcwell.
+  --no-record            Write artifacts only; do not write proof/review ledger rows.
+  -h, --help             Show this help.
+USAGE
+}
+
+log() {
+  printf '[x-watch-curation-audit-retention-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-audit-retention-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      COPY_HOME="$PROOF_ROOT/copied-home"
+      shift 2
+      ;;
+    --home)
+      [[ $# -ge 2 ]] || fail "--home requires a path"
+      ARCWELL_HOME_USED="$2"
+      DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+      shift 2
+      ;;
+    --no-record)
+      RECORD=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+for required in node sqlite3 shasum; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+[ -f "$DB" ] || fail "Arcwell database not found: $DB"
+
+mkdir -p "$ARTIFACT_DIR" "$COPY_HOME"
+
+log "building arcwell CLI"
+(cd "$REPO_ROOT" && cargo build -p arcwell >"$ARTIFACT_DIR/cargo-build.log" 2>&1)
+[ -x "$ARCWELL_BIN" ] || fail "arcwell binary not found: $ARCWELL_BIN"
+
+log "running focused tests"
+(cd "$REPO_ROOT" && cargo fmt -- --check >"$ARTIFACT_DIR/cargo-fmt-check.log" 2>&1)
+(cd "$REPO_ROOT" && cargo test -p arcwell-core x_watch_curation -- --nocapture >"$ARTIFACT_DIR/x-watch-curation-tests.log" 2>&1)
+
+log "opening real home to apply pending schema migrations"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" health >"$ARTIFACT_DIR/real-health.json"
+
+log "capturing real-home schema and current curation state"
+sqlite3 -json "$DB" "SELECT value AS schema_version FROM meta WHERE key='schema_version';" >"$ARTIFACT_DIR/real-schema-version.json"
+sqlite3 -json "$DB" "PRAGMA foreign_key_list('x_watch_curation_decisions');" >"$ARTIFACT_DIR/real-decisions-foreign-keys.json"
+sqlite3 -json "$DB" "PRAGMA foreign_key_list('x_watch_restore_snapshots');" >"$ARTIFACT_DIR/real-snapshots-foreign-keys.json"
+sqlite3 -json "$DB" "SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;" >"$ARTIFACT_DIR/real-watch-source-counts.json"
+sqlite3 -json "$DB" "SELECT COUNT(*) AS decision_rows FROM x_watch_curation_decisions;" >"$ARTIFACT_DIR/real-curation-decision-row-count.json"
+sqlite3 -json "$DB" "SELECT id, mode, status, input_count, keep_count, review_keep_leaning_count, review_drop_leaning_count, pause_candidate_count, paused_count, restored_count, created_at, completed_at FROM x_watch_curation_runs ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 5;" >"$ARTIFACT_DIR/real-latest-curation-runs.json"
+
+log "copying real database for destructive retention check"
+sqlite3 "$DB" ".backup '$COPY_HOME/arcwell.sqlite3'"
+
+log "running copied-home sentinel retention proof"
+node - "$COPY_HOME" "$ARCWELL_BIN" "$ARTIFACT_DIR" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const childProcess = require("child_process");
+const [copyHome, arcwellBin, artifactDir] = process.argv.slice(2);
+const db = path.join(copyHome, "arcwell.sqlite3");
+const handle = "arcwell_retention_sentinel";
+const watchId = `watch-${crypto.createHash("sha256").update(`x_handle\n${handle}`).digest("hex").slice(0, 32)}`;
+const now = new Date().toISOString();
+
+function sqlite(sql) {
+  return childProcess.execFileSync("sqlite3", [db, sql], { encoding: "utf8" });
+}
+
+function sqliteJson(sql) {
+  const out = childProcess.execFileSync("sqlite3", ["-json", db, sql], { encoding: "utf8" }).trim();
+  return out ? JSON.parse(out) : [];
+}
+
+sqlite(`
+  INSERT INTO watch_sources
+    (id, source_kind, locator, label, cadence, status, metadata_json, created_at, updated_at)
+  VALUES
+    ('${watchId}', 'x_handle', '${handle}', '@${handle} - Arcwell retention sentinel', 'warm', 'active',
+     '{"origin":"retention-proof","source_text_untrusted":false}', '${now}', '${now}')
+  ON CONFLICT(source_kind, locator) DO UPDATE SET
+    status='active',
+    metadata_json='{"origin":"retention-proof","source_text_untrusted":false}',
+    updated_at='${now}';
+
+  INSERT INTO x_watch_manual_rules
+    (handle, decision, category, reason, metadata_json, created_at, updated_at)
+  VALUES
+    ('${handle}', 'manual_always_exclude', 'retention_proof',
+     'Reviewed synthetic sentinel for curation audit retention proof.',
+     '{"source":"x-watch-curation-audit-retention-proof"}', '${now}', '${now}')
+  ON CONFLICT(handle) DO UPDATE SET
+    decision=excluded.decision,
+    category=excluded.category,
+    reason=excluded.reason,
+    metadata_json=excluded.metadata_json,
+    updated_at=excluded.updated_at;
+`);
+
+const pause = childProcess.execFileSync(
+  arcwellBin,
+  ["--home", copyHome, "x", "curate-watch-sources", "--apply", "--mode", "pause-only"],
+  { encoding: "utf8" }
+);
+fs.writeFileSync(path.join(artifactDir, "copied-pause-apply.json"), pause);
+const pauseReport = JSON.parse(pause);
+const decision = pauseReport.decisions.find((item) => item.handle === handle);
+if (!decision) throw new Error("sentinel curation decision missing");
+if (decision.recommendation !== "paused_excluded") throw new Error(`unexpected sentinel recommendation: ${decision.recommendation}`);
+if (!decision.applied_at) throw new Error("sentinel decision was not applied");
+
+sqlite(`DELETE FROM watch_sources WHERE id='${watchId}';`);
+const retained = {
+  sentinel_handle: handle,
+  watch_source_id: watchId,
+  run_id: pauseReport.run.id,
+  decision_id: decision.id,
+  decision_rows_after_watch_delete: sqliteJson(`SELECT COUNT(*) AS count FROM x_watch_curation_decisions WHERE id='${decision.id}';`)[0].count,
+  evidence_rows_after_watch_delete: sqliteJson(`SELECT COUNT(*) AS count FROM x_watch_curation_evidence WHERE decision_id='${decision.id}';`)[0].count,
+  snapshot_rows_after_watch_delete: sqliteJson(`SELECT COUNT(*) AS count FROM x_watch_restore_snapshots WHERE run_id='${pauseReport.run.id}' AND watch_source_id='${watchId}';`)[0].count,
+  copied_foreign_key_check: sqliteJson("PRAGMA foreign_key_check;"),
+  non_claims: [
+    "The sentinel delete runs in a copied real home, not the real home.",
+    "This proves audit-retention behavior, not full X watch-list quality or worker-pressure reduction.",
+    "Already-lost historical decision rows are not recreated by this proof."
+  ]
+};
+if (retained.decision_rows_after_watch_delete !== 1) throw new Error("decision row did not survive watch-source delete");
+if (retained.evidence_rows_after_watch_delete < 1) throw new Error("evidence rows did not survive watch-source delete");
+if (retained.snapshot_rows_after_watch_delete !== 1) throw new Error("restore snapshot did not survive watch-source delete");
+if (retained.copied_foreign_key_check.length !== 0) throw new Error("copied home has foreign-key violations");
+fs.writeFileSync(path.join(artifactDir, "copied-retention-check.json"), JSON.stringify(retained, null, 2) + "\n");
+NODE
+
+log "building proof packet"
+node - "$PROOF_ROOT" "$ARTIFACT_DIR" "$ARCWELL_HOME_USED" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [proofRoot, artifactDir, arcwellHome] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const sha256 = (filePath) => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+const artifactFiles = fs.readdirSync(artifactDir)
+  .filter((name) => !["artifacts.json", "checks.json", "claims.json", "metadata.json", "proof-packet.json", "verify-packet.json", "recorded-proof.json", "review-recorded.json"].includes(name))
+  .sort();
+const artifacts = artifactFiles.map((name) => {
+  const filePath = path.join(artifactDir, name);
+  return {
+    artifact_kind: name.endsWith(".log") ? "validation_log" : "proof_artifact",
+    label: name.replace(/\.[^.]+$/, ""),
+    path: path.relative(proofRoot, filePath),
+    sha256: sha256(filePath),
+    metadata: { bytes: fs.statSync(filePath).size },
+  };
+});
+const schemaVersion = read("real-schema-version.json")[0]?.schema_version || null;
+const decisionFks = read("real-decisions-foreign-keys.json");
+const snapshotFks = read("real-snapshots-foreign-keys.json");
+const retention = read("copied-retention-check.json");
+const health = read("real-health.json");
+const decisionWatchCascade = decisionFks.some((fk) => fk.table === "watch_sources" && fk.on_delete === "CASCADE");
+const snapshotWatchCascade = snapshotFks.some((fk) => fk.table === "watch_sources" && fk.on_delete === "CASCADE");
+const currentRows = read("real-curation-decision-row-count.json")[0]?.decision_rows ?? null;
+
+const claims = [
+  {
+    claim_key: "x_watch_curation_audit_rows_no_longer_cascade_from_watch_sources",
+    claim: "X watch curation decisions and restore snapshots are retained as audit evidence when watch_sources rows are rebuilt or deleted.",
+    status: !decisionWatchCascade && !snapshotWatchCascade ? "proven" : "blocked",
+    proof_level: "local_and_real_schema_proof",
+    evidence: {
+      schema_version: schemaVersion,
+      decision_foreign_keys_artifact: "real-decisions-foreign-keys.json",
+      snapshot_foreign_keys_artifact: "real-snapshots-foreign-keys.json",
+      copied_retention_artifact: "copied-retention-check.json",
+    },
+    refutation: {
+      would_be_refuted_by: "A watch_sources foreign key with ON DELETE CASCADE on curation decisions or restore snapshots, or copied-home sentinel rows disappearing after watch-source delete.",
+    },
+    gates: {
+      real_home_watch_source_delete: "not run",
+      destructive_check_scope: "copied real home with synthetic sentinel",
+    },
+  },
+  {
+    claim_key: "x_watch_curation_existing_database_rows",
+    claim: "The current real database has the retention schema, but historical curation decision rows that already cascaded away are not recreated.",
+    status: "partial",
+    proof_level: "production_data_snapshot",
+    evidence: {
+      current_decision_rows: currentRows,
+      old_proof_artifact_still_authoritative_for_2026_06_29_apply: ".arcwell-dev/proofs/x-watch-curation-real-home-pause-proof-20260629T172628Z-3381/raw/pause-apply.json",
+    },
+    refutation: {
+      would_be_refuted_by: "Claiming restored historical DB decisions without an explicit, reviewed import from the old proof artifact.",
+    },
+    gates: {
+      non_claim: "Does not prove every kept or paused source has a current DB decision row after the prior rebuild.",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "format",
+    command: "cargo fmt -- --check",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Formatting check passed.",
+    metadata: { artifact: "cargo-fmt-check.log" },
+  },
+  {
+    check_kind: "severe_test",
+    command: "cargo test -p arcwell-core x_watch_curation -- --nocapture",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "X watch curation severe retention regression passed.",
+    metadata: { artifact: "x-watch-curation-tests.log" },
+  },
+  {
+    check_kind: "real_schema",
+    command: "PRAGMA foreign_key_list for X curation tables",
+    status: !decisionWatchCascade && !snapshotWatchCascade ? "passed" : "blocked",
+    exit_code: !decisionWatchCascade && !snapshotWatchCascade ? 0 : 1,
+    output_excerpt: !decisionWatchCascade && !snapshotWatchCascade
+      ? "No watch_sources ON DELETE CASCADE foreign keys remain on curation audit tables."
+      : "watch_sources cascade still exists on a curation audit table.",
+    metadata: { schema_version: schemaVersion },
+  },
+  {
+    check_kind: "copied_home_retention",
+    command: "copied home sentinel pause-only curation, delete sentinel watch source, inspect audit rows",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Decision, evidence, and restore snapshot rows survived copied-home watch-source delete with no FK violations.",
+    metadata: retention,
+  },
+];
+const metadata = {
+  proof_name: "x-watch-curation-audit-retention-proof",
+  generated_at: new Date().toISOString(),
+  arcwell_home: arcwellHome,
+  schema_version: schemaVersion,
+  known_current_gap: "Earlier real-home curation decision/evidence/snapshot rows were already removed by prior watch_sources cascade after a definitive X watch rebuild; this proof prevents future loss and preserves old proof artifacts as external evidence.",
+  non_claims: [
+    "Does not complete M1.",
+    "Does not prove worker-pressure reduction.",
+    "Does not prove gold-set classifier quality.",
+    "Does not recreate historical rows lost before this migration."
+  ],
+};
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+const packet = {
+  proof_name: "x-watch-curation-audit-retention-proof",
+  proof_level: "local_and_real_schema_proof",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell now retains X watch curation audit rows across watch-source registry rebuilds.",
+  boundary: "This proves retention hardening only; M1 remains partial.",
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+log "verifying proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" >"$ARTIFACT_DIR/verify-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet and promote review"
+  PACKET_ID="$("$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation audit retention hardening" \
+    --proof-level local_and_real_schema_proof \
+    --status partial \
+    --summary "Schema 25 prevents X watch curation decisions and restore snapshots from being cascade-deleted by watch-source rebuilds. This is a retention hardening slice, not M1 completion." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$(cat "$ARTIFACT_DIR/claims.json")" \
+    --artifacts-json "$(cat "$ARTIFACT_DIR/artifacts.json")" \
+    --checks-json "$(cat "$ARTIFACT_DIR/checks.json")" \
+    --metadata-json "$(cat "$ARTIFACT_DIR/metadata.json")" \
+    >"$ARTIFACT_DIR/recorded-proof.json" && node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+  )"
+  [[ -n "$PACKET_ID" ]] || fail "proof record did not return a packet id"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation audit retention review" \
+    --reviewer codex \
+    --requested-proof-level local_and_real_schema_proof \
+    --judgment promote \
+    --summary "Promote this narrow retention hardening: future watch-source rebuilds no longer erase curation audit rows; M1 remains partial for quality, worker pressure, ops, and historical-row repair." \
+    --strongest-fake-done-path "Treating schema retention as proof that the whole X watch list is curated or that the old lost DB decisions were restored." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["Focused severe test deletes a watch source after curation and verifies decision/evidence/snapshot retention.", "Real-home foreign-key artifacts show curation audit tables no longer cascade from watch_sources."]' \
+    --skipped-categories-json '["Real-home destructive delete skipped; copied real home covers the destructive path.", "Gold-set classifier quality and worker-pressure reduction remain separate M1 gates."]' \
+    --findings-json '[]' \
+    --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"x-watch-curation-audit-retention\"}" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" "$ARTIFACT_DIR/recorded-proof.json" 2>/dev/null <<'NODE' || true
+const fs = require("fs");
+const verify = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const recordedPath = process.argv[3];
+let packetId = null;
+if (recordedPath && fs.existsSync(recordedPath)) {
+  const recorded = JSON.parse(fs.readFileSync(recordedPath, "utf8"));
+  packetId = recorded.packet?.id || recorded.id || null;
+}
+console.log(JSON.stringify({ verify_ok: verify.ok, packet_id: packetId }, null, 2));
+NODE

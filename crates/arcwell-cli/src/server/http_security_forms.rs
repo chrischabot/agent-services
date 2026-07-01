@@ -60,6 +60,15 @@ pub(crate) fn validate_http_request(
     headers: &HeaderMap,
     uri: &Uri,
 ) -> std::result::Result<(), HttpError> {
+    validate_http_request_without_auth(state, headers, uri)?;
+    validate_http_auth(state, headers)
+}
+
+pub(crate) fn validate_http_request_without_auth(
+    state: &HttpState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> std::result::Result<(), HttpError> {
     if uri.to_string().len() > state.max_uri_bytes {
         return Err(HttpError::new(
             StatusCode::URI_TOO_LONG,
@@ -79,8 +88,7 @@ pub(crate) fn validate_http_request(
             "request body is too large",
         ));
     }
-    validate_local_origin(headers)?;
-    validate_http_auth(state, headers)
+    validate_local_origin(headers)
 }
 
 pub(crate) fn validate_http_mutation_request(
@@ -113,6 +121,12 @@ pub(crate) fn validate_http_auth(
             headers
                 .get("x-arcwell-http-token")
                 .and_then(|value| value.to_str().ok())
+        })
+        .or_else(|| {
+            headers
+                .get(header::COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(arcwell_ops_cookie_token)
         });
     let Some(supplied) = supplied else {
         return Err(HttpError::new(
@@ -129,6 +143,26 @@ pub(crate) fn validate_http_auth(
         ));
     }
     Ok(())
+}
+
+const OPS_SESSION_COOKIE: &str = "arcwell_ops_session";
+
+fn arcwell_ops_cookie_token(cookie_header: &str) -> Option<&str> {
+    cookie_header.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == OPS_SESSION_COOKIE).then_some(value)
+    })
+}
+
+pub(crate) fn attach_ops_session_cookie(state: &HttpState, mut response: Response) -> Response {
+    let Some(token) = state.auth_token.as_deref() else {
+        return response;
+    };
+    let cookie = format!("{OPS_SESSION_COOKIE}={token}; Path=/ops; HttpOnly; SameSite=Strict");
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
 }
 
 pub(crate) fn validate_local_origin(headers: &HeaderMap) -> std::result::Result<(), HttpError> {
@@ -318,6 +352,28 @@ pub(crate) fn parse_ops_x_bookmarks_enqueue_form(
         idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
         bookmark_days: take_required_form_i64(&mut values, "bookmark_days", 1, 36_500)?,
         max_bookmarks: take_required_form_usize(&mut values, "max_bookmarks", 1, 100_000)?,
+    })
+}
+
+pub(crate) fn parse_ops_x_watch_curation_run_form(
+    body: &[u8],
+) -> std::result::Result<OpsXWatchCurationRunForm, HttpError> {
+    let mut values = parse_ops_form_fields(body, &["csrf_token", "idempotency_key", "mode"])?;
+    Ok(OpsXWatchCurationRunForm {
+        csrf_token: take_required_form_string(&mut values, "csrf_token")?,
+        idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
+        mode: take_required_form_string(&mut values, "mode")?,
+    })
+}
+
+pub(crate) fn parse_ops_x_watch_curation_restore_form(
+    body: &[u8],
+) -> std::result::Result<OpsXWatchCurationRestoreForm, HttpError> {
+    let mut values = parse_ops_form_fields(body, &["csrf_token", "idempotency_key", "run_id"])?;
+    Ok(OpsXWatchCurationRestoreForm {
+        csrf_token: take_required_form_string(&mut values, "csrf_token")?,
+        idempotency_key: take_required_form_string(&mut values, "idempotency_key")?,
+        run_id: take_required_form_string(&mut values, "run_id")?,
     })
 }
 
@@ -762,6 +818,31 @@ pub(crate) fn validate_ops_x_schedule_word(value: &str, label: &str) -> Result<S
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
     {
         bail!("{label} may only contain ASCII letters, numbers, underscore, or hyphen");
+    }
+    Ok(trimmed.to_string())
+}
+
+pub(crate) fn validate_ops_x_watch_curation_mode(mode: &str) -> Result<String> {
+    let trimmed = mode.trim();
+    match trimmed {
+        "dry-run" | "pause-only" => Ok(trimmed.to_string()),
+        _ => bail!("X watch curation mode must be dry-run or pause-only"),
+    }
+}
+
+pub(crate) fn validate_ops_x_watch_curation_run_id(run_id: &str) -> Result<String> {
+    let trimmed = run_id.trim();
+    if trimmed.len() < 8 || trimmed.len() > 120 {
+        bail!("X watch curation run id must be between 8 and 120 bytes");
+    }
+    if trimmed != run_id
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        bail!(
+            "X watch curation run id may only contain ASCII letters, numbers, underscore, or hyphen"
+        );
     }
     Ok(trimmed.to_string())
 }

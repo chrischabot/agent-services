@@ -1,0 +1,666 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_X_WATCH_CURATION_RESTORE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_RESTORE_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-restore-audit-from-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+COPY_HOME="$PROOF_ROOT/copied-home"
+PRIVATE_DIR="$PROOF_ROOT/private"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+SOURCE_ARTIFACT="$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-real-home-pause-proof-20260629T172628Z-3381/raw/pause-apply.json"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+RECORD=1
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/x-watch-curation-restore-audit-from-proof [options]
+
+Restore historical X watch curation decisions/evidence from the reviewed
+2026-06-29 real-home pause proof artifact into the current Arcwell DB.
+
+The script first proves the import on a copied real home, validates exact row
+hashes, backs up the real DB, then imports only the recoverable audit rows into
+the real DB. It does not reconstruct restore snapshots unless a future artifact
+contains the full previous metadata needed for exact restore.
+
+Options:
+  --proof-root path      Output directory for proof artifacts.
+  --home path            Arcwell home to inspect/update. Default: ARCWELL_HOME or ~/.arcwell.
+  --source-artifact path Pause-apply proof JSON to restore from.
+  --no-record            Write artifacts only; do not write proof/review ledger rows.
+  -h, --help             Show this help.
+USAGE
+}
+
+log() {
+  printf '[x-watch-curation-restore-audit-from-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-restore-audit-from-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      COPY_HOME="$PROOF_ROOT/copied-home"
+      PRIVATE_DIR="$PROOF_ROOT/private"
+      shift 2
+      ;;
+    --home)
+      [[ $# -ge 2 ]] || fail "--home requires a path"
+      ARCWELL_HOME_USED="$2"
+      DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+      shift 2
+      ;;
+    --source-artifact)
+      [[ $# -ge 2 ]] || fail "--source-artifact requires a path"
+      SOURCE_ARTIFACT="$2"
+      shift 2
+      ;;
+    --no-record)
+      RECORD=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+for required in node sqlite3 shasum; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+[ -f "$SOURCE_ARTIFACT" ] || fail "source proof artifact not found: $SOURCE_ARTIFACT"
+[ -f "$DB" ] || fail "Arcwell database not found: $DB"
+
+mkdir -p "$ARTIFACT_DIR" "$COPY_HOME" "$PRIVATE_DIR"
+
+log "building arcwell CLI"
+(cd "$REPO_ROOT" && cargo build -p arcwell >"$ARTIFACT_DIR/cargo-build.log" 2>&1)
+[ -x "$ARCWELL_BIN" ] || fail "arcwell binary not found: $ARCWELL_BIN"
+
+log "running focused validation"
+(cd "$REPO_ROOT" && cargo fmt -- --check >"$ARTIFACT_DIR/cargo-fmt-check.log" 2>&1)
+(cd "$REPO_ROOT" && cargo test -p arcwell-core x_watch_curation -- --nocapture >"$ARTIFACT_DIR/x-watch-curation-tests.log" 2>&1)
+
+log "opening real home to apply pending schema migrations"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" health >"$ARTIFACT_DIR/real-health-before.json"
+
+log "capturing pre-restore real-home state"
+sqlite3 -json "$DB" "SELECT value AS schema_version FROM meta WHERE key='schema_version';" >"$ARTIFACT_DIR/real-schema-version-before.json"
+sqlite3 -json "$DB" "SELECT id, mode, status, input_count, keep_count, review_keep_leaning_count, review_drop_leaning_count, pause_candidate_count, paused_count, restored_count, created_at, completed_at FROM x_watch_curation_runs WHERE id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') ORDER BY created_at;" >"$ARTIFACT_DIR/real-historical-runs-before.json"
+sqlite3 -json "$DB" "SELECT run_id, COUNT(*) AS decisions FROM x_watch_curation_decisions WHERE run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY run_id ORDER BY run_id;" >"$ARTIFACT_DIR/real-historical-decision-counts-before.json"
+sqlite3 -json "$DB" "SELECT d.run_id, COUNT(*) AS evidence FROM x_watch_curation_evidence e JOIN x_watch_curation_decisions d ON d.id=e.decision_id WHERE d.run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY d.run_id ORDER BY d.run_id;" >"$ARTIFACT_DIR/real-historical-evidence-counts-before.json"
+sqlite3 -json "$DB" "SELECT run_id, COUNT(*) AS snapshots FROM x_watch_restore_snapshots WHERE run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY run_id ORDER BY run_id;" >"$ARTIFACT_DIR/real-historical-snapshot-counts-before.json"
+sqlite3 -json "$DB" "SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;" >"$ARTIFACT_DIR/real-watch-source-counts-before.json"
+
+log "copying real database for recovery rehearsal"
+sqlite3 "$DB" ".backup '$COPY_HOME/arcwell.sqlite3'"
+
+log "rehearsing import on copied real home"
+node - "$SOURCE_ARTIFACT" "$COPY_HOME/arcwell.sqlite3" "$ARTIFACT_DIR/copied-restore-check.json" <<'NODE'
+const fs = require("fs");
+const crypto = require("crypto");
+const childProcess = require("child_process");
+const [sourceArtifact, dbPath, outPath] = process.argv.slice(2);
+
+function runSql(args, input = null) {
+  const result = childProcess.spawnSync("sqlite3", args, {
+    input,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 64,
+  });
+  if (result.status !== 0) {
+    throw new Error(`sqlite3 failed: ${result.stderr || result.stdout}`);
+  }
+  return result.stdout;
+}
+
+function jsonSql(sql) {
+  const out = runSql(["-json", dbPath, sql]).trim();
+  return out ? JSON.parse(out) : [];
+}
+
+function q(value) {
+  if (value === null || value === undefined) return "NULL";
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function evidenceId(decisionId, index, kind) {
+  return `xwce-${crypto.createHash("sha256").update(`${decisionId}\n${index}\n${kind}`).digest("hex").slice(0, 24)}`;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonical(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function hashRows(rows) {
+  return crypto.createHash("sha256").update(JSON.stringify(canonical(rows))).digest("hex");
+}
+
+function normalizeDecision(decision) {
+  return {
+    id: decision.id,
+    run_id: decision.run_id,
+    watch_source_id: decision.watch_source_id,
+    handle: decision.handle,
+    previous_status: decision.previous_status,
+    proposed_status: decision.proposed_status,
+    recommendation: decision.recommendation,
+    category: decision.category,
+    score: Number(decision.score),
+    confidence: Number(decision.confidence),
+    reason: decision.reason,
+    evidence_json: canonical(decision.evidence || {}),
+    created_at: decision.created_at,
+    applied_at: decision.applied_at ?? null,
+  };
+}
+
+function normalizeEvidence(decision) {
+  const items = Array.isArray(decision.evidence?.items) ? decision.evidence.items : [];
+  return items.map((item, index) => {
+    const kind = typeof item.kind === "string" ? item.kind : "unknown";
+    const value = typeof item.value === "string" ? [...item.value].slice(0, 1000).join("") : "";
+    const weight = Number.isFinite(Number(item.weight)) ? Number(item.weight) : 0;
+    return {
+      id: evidenceId(decision.id, index, kind),
+      decision_id: decision.id,
+      evidence_kind: kind,
+      evidence_value: value,
+      weight,
+      created_at: decision.created_at,
+    };
+  });
+}
+
+function validateRun(run, decisions) {
+  const existing = jsonSql(`SELECT * FROM x_watch_curation_runs WHERE id=${q(run.id)};`);
+  if (existing.length !== 1) throw new Error(`curation run missing: ${run.id}`);
+  const row = existing[0];
+  const expected = {
+    mode: run.mode,
+    status: run.status,
+    input_count: decisions.length,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (row[key] !== value) throw new Error(`run ${run.id} ${key} mismatch: ${row[key]} !== ${value}`);
+  }
+}
+
+function importArtifact() {
+  const artifact = JSON.parse(fs.readFileSync(sourceArtifact, "utf8"));
+  if (!artifact.run || !Array.isArray(artifact.decisions)) {
+    throw new Error("source artifact must contain run and decisions");
+  }
+  const run = artifact.run;
+  const decisions = artifact.decisions.map(normalizeDecision);
+  const evidenceRows = artifact.decisions.flatMap(normalizeEvidence);
+  validateRun(run, decisions);
+
+  const before = {
+    run_id: run.id,
+    decisions: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_curation_decisions WHERE run_id=${q(run.id)};`)[0].count,
+    evidence: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_curation_evidence WHERE decision_id IN (SELECT id FROM x_watch_curation_decisions WHERE run_id=${q(run.id)});`)[0].count,
+    snapshots: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_restore_snapshots WHERE run_id=${q(run.id)};`)[0].count,
+    watch_source_counts: jsonSql("SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;"),
+  };
+
+  const sql = [
+    "PRAGMA foreign_keys=ON;",
+    "BEGIN IMMEDIATE;",
+    ...decisions.map((decision) => `
+      INSERT OR IGNORE INTO x_watch_curation_decisions
+        (id, run_id, watch_source_id, handle, previous_status, proposed_status, recommendation, category, score, confidence, reason, evidence_json, created_at, applied_at)
+      VALUES
+        (${q(decision.id)}, ${q(decision.run_id)}, ${q(decision.watch_source_id)}, ${q(decision.handle)}, ${q(decision.previous_status)}, ${q(decision.proposed_status)}, ${q(decision.recommendation)}, ${q(decision.category)}, ${decision.score}, ${decision.confidence}, ${q(decision.reason)}, ${q(JSON.stringify(decision.evidence_json))}, ${q(decision.created_at)}, ${q(decision.applied_at)});
+    `),
+    ...evidenceRows.map((row) => `
+      INSERT OR IGNORE INTO x_watch_curation_evidence
+        (id, decision_id, evidence_kind, evidence_value, weight, created_at)
+      VALUES
+        (${q(row.id)}, ${q(row.decision_id)}, ${q(row.evidence_kind)}, ${q(row.evidence_value)}, ${row.weight}, ${q(row.created_at)});
+    `),
+    "COMMIT;",
+  ].join("\n");
+  runSql([dbPath], sql);
+
+  const dbDecisions = jsonSql(`
+    SELECT id, run_id, watch_source_id, handle, previous_status, proposed_status,
+           recommendation, category, score, confidence, reason, evidence_json,
+           created_at, applied_at
+    FROM x_watch_curation_decisions
+    WHERE run_id=${q(run.id)}
+    ORDER BY id;
+  `).map((row) => ({ ...row, evidence_json: canonical(JSON.parse(row.evidence_json || "{}")) }));
+  const dbEvidence = jsonSql(`
+    SELECT id, decision_id, evidence_kind, evidence_value, weight, created_at
+    FROM x_watch_curation_evidence
+    WHERE decision_id IN (SELECT id FROM x_watch_curation_decisions WHERE run_id=${q(run.id)})
+    ORDER BY id;
+  `);
+  const expectedDecisions = [...decisions].sort((a, b) => a.id.localeCompare(b.id));
+  const expectedEvidence = [...evidenceRows].sort((a, b) => a.id.localeCompare(b.id));
+  const expectedDecisionHash = hashRows(expectedDecisions);
+  const dbDecisionHash = hashRows(dbDecisions);
+  const expectedEvidenceHash = hashRows(expectedEvidence);
+  const dbEvidenceHash = hashRows(dbEvidence);
+  if (expectedDecisionHash !== dbDecisionHash) {
+    throw new Error(`decision hash mismatch: ${dbDecisionHash} !== ${expectedDecisionHash}`);
+  }
+  if (expectedEvidenceHash !== dbEvidenceHash) {
+    throw new Error(`evidence hash mismatch: ${dbEvidenceHash} !== ${expectedEvidenceHash}`);
+  }
+
+  const after = {
+    run_id: run.id,
+    decisions: dbDecisions.length,
+    evidence: dbEvidence.length,
+    snapshots: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_restore_snapshots WHERE run_id=${q(run.id)};`)[0].count,
+    watch_source_counts: jsonSql("SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;"),
+    foreign_key_check: jsonSql("PRAGMA foreign_key_check;"),
+  };
+  if (after.decisions !== decisions.length) throw new Error("decision count mismatch after import");
+  if (after.evidence !== evidenceRows.length) throw new Error("evidence count mismatch after import");
+  if (JSON.stringify(before.watch_source_counts) !== JSON.stringify(after.watch_source_counts)) {
+    throw new Error("watch_source counts changed during audit import");
+  }
+  if (after.foreign_key_check.length !== 0) throw new Error("foreign-key violations after audit import");
+  return {
+    source_artifact: sourceArtifact,
+    run_id: run.id,
+    mode: run.mode,
+    expected_decisions: decisions.length,
+    expected_evidence: evidenceRows.length,
+    expected_applied_decisions: artifact.decisions.filter((d) => d.applied_at).length,
+    before,
+    after,
+    exact_hashes: {
+      decisions: dbDecisionHash,
+      evidence: dbEvidenceHash,
+    },
+    non_claims: [
+      "Restore snapshots were not reconstructed because the proof artifact does not contain full previous metadata_json for exact restore.",
+      "This restores historical audit rows only; it does not reactivate or recurate watch sources.",
+      "This does not prove current source quality, worker-pressure reduction, or operational curation.",
+    ],
+  };
+}
+
+const result = importArtifact();
+fs.writeFileSync(outPath, JSON.stringify(result, null, 2) + "\n");
+NODE
+
+log "backing up real database before recovery"
+sqlite3 "$DB" ".backup '$PRIVATE_DIR/real-before-restore.sqlite3'"
+
+log "importing recoverable audit rows into real home"
+node - "$SOURCE_ARTIFACT" "$DB" "$ARTIFACT_DIR/real-restore-check.json" <<'NODE'
+const fs = require("fs");
+const crypto = require("crypto");
+const childProcess = require("child_process");
+const [sourceArtifact, dbPath, outPath] = process.argv.slice(2);
+
+function runSql(args, input = null) {
+  const result = childProcess.spawnSync("sqlite3", args, {
+    input,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 64,
+  });
+  if (result.status !== 0) throw new Error(`sqlite3 failed: ${result.stderr || result.stdout}`);
+  return result.stdout;
+}
+function jsonSql(sql) {
+  const out = runSql(["-json", dbPath, sql]).trim();
+  return out ? JSON.parse(out) : [];
+}
+function q(value) {
+  if (value === null || value === undefined) return "NULL";
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+function evidenceId(decisionId, index, kind) {
+  return `xwce-${crypto.createHash("sha256").update(`${decisionId}\n${index}\n${kind}`).digest("hex").slice(0, 24)}`;
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonical(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+function hashRows(rows) {
+  return crypto.createHash("sha256").update(JSON.stringify(canonical(rows))).digest("hex");
+}
+function normalizeDecision(decision) {
+  return {
+    id: decision.id,
+    run_id: decision.run_id,
+    watch_source_id: decision.watch_source_id,
+    handle: decision.handle,
+    previous_status: decision.previous_status,
+    proposed_status: decision.proposed_status,
+    recommendation: decision.recommendation,
+    category: decision.category,
+    score: Number(decision.score),
+    confidence: Number(decision.confidence),
+    reason: decision.reason,
+    evidence_json: canonical(decision.evidence || {}),
+    created_at: decision.created_at,
+    applied_at: decision.applied_at ?? null,
+  };
+}
+function normalizeEvidence(decision) {
+  const items = Array.isArray(decision.evidence?.items) ? decision.evidence.items : [];
+  return items.map((item, index) => {
+    const kind = typeof item.kind === "string" ? item.kind : "unknown";
+    const value = typeof item.value === "string" ? [...item.value].slice(0, 1000).join("") : "";
+    const weight = Number.isFinite(Number(item.weight)) ? Number(item.weight) : 0;
+    return { id: evidenceId(decision.id, index, kind), decision_id: decision.id, evidence_kind: kind, evidence_value: value, weight, created_at: decision.created_at };
+  });
+}
+function validateRun(run, decisions) {
+  const existing = jsonSql(`SELECT * FROM x_watch_curation_runs WHERE id=${q(run.id)};`);
+  if (existing.length !== 1) throw new Error(`curation run missing: ${run.id}`);
+  if (existing[0].mode !== run.mode || existing[0].status !== run.status || existing[0].input_count !== decisions.length) {
+    throw new Error(`curation run does not match source artifact: ${run.id}`);
+  }
+}
+const artifact = JSON.parse(fs.readFileSync(sourceArtifact, "utf8"));
+const run = artifact.run;
+const decisions = artifact.decisions.map(normalizeDecision);
+const evidenceRows = artifact.decisions.flatMap(normalizeEvidence);
+validateRun(run, decisions);
+const before = {
+  run_id: run.id,
+  decisions: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_curation_decisions WHERE run_id=${q(run.id)};`)[0].count,
+  evidence: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_curation_evidence WHERE decision_id IN (SELECT id FROM x_watch_curation_decisions WHERE run_id=${q(run.id)});`)[0].count,
+  snapshots: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_restore_snapshots WHERE run_id=${q(run.id)};`)[0].count,
+  watch_source_counts: jsonSql("SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;"),
+};
+const sql = [
+  "PRAGMA foreign_keys=ON;",
+  "BEGIN IMMEDIATE;",
+  ...decisions.map((decision) => `INSERT OR IGNORE INTO x_watch_curation_decisions (id, run_id, watch_source_id, handle, previous_status, proposed_status, recommendation, category, score, confidence, reason, evidence_json, created_at, applied_at) VALUES (${q(decision.id)}, ${q(decision.run_id)}, ${q(decision.watch_source_id)}, ${q(decision.handle)}, ${q(decision.previous_status)}, ${q(decision.proposed_status)}, ${q(decision.recommendation)}, ${q(decision.category)}, ${decision.score}, ${decision.confidence}, ${q(decision.reason)}, ${q(JSON.stringify(decision.evidence_json))}, ${q(decision.created_at)}, ${q(decision.applied_at)});`),
+  ...evidenceRows.map((row) => `INSERT OR IGNORE INTO x_watch_curation_evidence (id, decision_id, evidence_kind, evidence_value, weight, created_at) VALUES (${q(row.id)}, ${q(row.decision_id)}, ${q(row.evidence_kind)}, ${q(row.evidence_value)}, ${row.weight}, ${q(row.created_at)});`),
+  "COMMIT;",
+].join("\n");
+runSql([dbPath], sql);
+const dbDecisions = jsonSql(`SELECT id, run_id, watch_source_id, handle, previous_status, proposed_status, recommendation, category, score, confidence, reason, evidence_json, created_at, applied_at FROM x_watch_curation_decisions WHERE run_id=${q(run.id)} ORDER BY id;`)
+  .map((row) => ({ ...row, evidence_json: canonical(JSON.parse(row.evidence_json || "{}")) }));
+const dbEvidence = jsonSql(`SELECT id, decision_id, evidence_kind, evidence_value, weight, created_at FROM x_watch_curation_evidence WHERE decision_id IN (SELECT id FROM x_watch_curation_decisions WHERE run_id=${q(run.id)}) ORDER BY id;`);
+const expectedDecisionHash = hashRows([...decisions].sort((a, b) => a.id.localeCompare(b.id)));
+const dbDecisionHash = hashRows(dbDecisions);
+const expectedEvidenceHash = hashRows([...evidenceRows].sort((a, b) => a.id.localeCompare(b.id)));
+const dbEvidenceHash = hashRows(dbEvidence);
+if (expectedDecisionHash !== dbDecisionHash) throw new Error(`decision hash mismatch: ${dbDecisionHash} !== ${expectedDecisionHash}`);
+if (expectedEvidenceHash !== dbEvidenceHash) throw new Error(`evidence hash mismatch: ${dbEvidenceHash} !== ${expectedEvidenceHash}`);
+const after = {
+  run_id: run.id,
+  decisions: dbDecisions.length,
+  evidence: dbEvidence.length,
+  snapshots: jsonSql(`SELECT COUNT(*) AS count FROM x_watch_restore_snapshots WHERE run_id=${q(run.id)};`)[0].count,
+  watch_source_counts: jsonSql("SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;"),
+  foreign_key_check: jsonSql("PRAGMA foreign_key_check;"),
+};
+if (after.decisions !== decisions.length) throw new Error("decision count mismatch after import");
+if (after.evidence !== evidenceRows.length) throw new Error("evidence count mismatch after import");
+if (JSON.stringify(before.watch_source_counts) !== JSON.stringify(after.watch_source_counts)) throw new Error("watch_source counts changed during audit import");
+if (after.foreign_key_check.length !== 0) throw new Error("foreign-key violations after audit import");
+fs.writeFileSync(outPath, JSON.stringify({
+  source_artifact: sourceArtifact,
+  run_id: run.id,
+  mode: run.mode,
+  expected_decisions: decisions.length,
+  expected_evidence: evidenceRows.length,
+  expected_applied_decisions: artifact.decisions.filter((d) => d.applied_at).length,
+  before,
+  after,
+  exact_hashes: { decisions: dbDecisionHash, evidence: dbEvidenceHash },
+  non_claims: [
+    "Restore snapshots were not reconstructed because the proof artifact does not contain full previous metadata_json for exact restore.",
+    "This restores historical audit rows only; it does not reactivate or recurate watch sources.",
+    "This does not prove current source quality, worker-pressure reduction, or operational curation."
+  ],
+}, null, 2) + "\n");
+NODE
+
+log "capturing post-restore real-home state"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" health >"$ARTIFACT_DIR/real-health-after.json"
+sqlite3 -json "$DB" "SELECT run_id, COUNT(*) AS decisions FROM x_watch_curation_decisions WHERE run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY run_id ORDER BY run_id;" >"$ARTIFACT_DIR/real-historical-decision-counts-after.json"
+sqlite3 -json "$DB" "SELECT d.run_id, COUNT(*) AS evidence FROM x_watch_curation_evidence e JOIN x_watch_curation_decisions d ON d.id=e.decision_id WHERE d.run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY d.run_id ORDER BY d.run_id;" >"$ARTIFACT_DIR/real-historical-evidence-counts-after.json"
+sqlite3 -json "$DB" "SELECT run_id, COUNT(*) AS snapshots FROM x_watch_restore_snapshots WHERE run_id IN ('xwcur-a4d1e80fc10956eeef8ed859', 'xwcur-11209ebb1ce2dac131e831eb') GROUP BY run_id ORDER BY run_id;" >"$ARTIFACT_DIR/real-historical-snapshot-counts-after.json"
+sqlite3 -json "$DB" "SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;" >"$ARTIFACT_DIR/real-watch-source-counts-after.json"
+
+log "building proof packet"
+node - "$PROOF_ROOT" "$ARTIFACT_DIR" "$SOURCE_ARTIFACT" "$PRIVATE_DIR/real-before-restore.sqlite3" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [proofRoot, artifactDir, sourceArtifact, privateBackup] = process.argv.slice(2);
+const read = (name) => {
+  const text = fs.readFileSync(path.join(artifactDir, name), "utf8").trim();
+  return text ? JSON.parse(text) : [];
+};
+const sha256 = (filePath) => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+const excluded = new Set(["artifacts.json", "checks.json", "claims.json", "metadata.json", "proof-packet.json", "verify-packet.json", "recorded-proof.json", "review-recorded.json"]);
+const artifacts = fs.readdirSync(artifactDir)
+  .filter((name) => !excluded.has(name))
+  .sort()
+  .map((name) => {
+    const filePath = path.join(artifactDir, name);
+    return {
+      artifact_kind: name.endsWith(".log") ? "validation_log" : "proof_artifact",
+      label: name.replace(/\.[^.]+$/, ""),
+      path: path.relative(proofRoot, filePath),
+      sha256: sha256(filePath),
+      metadata: { bytes: fs.statSync(filePath).size },
+    };
+  });
+
+const copied = read("copied-restore-check.json");
+const real = read("real-restore-check.json");
+const beforeCounts = read("real-historical-decision-counts-before.json");
+const afterCounts = read("real-historical-decision-counts-after.json");
+const snapshotAfter = read("real-historical-snapshot-counts-after.json");
+const watchBefore = read("real-watch-source-counts-before.json");
+const watchAfter = read("real-watch-source-counts-after.json");
+const schemaVersion = read("real-schema-version-before.json")[0]?.schema_version;
+const claims = [
+  {
+    claim_key: "x_watch_curation_2026_06_29_pause_apply_decisions_restored",
+    claim: "The historical 2026-06-29 real-home pause-only curation decisions and evidence rows have been restored into the current live Arcwell DB from the reviewed proof artifact.",
+    status: real.after.decisions === real.expected_decisions && real.after.evidence === real.expected_evidence ? "proven" : "blocked",
+    proof_level: "reviewed_artifact_recovery_plus_live_db_import",
+    evidence: {
+      source_artifact: path.relative(process.cwd(), sourceArtifact),
+      run_id: real.run_id,
+      decisions_restored: real.after.decisions,
+      evidence_restored: real.after.evidence,
+      applied_decisions_in_artifact: real.expected_applied_decisions,
+      real_restore_artifact: "real-restore-check.json",
+      copied_restore_artifact: "copied-restore-check.json",
+      exact_hashes: real.exact_hashes,
+    },
+    refutation: {
+      would_be_refuted_by: "Live DB row hashes diverging from the reviewed source artifact, watch_source counts changing during import, or foreign_key_check returning rows.",
+    },
+    gates: {
+      copied_home_first: true,
+      real_db_backup_created: true,
+      destructive_watch_source_change: false,
+    },
+  },
+  {
+    claim_key: "x_watch_restore_snapshots_not_reconstructed_from_partial_artifact",
+    claim: "Restore snapshots for the historical run remain unreconstructed because the available proof artifact does not contain full previous metadata_json for exact row restoration.",
+    status: "partial",
+    proof_level: "artifact_limit_documented",
+    evidence: {
+      snapshot_counts_after: snapshotAfter,
+      artifact_has_real_before_hashes_not_full_metadata: true,
+    },
+    refutation: {
+      would_be_refuted_by: "Claiming exact restore of the historical pause-only run without a full previous_metadata_json source and a copied-home restore drill.",
+    },
+    gates: {
+      restore_command_for_historical_run: "not promoted",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "format",
+    command: "cargo fmt -- --check",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Formatting check passed.",
+    metadata: { artifact: "cargo-fmt-check.log" },
+  },
+  {
+    check_kind: "focused_test",
+    command: "cargo test -p arcwell-core x_watch_curation -- --nocapture",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "X watch curation severe tests passed before live DB recovery.",
+    metadata: { artifact: "x-watch-curation-tests.log" },
+  },
+  {
+    check_kind: "copied_home_recovery_rehearsal",
+    command: "node restore importer against copied real DB",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Copied home matched source artifact hashes and preserved watch_source counts.",
+    metadata: copied,
+  },
+  {
+    check_kind: "live_db_recovery",
+    command: "node restore importer against real DB after private backup",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Real DB matched source artifact hashes and preserved watch_source counts.",
+    metadata: real,
+  },
+];
+const metadata = {
+  generated_at: new Date().toISOString(),
+  schema_version: schemaVersion,
+  source_artifact: path.relative(process.cwd(), sourceArtifact),
+  before_counts: beforeCounts,
+  after_counts: afterCounts,
+  watch_source_counts_before: watchBefore,
+  watch_source_counts_after: watchAfter,
+  private_backup: {
+    path: path.relative(proofRoot, privateBackup),
+    sha256: sha256(privateBackup),
+    bytes: fs.statSync(privateBackup).size,
+    artifact_listed: false,
+    reason: "SQLite backup is intentionally not listed as a proof artifact to avoid proof-verifier content scans over private production data.",
+  },
+  non_claims: [
+    "Does not reconstruct historical restore snapshots.",
+    "Does not prove current watch-source curation quality.",
+    "Does not prove worker-pressure reduction.",
+    "Does not complete M1.",
+  ],
+};
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+const packet = {
+  proof_name: "x-watch-curation-restore-audit-from-proof",
+  proof_level: "reviewed_artifact_recovery_plus_live_db_import",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell recovered the historical 2026-06-29 X watch curation decision/evidence audit rows from the reviewed proof artifact into the live DB.",
+  boundary: "This restores decision/evidence audit rows only; it does not reconstruct exact restore snapshots or complete M1.",
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+log "verifying proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" >"$ARTIFACT_DIR/verify-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet and promote review"
+  PACKET_ID="$("$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M1 historical X watch curation audit recovery" \
+    --proof-level reviewed_artifact_recovery_plus_live_db_import \
+    --status partial \
+    --summary "Recovered the 2026-06-29 real-home pause-only X curation decisions/evidence from the reviewed proof artifact into the live DB. Restore snapshots remain unreconstructed because the artifact lacks full previous metadata_json." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$(cat "$ARTIFACT_DIR/claims.json")" \
+    --artifacts-json "$(cat "$ARTIFACT_DIR/artifacts.json")" \
+    --checks-json "$(cat "$ARTIFACT_DIR/checks.json")" \
+    --metadata-json "$(cat "$ARTIFACT_DIR/metadata.json")" \
+    >"$ARTIFACT_DIR/recorded-proof.json" && node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+  )"
+  [[ -n "$PACKET_ID" ]] || fail "proof record did not return a packet id"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope autonomous-knowledge-system \
+    --title "M1 historical X watch curation audit recovery review" \
+    --reviewer codex \
+    --requested-proof-level reviewed_artifact_recovery_plus_live_db_import \
+    --judgment promote \
+    --summary "Promote this narrow recovery: historical 2026-06-29 curation decisions/evidence are back in the live DB with exact artifact hashes. Hold exact restore and M1 operational claims." \
+    --strongest-fake-done-path "Treating recovered decisions/evidence as proof that exact restore snapshots were rebuilt, that current watch-source quality is good, or that M1 is operational." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["Copied-home rehearsal passed before real import.", "Live DB row hashes match the reviewed source artifact.", "Watch-source status counts were unchanged by the import.", "Proof packet explicitly marks restore snapshots unreconstructed."]' \
+    --skipped-categories-json '["Historical exact restore snapshots not reconstructed because full previous metadata_json is unavailable.", "Worker-pressure and source-health improvement remain separate gates.", "Gold-set classifier quality remains separate."]' \
+    --findings-json '[]' \
+    --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"x-watch-curation-historical-audit-recovery\"}" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" "$ARTIFACT_DIR/recorded-proof.json" 2>/dev/null <<'NODE' || true
+const fs = require("fs");
+const verify = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+let packetId = null;
+if (process.argv[3] && fs.existsSync(process.argv[3])) {
+  const recorded = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+  packetId = recorded.packet?.id || recorded.id || null;
+}
+console.log(JSON.stringify({ ok: verify.ok, packet_id: packetId }, null, 2));
+NODE

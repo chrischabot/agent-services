@@ -22,6 +22,12 @@ arcwell x oauth-refresh
 arcwell x oauth-probe --search-query "from:openai"
 arcwell x oauth-revoke --name X_BEARER_TOKEN --token-type-hint access_token --delete-local
 arcwell x rebuild-definitive-watch-sources --bookmark-days 92 --max-bookmarks 1000 --max-recent-follows 100
+arcwell x curate-watch-sources --dry-run
+arcwell x curate-watch-sources --apply --mode pause-only
+arcwell x watch-curation-report
+arcwell x restore-watch-curation <run_id>
+arcwell x import-watch-manual-rules --path ./reviewed-x-watch-rules.json --reviewed-by codex --dry-run
+arcwell x enrich-watch-profiles --run-id <run_id> --limit 100
 arcwell x recent-search "from:openai" --max-results 25
 arcwell x recent-search "from:openai" --max-results 25 --transport xurl-token-api
 arcwell x recent-search "from:openai" --max-results 25 --transport x-api-mcp
@@ -58,6 +64,11 @@ MCP tools:
 - `x_oauth_revoke`
 - `x_rebuild_definitive_watch_sources`
 - `x_import_following_watch_sources`
+- `x_curate_watch_sources`
+- `x_watch_curation_report`
+- `x_restore_watch_curation`
+- `x_import_watch_manual_rules`
+- `x_enrich_watch_profiles`
 - `x_recent_search`
 - `x_enqueue_recent_search`
 - `x_monitor_watch_sources`
@@ -247,6 +258,15 @@ Boundary:
 - OAuth authorization URL generation returns the PKCE `code_verifier`; keep it until the callback code has been exchanged when using the manual URL/exchange path.
 - Live recent search uses X API v2 and stores `x:recent-search:<query>` cursor state from `meta.newest_id`.
 - The recommended watch-list path is `x rebuild-definitive-watch-sources`: it replaces existing `x_handle` watch sources with authors of recent bookmarked tweets plus a capped recent-follow sample.
+- X watch curation is a reviewed, reversible narrowing path, not a full
+  autonomy claim. `curate-watch-sources --dry-run` and `x_curate_watch_sources`
+  write a decision ledger; `--apply --mode pause-only` pauses only reviewed
+  `manual_always_exclude` decisions after restore snapshots; manual
+  `manual_needs_evidence` rules keep sparse handles active for later review
+  without treating them as keep/exclude evidence. `watch-curation-report` /
+  `x_watch_curation_report` expose decisions and non-claims, and
+  `restore-watch-curation` / `x_restore_watch_curation` restore rows that have
+  snapshots.
 - Full following import is available for diagnostics/backfill only; do not use it as the default monitor seed because it imports the whole social graph.
 - `x monitor-watch-sources` polls the active definitive `x_handle` watch list, imports accepted watched-source tweets into X items/source cards/wiki pages, creates digest candidates from new source cards, and records per-source `x:watch:<handle>` cursors, source-health, and `watch_monitor` sync runs.
 - X monitor-created digest candidates are linked back to canonical tweet ids

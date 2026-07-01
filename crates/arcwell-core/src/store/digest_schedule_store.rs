@@ -4,6 +4,13 @@ const DIGEST_CANDIDATE_DELIVERY_TEXT_MAX_BYTES: usize = 12_000;
 const DIGEST_CANDIDATE_DELIVERY_OMISSION_NOTE: &str =
     "\n\n_Additional source details were omitted to keep this notification deliverable._";
 
+fn issue_schedule_job_kind(schedule: &IssueSchedule) -> Result<&'static str> {
+    match schedule.kind.as_str() {
+        "knowledge_daily_briefing" => Ok("knowledge_daily_briefing"),
+        other => bail!("unsupported issue schedule kind: {other}"),
+    }
+}
+
 impl Store {
     pub fn create_digest_candidate(
         &self,
@@ -224,6 +231,8 @@ impl Store {
         &self,
         candidate: &DigestCandidate,
     ) -> Result<(&'static str, &'static str)> {
+        let mut has_x_origin = false;
+        let mut has_credential_reminder = false;
         for source_card_id in &candidate.source_card_ids {
             let source_card = self
                 .read_source_card(source_card_id)?
@@ -232,11 +241,17 @@ impl Store {
                 return Ok(("arcwell-knowledge", "knowledge_daily_briefing_delivery"));
             }
             if digest_source_card_is_x_origin(&source_card) {
-                return Ok(("arcwell-x", "x_digest_delivery"));
+                has_x_origin = true;
             }
             if digest_source_card_is_credential_reminder(&source_card) {
-                return Ok(("arcwell-ops", "credential_reminder_delivery"));
+                has_credential_reminder = true;
             }
+        }
+        if has_credential_reminder {
+            return Ok(("arcwell-ops", "credential_reminder_delivery"));
+        }
+        if has_x_origin {
+            return Ok(("arcwell-x", "x_digest_delivery"));
         }
         Ok(("arcwell-librarian", "digest_candidate_delivery"))
     }
@@ -1504,48 +1519,55 @@ impl Store {
                     break;
                 }
                 let tick_key = issue_schedule_tick_key(&schedule.id, &due_at, &schedule);
-                if self.get_issue_schedule_tick_by_key(&tick_key)?.is_some() {
+                let tick = match self.get_issue_schedule_tick_by_key(&tick_key)? {
+                    Some(existing) if existing.status == "pending" => existing,
+                    Some(_) => {
+                        report.skipped += 1;
+                        continue;
+                    }
+                    None => match self.create_issue_schedule_tick(&schedule.id, &tick_key, &due_at)
+                    {
+                        Ok(tick) => tick,
+                        Err(error) => {
+                            report.skipped += 1;
+                            report.errors.push(format!("{}: {error}", schedule.name));
+                            continue;
+                        }
+                    },
+                };
+                let job_kind = match issue_schedule_job_kind(&schedule) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        self.update_issue_schedule_tick(
+                            &tick.id,
+                            "blocked",
+                            None,
+                            None,
+                            Some(&error.to_string()),
+                        )?;
+                        report.skipped += 1;
+                        report.errors.push(format!("{}: {error}", schedule.name));
+                        continue;
+                    }
+                };
+                if self.issue_schedule_tick_has_active_job(&tick)? {
                     report.skipped += 1;
                     continue;
                 }
-                match self.create_issue_schedule_tick(&schedule.id, &tick_key, &due_at) {
-                    Ok(tick) => {
-                        let job_kind = match schedule.kind.as_str() {
-                            "knowledge_daily_briefing" => "knowledge_daily_briefing",
-                            other => {
-                                let error = format!("unsupported issue schedule kind: {other}");
-                                self.update_issue_schedule_tick(
-                                    &tick.id,
-                                    "blocked",
-                                    None,
-                                    None,
-                                    Some(&error),
-                                )?;
-                                report.skipped += 1;
-                                report.errors.push(format!("{}: {error}", schedule.name));
-                                continue;
-                            }
-                        };
-                        match self.enqueue_wiki_job(job_kind, json!({ "tick_id": tick.id })) {
-                            Ok(job) => {
-                                self.attach_issue_schedule_job(&tick.id, &job.id)?;
-                                report.enqueued += 1;
-                                report.jobs.push(job.id);
-                            }
-                            Err(error) => {
-                                self.update_issue_schedule_tick(
-                                    &tick.id,
-                                    "blocked",
-                                    None,
-                                    None,
-                                    Some(&error.to_string()),
-                                )?;
-                                report.skipped += 1;
-                                report.errors.push(format!("{}: {error}", schedule.name));
-                            }
-                        }
+                match self.enqueue_wiki_job(job_kind, json!({ "tick_id": tick.id })) {
+                    Ok(job) => {
+                        self.attach_issue_schedule_job(&tick.id, &job.id)?;
+                        report.enqueued += 1;
+                        report.jobs.push(job.id);
                     }
                     Err(error) => {
+                        self.update_issue_schedule_tick(
+                            &tick.id,
+                            "blocked",
+                            None,
+                            None,
+                            Some(&error.to_string()),
+                        )?;
                         report.skipped += 1;
                         report.errors.push(format!("{}: {error}", schedule.name));
                     }
@@ -1573,12 +1595,24 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub(crate) fn issue_schedule_tick_has_active_job(
+        &self,
+        tick: &IssueScheduleTick,
+    ) -> Result<bool> {
+        let Some(job_id) = tick.job_id.as_deref() else {
+            return Ok(false);
+        };
+        Ok(self
+            .get_wiki_job(job_id)?
+            .is_some_and(|job| matches!(job.status.as_str(), "pending" | "running" | "deferred")))
+    }
+
     pub(crate) fn issue_schedule_due_slots(
         &self,
         schedule: &IssueSchedule,
         now_utc: DateTime<Utc>,
     ) -> Result<Vec<String>> {
-        let latest_due_at = self.latest_issue_schedule_due_at(&schedule.id)?;
+        let latest_due_at = self.latest_issue_schedule_scheduled_due_at(&schedule.id)?;
         issue_schedule_due_slots(
             latest_due_at.as_deref(),
             &schedule.created_at,
@@ -1595,7 +1629,10 @@ impl Store {
         )
     }
 
-    pub(crate) fn latest_issue_schedule_due_at(&self, schedule_id: &str) -> Result<Option<String>> {
+    pub(crate) fn latest_issue_schedule_scheduled_due_at(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<String>> {
         validate_id(schedule_id)?;
         self.conn
             .query_row(
@@ -1603,6 +1640,8 @@ impl Store {
                 SELECT due_at
                 FROM issue_schedule_ticks
                 WHERE schedule_id = ?1
+                  AND tick_key LIKE 'issue-%'
+                  AND status IN ('sent', 'partial', 'empty', 'blocked', 'failed', 'deferred')
                 ORDER BY due_at DESC
                 LIMIT 1
                 "#,

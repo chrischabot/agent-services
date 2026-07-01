@@ -46,6 +46,20 @@ pub(crate) struct OpsXBookmarksEnqueueForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct OpsXWatchCurationRunForm {
+    pub(crate) csrf_token: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpsXWatchCurationRestoreForm {
+    pub(crate) csrf_token: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct OpsKnowledgeBacklogScheduleForm {
     pub(crate) csrf_token: String,
     pub(crate) idempotency_key: String,
@@ -184,7 +198,7 @@ pub(crate) async fn http_ops_ui(
     uri: Uri,
     query: Result<Query<OpsUiQuery>, QueryRejection>,
 ) -> Response {
-    if let Err(error) = validate_http_request(&state, &headers, &uri) {
+    if let Err(error) = validate_http_request_without_auth(&state, &headers, &uri) {
         return http_html_error_response(error);
     }
     let Query(query) = match query {
@@ -199,18 +213,39 @@ pub(crate) async fn http_ops_ui(
     if let Err(error) = validate_ops_ui_query(&query) {
         return http_html_error_response(error);
     }
+    let current_url = ops_ui_current_url(&headers, &uri);
     match Store::open(state.paths.clone()).and_then(|store| store.ops_snapshot()) {
-        Ok(snapshot) => with_http_security_headers(
-            Html(render_ops_ui_with_options(
-                &snapshot,
-                &OpsUiOptions::from_query(query),
-                Some(&state.csrf_token),
-                state.auth_token.is_some(),
-            ))
-            .into_response(),
-        ),
+        Ok(snapshot) => {
+            let mut options = OpsUiOptions::from_query(query);
+            options.current_url = current_url;
+            attach_ops_session_cookie(
+                &state,
+                with_http_security_headers(
+                    Html(render_ops_ui_with_options(
+                        &snapshot,
+                        &options,
+                        Some(&state.csrf_token),
+                        state.auth_token.is_some(),
+                    ))
+                    .into_response(),
+                ),
+            )
+        }
         Err(error) => http_html_error_response(HttpError::internal(error.to_string())),
     }
+}
+
+fn ops_ui_current_url(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let path_and_query = uri
+        .path_and_query()
+        .map(|path| path.as_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or("/ops/ui");
+    Some(format!("http://{host}{path_and_query}"))
 }
 
 pub(crate) async fn http_ops_edge_event_dead_letter(
@@ -458,6 +493,163 @@ pub(crate) async fn http_ops_x_bookmarks_enqueue(
         Ok(id) => redirect_to_ops_ui(&format!(
             "/ops/ui?detail=job:{}&notice=x_bookmarks_enqueued",
             url_component(&id)
+        )),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
+pub(crate) async fn http_ops_x_watch_curation_run(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_x_watch_curation_run_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "x-watch-curation-run:{}:{}",
+        form.mode, form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=x_watch_curation&notice=duplicate");
+    }
+
+    let result = (|| -> Result<(String, String)> {
+        let store = Store::open(state.paths.clone())?;
+        let mode = validate_ops_x_watch_curation_mode(&form.mode)?;
+        let action = match mode.as_str() {
+            "dry-run" => "ops.x_watch_curation.dry_run",
+            "pause-only" => "ops.x_watch_curation.pause_only",
+            _ => unreachable!("validated curation mode"),
+        };
+        let decision = store.policy_check(PolicyRequest {
+            action: action.to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some("x:watch-curation".to_string()),
+            projected_usd: None,
+            metadata: json!({
+                "mode": mode,
+                "idempotency_key": form.idempotency_key,
+            }),
+            untrusted_excerpt: None,
+        })?;
+        if !decision.allowed {
+            bail!("policy denied {action}: {}", decision.reason);
+        }
+        let report = store.x_curate_watch_sources(&mode)?;
+        Ok((report.run.id, mode))
+    })();
+
+    match result {
+        Ok((run_id, mode)) => redirect_to_ops_ui(&format!(
+            "/ops/ui?detail=x-curation:{}&notice=x_watch_curation_{}",
+            url_component(&run_id),
+            url_component(&mode.replace('-', "_"))
+        )),
+        Err(error) => http_error_response(HttpError::bad_request(
+            "ops_action_failed",
+            error.to_string(),
+        )),
+    }
+}
+
+pub(crate) async fn http_ops_x_watch_curation_restore(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = validate_http_mutation_request(&state, &headers, &uri) {
+        return http_error_response(error);
+    }
+    if body.len() as u64 > state.max_body_bytes {
+        return http_error_response(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body is too large",
+        ));
+    }
+    let form = match parse_ops_x_watch_curation_restore_form(&body) {
+        Ok(form) => form,
+        Err(error) => return http_error_response(error),
+    };
+    if let Err(error) =
+        validate_ops_csrf_and_idempotency(&state, &form.csrf_token, &form.idempotency_key)
+    {
+        return http_error_response(error);
+    }
+    let idempotency_scope = format!(
+        "x-watch-curation-restore:{}:{}",
+        form.run_id, form.idempotency_key
+    );
+    let inserted = match reserve_ops_idempotency(&state, idempotency_scope) {
+        Ok(inserted) => inserted,
+        Err(error) => return http_error_response(error),
+    };
+    if !inserted {
+        return redirect_to_ops_ui("/ops/ui?q=x_watch_curation&notice=duplicate");
+    }
+
+    let result = (|| -> Result<String> {
+        let store = Store::open(state.paths.clone())?;
+        let run_id = validate_ops_x_watch_curation_run_id(&form.run_id)?;
+        let decision = store.policy_check(PolicyRequest {
+            action: "ops.x_watch_curation.restore".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some(run_id.clone()),
+            projected_usd: None,
+            metadata: json!({
+                "run_id": run_id,
+                "idempotency_key": form.idempotency_key,
+            }),
+            untrusted_excerpt: None,
+        })?;
+        if !decision.allowed {
+            bail!(
+                "policy denied ops.x_watch_curation.restore: {}",
+                decision.reason
+            );
+        }
+        let restore = store.restore_x_watch_curation_run(&run_id)?;
+        Ok(restore.run_id)
+    })();
+
+    match result {
+        Ok(run_id) => redirect_to_ops_ui(&format!(
+            "/ops/ui?detail=x-curation:{}&notice=x_watch_curation_restored",
+            url_component(&run_id)
         )),
         Err(error) => http_error_response(HttpError::bad_request(
             "ops_action_failed",

@@ -30,17 +30,26 @@ Proven:
 - There are existing knowledge clusters, reports, investigations, and digest candidates.
 - A non-destructive X watch curation dry-run exists, writes a durable decision
   ledger, and has a local proof packet.
+- The current X watch list is materially reduced and evidence-reviewed for the
+  latest known review-drop set: the real home now has 159 active / 11 paused
+  `x_handle` rows, with one zero-evidence handle explicitly deferred as
+  `needs_evidence`.
 - Live X profile enrichment exists for handles classified as
   `needs_profile_enrichment`; the latest proof fetched 44/44 candidate profiles
   and reduced the follow-up enrichment-needed bucket to zero.
 - Reviewed X watch manual-rule JSON import exists, dry-runs by default, and
   blocks all writes if any row is rejected.
+- X watch curation has source-level MCP/slash/docs parity for dry-run/apply,
+  report, restore, manual-rule import, and profile enrichment, with a local MCP
+  round-trip test and plugin docs verifier coverage.
 - Native daily briefing scheduling exists as a worker-executed job path.
 - A generic proof-packet ledger exists with CLI read/list/record/promote paths.
 
 Not proven:
 
-- X watch sources are curated and materially smaller.
+- X watch-source curation is not operational or fully quality-gated:
+  multi-day recurrence, ops controls, fresh-thread Codex command smoke, and a
+  broader gold-set gate remain open.
 - X auth refresh and browser reauthorization are not proven across long-running
   recurrence and broad quota/tier conditions.
 - Scheduled source freshness is healthy across all source families.
@@ -65,7 +74,7 @@ Not proven:
 
 Completion requires all milestones below:
 
-- [ ] M0: Baseline proof harness and claim ledger
+- [x] M0: Baseline proof harness and claim ledger
 - [ ] M1: Reversible X watch-source curation
 - [ ] M2: Provider policy, auth refresh, source-health repair
 - [ ] M3: Shared adapter contract across all source families
@@ -243,8 +252,8 @@ Create a stable proof harness so every later milestone can be measured against t
 - [x] `proof_claims`
 - [x] `proof_artifacts`
 - [x] `proof_checks`
-- [ ] `adversarial_review_runs`
-- [ ] `adversarial_review_findings`
+- [x] `adversarial_review_runs`
+- [x] `adversarial_review_findings`
 
 ### Implementation Tasks
 
@@ -257,23 +266,27 @@ Create a stable proof harness so every later milestone can be measured against t
 - [x] Add `arcwell proof latest --capability <name>`.
 - [x] Add `arcwell proof verify-packet <path>`.
 - [x] Add redaction check for tokens, cookies, auth headers, email addresses where not needed, and secrets.
+- [x] Add adversarial review run/finding ledger with `promote`, `hold`, and
+      `block` judgments, linked proof packet ids, strongest fake-done paths,
+      refutations, skipped categories, and finding evidence.
+- [x] Add `arcwell proof review-record`, `review-read`, and `review-list`.
 
 ### Required Baseline Snapshot
 
-- [ ] source inventory by family
-- [ ] active watch source counts
-- [ ] X watch curation counts
-- [ ] source health by status
-- [ ] dead-letter count by job kind
-- [ ] source-card count
-- [ ] wiki projection coverage
-- [ ] knowledge cluster count
-- [ ] report count
-- [ ] digest candidate count
-- [ ] delivery count
-- [ ] latest external alert
-- [ ] latest daily briefing
-- [ ] provider credential health
+- [x] source inventory by family
+- [x] active watch source counts
+- [x] X watch curation counts
+- [x] source health by status
+- [x] dead-letter count by job kind
+- [x] source-card count
+- [x] wiki projection coverage
+- [x] knowledge cluster count
+- [x] report count
+- [x] digest candidate count
+- [x] delivery count
+- [x] latest external alert
+- [x] latest daily briefing
+- [x] provider credential health
 
 ### Tests
 
@@ -283,6 +296,7 @@ Create a stable proof harness so every later milestone can be measured against t
 - [x] unit test invalid proof packet rejection
 - [x] integration test proof packet round trip
 - [x] fixture test where a missing artifact blocks verification
+- [x] adversarial review ledger round trip
 
 ### Severe Tests
 
@@ -291,19 +305,43 @@ Create a stable proof harness so every later milestone can be measured against t
 - [x] proof packet claims `Operational` without recurrence evidence
 - [x] proof packet claims source freshness without source-health evidence
 - [x] proof packet contains model prose but no source evidence
+- [x] adversarial review rejects hold/block judgments without findings
+- [x] adversarial review rejects promote judgments with blocking findings
+- [x] adversarial review treats hostile review text as data
 
 ### Adversarial Review
 
-- [ ] Reviewer asks: could this packet be generated without the capability being real?
-- [ ] Reviewer asks: is every claim tied to a command, artifact, row count, or live provider outcome?
-- [ ] Reviewer asks: are known blockers named in the packet?
+- [x] Reviewer asks: could this packet be generated without the capability being real?
+- [x] Reviewer asks: is every claim tied to a command, artifact, row count, or live provider outcome?
+- [x] Reviewer asks: are known blockers named in the packet?
 - [x] Reviewer result must be `promote`, `hold`, or `block`.
 
 ### Completion Gate
 
-- [ ] Baseline packet exists.
-- [ ] Claim ledger lists all milestones in this plan as `Partial` or `Missing`.
-- [ ] No user-visible docs claim more than the ledger supports.
+- [x] Baseline packet exists.
+- [x] Claim ledger lists all milestones in this plan as `Partial` or `Missing`.
+- [x] No user-visible docs claim more than the ledger supports.
+
+2026-07-01 baseline packet: `scripts/autonomous-knowledge-baseline-proof`
+recorded durable packet `proof-9c0cc9d46407d0d41e536d80` with artifact root
+`.arcwell-dev/proofs/autonomous-knowledge-baseline-proof-20260701T075525Z-75005`.
+`arcwell proof verify-packet` reported `ok=true`, 13 checked artifacts, and zero
+redaction findings. The packet remains `partial`: the adversarial review
+`arev-f9e8eb04aba15399a7c7a5fe` is `hold` with one blocking finding because a
+baseline snapshot can be mistaken for source freshness or complete wiki currency.
+At this point, the remaining M0 gate was the user-visible docs/tooling claim
+audit, not more baseline counting.
+
+2026-07-01 claim-audit packet: `scripts/autonomous-knowledge-claim-audit`
+scanned 180 user-visible docs, plugin skills, and slash prompts, reviewed 27
+risk-bearing lines, and found zero unbounded autonomous-knowledge overclaims.
+It recorded durable packet `proof-04f6aefb36e55995281bad93` with artifact root
+`.arcwell-dev/proofs/autonomous-knowledge-claim-audit-20260701T080951Z-99888`.
+`arcwell proof verify-packet` reported `ok=true`, 3 checked artifacts, and zero
+redaction findings. Review `arev-f1f1a2d6cbd656f6b76d48e4` promoted this
+narrow docs/tooling claim-audit gate. This does not prove source freshness,
+runtime MCP/slash execution parity, ops UI repair controls, or future
+recurrence.
 
 ## M1: Reversible X Watch-Source Curation
 
@@ -355,9 +393,121 @@ Reduce the X watch list from the user's broad following import to a curated AI/s
   `.arcwell-dev/reviewed-inputs/x-watch-curation-post-apply-monitor-5-after-source-write-fix.json`
   proves a 5-source real-home monitor run with 0 failed sources, 0 rejects, 10
   imports, 10 duplicate skips, and 1 digest candidate.
+- Follow-up inspection on 2026-07-01 found a real audit-retention gap: later
+  definitive X watch-source rebuilds can replace `watch_sources` rows, and the
+  original schema cascaded `x_watch_curation_decisions`, evidence, and restore
+  snapshots from those rows. The 2026-06-29 real-home apply proof artifact still
+  contains the full 1,553-decision evidence record, but the live DB curation
+  decision/evidence/snapshot rows for that run had already been removed.
+- Schema v25 fixes future audit retention by removing `watch_sources` cascade
+  foreign keys from X curation decisions and restore snapshots. Proof packet
+  `.arcwell-dev/proofs/x-watch-curation-audit-retention-proof-20260701T082516Z-52123/artifacts/proof-packet.json`
+  recorded durable packet `proof-a7169f33289b34a369d04fb3` and promoted review
+  `arev-93c9c7c2641245b9058a449a`: the real-home schema no longer cascades
+  from `watch_sources`, a copied-home sentinel pause-only run survived deleting
+  the sentinel watch source with 1 decision, 1 evidence row, and 1 restore
+  snapshot intact, and `foreign_key_check` was clean. This does not recreate
+  historical DB rows that were already lost.
+- Historical decision/evidence recovery from the old proof artifact is now
+  explicit and bounded. `scripts/x-watch-curation-restore-audit-from-proof`
+  first restored the 2026-06-29 pause-only run `xwcur-a4d1e80fc10956eeef8ed859`
+  from 0 live decision/evidence rows back to 1,553 decisions and 1,596 evidence
+  rows, then a clean idempotent proof run
+  `.arcwell-dev/proofs/x-watch-curation-restore-audit-from-proof-20260701T084258Z-87674/artifacts/proof-packet.json`
+  recorded durable packet `proof-5b6b16bfdc55fc33941efe2d` and promoted review
+  `arev-7e188523188cfe354023f315`. Copied-home and live-DB row hashes matched
+  the reviewed source artifact, watch-source counts did not change, and
+  `foreign_key_check` was clean. This restores decision/evidence audit rows
+  only; exact historical restore snapshots were not reconstructed because the
+  retained proof artifact has row hashes/status/label/cadence, not full previous
+  `metadata_json`.
+- Current live DB after the retention fix has 170 active `x_handle` watch
+  sources. A schema-v25 dry-run `xwcur-231181159a698cb7d373b80d` wrote 170
+  current decisions: 116 keep, 24 review-keep, and 30 review-drop. Treat the
+  older 1,553-row decision/evidence recovery as historical apply audit coverage,
+  not as proof that the rebuilt 170-active-source list is fully curated or
+  operational.
+- Bounded worker/source-health pressure proof
+  `.arcwell-dev/proofs/x-watch-curation-worker-pressure-proof-20260701T085001Z-4106/artifacts/proof-packet.json`
+  recorded durable packet `proof-05680c91a60f86a02172e36e` and promoted review
+  `arev-827771bf1572d76dc23510e7`: current active `x_handle` workload is 170
+  handles, down 1,383 from the original 1,553-handle following import
+  (89.05% reduction); the live DB has 170 `x_monitor` source-health rows, all
+  healthy, no active handle missing monitor health, no stale monitor health row
+  for inactive handles, no pending/failed/running `x_monitor_watch_source` jobs,
+  and a same-day durable worker sweep from `2026-07-01T06:45:34Z` to
+  `06:46:13Z` completed 170 distinct watch-monitor handles with 89 imported
+  rows, 0 failures, and 0 rejects. Focused severe tests prove scheduled
+  `x_handle` sources enqueue/execute `x_monitor_watch_source` jobs using
+  `x:watch:<handle>` cursors and `x_monitor` source-health, not generic recent
+  search jobs. This is a same-day production-data pressure proof, not multi-day
+  recurrence or future X provider availability.
+- Current-list quality measurement is now explicit but still partial.
+  `scripts/x-watch-curation-current-quality-proof` wrote proof packet
+  `.arcwell-dev/proofs/x-watch-curation-current-quality-proof-20260701T090517Z-41184/artifacts/proof-packet.json`,
+  durable packet `proof-a2ec54b3bb4c0f1abf7758bd`, and promoted review
+  `arev-014f54a1828202d1d1d39f8f`: the retained current run
+  `xwcur-231181159a698cb7d373b80d` covers 170 active handles with 116 keep,
+  24 review-keep, and 30 review-drop decisions; conservative reviewed-candidate
+  generation produced 123 keeps and one copied-home-only exclude
+  (`ArtButSports`); known risky current review-drop handles (`patrickc`,
+  `stripe`, `NoamShazeer`, `BrainsAndTennis`, `jerhadf`, `zendadddy`) were not
+  auto-excluded; no seed keep-list handle found in the DB is paused; and 29
+  review-drop rows remain unresolved for manual/gold-set review. Nested
+  copied-home proof
+  `.arcwell-dev/proofs/x-watch-curation-current-quality-proof-20260701T090517Z-41184/raw/copied-home-pause-proof/artifacts/proof-packet.json`
+  recorded packet `proof-30a304839f0350ab3623f9c8`: pause-only applied exactly
+  one copied-home exclude, restored the copied DB to 170 active handles, and
+  proved the real home stayed unchanged at 170 active handles. This is a
+  current-list measurement and copied-home rehearsal, not real-home mutation or
+  M1 completion.
+- The single verified current conservative exclude has now been applied to the
+  real home. `scripts/x-watch-curation-current-real-home-apply-proof` wrote
+  proof packet
+  `.arcwell-dev/proofs/x-watch-curation-current-real-home-apply-proof-20260701T091822Z-68495/artifacts/proof-packet.json`,
+  durable packet `proof-8613f3ce5d971a195fe0a8a9`, and promoted review
+  `arev-e2e67c11c7eed0ffb70a82ab`: after verifying source packet
+  `proof-a2ec54b3bb4c0f1abf7758bd`, creating a private SQLite backup, and
+  passing focused curation/manual-rule/proof tests plus `cargo fmt -- --check`,
+  it imported one reviewed manual exclude and pause-only applied exactly
+  `ArtButSports`. Real-home `x_handle` counts moved from 170 active to 169
+  active / 1 paused, total `x_handle` rows stayed 170, and no other handle
+  status changed. This is a one-handle real-home apply proof, not M1 completion.
+- The current review-drop rows with local evidence have now been manually
+  reviewed and applied to the real home. `scripts/x-watch-curation-current-manual-review-proof`
+  wrote proof packet
+  `.arcwell-dev/proofs/x-watch-curation-current-manual-review-proof-20260701T093509Z-6874/artifacts/proof-packet.json`,
+  durable packet `proof-79a8c1a2990068f9861e46a9`, and promoted review
+  `arev-99e7391b73181fb1805e3b12`: after verifying source packet
+  `proof-8613f3ce5d971a195fe0a8a9`, creating a private SQLite backup, and
+  passing focused curation/manual-rule/proof tests plus `cargo fmt -- --check`,
+  it imported 28 reviewed manual rules from the current 29-row review-drop
+  evidence set, preserved all 18 reviewed keeps as active, and pause-only
+  applied exactly the 10 reviewed excludes. Real-home `x_handle` counts moved
+  from 169 active / 1 paused to 159 active / 11 paused, total `x_handle` rows
+  stayed 170. At this proof point `Earendil` remained active/unresolved because
+  there was no local evidence for a keep or pause decision; the next proof
+  records its explicit `needs_evidence` deferral. This is a current-list
+  manual-review proof, not M1 completion.
+- Follow-up investigation of `Earendil` found fresh local profile-enrichment
+  and monitor evidence, but both are empty: the profile description is blank,
+  and the monitor has no local authored items. A targeted live
+  `x recent-search 'from:Earendil'` attempt on 2026-07-01 was correctly
+  policy-deferred by decision `345038b3-220a-49f8-b350-f4fd3f62f646`
+  (`provider.network`, `arcwell-x`, `x_recent_search`, `x-api`). Follow-up
+  proof `proof-c0bf7318775dfd0959470882` / review
+  `arev-002c6129474afbc0ed5c0725` imported a reviewed
+  `manual_needs_evidence` rule: `Earendil` stays active, curation now emits
+  `needs_evidence`, no restore snapshot is written, and the real-home watch
+  counts remain 159 active / 11 paused / 170 total. This is an explicit
+  evidence deferral, not a keep or drop decision.
 - This is still not operational curation. It proves reviewed real-home
-  pause-only reduction, not worker relief, scheduler recurrence, ops controls,
-  or broad classifier quality against a full gold set.
+  pause-only reduction, current worker/source-health pressure relief, and a
+  bounded current-list quality measurement plus current manual-review apply
+  and a zero-evidence deferral,
+  plus source-level MCP/slash/docs parity. It does not prove scheduler
+  recurrence, ops controls, fresh-thread Codex command smoke, resolution of the
+  broader review workflow, or broad classifier quality against a full gold set.
 
 ### Mirage Traps
 
@@ -375,6 +525,10 @@ Reduce the X watch list from the user's broad following import to a curated AI/s
 - [x] `x_watch_curation_evidence`
 - [x] `x_watch_manual_rules`
 - [x] `x_watch_restore_snapshots`
+- [x] schema v25 keeps curation decisions/evidence/restore snapshots as audit
+      history across later `watch_sources` rebuilds
+- [x] historical 2026-06-29 pause-only decision/evidence rows restored from the
+      reviewed proof artifact into the live DB
 - [x] profile enrichment evidence through canonical `x_profiles`,
       `x_profile_snapshots`, `source_health`, and `x_sync_runs`
 - [ ] dedicated `x_profile_enrichment_runs` if later needed for richer ops
@@ -411,8 +565,15 @@ Reduce the X watch list from the user's broad following import to a curated AI/s
 - [x] Add reviewed JSON import for explicit user or operator decisions.
 - [x] Add copied-home pause/restore proof harness.
 - [x] Add conservative reviewed-candidate ruleset generator.
+- [x] Add copied-home audit-retention proof harness for curation rows surviving
+      watch-source rebuild/delete.
+- [x] Add reviewed proof-artifact recovery harness for historical curation
+      decisions/evidence.
+- [x] Add current-list quality proof harness that measures the rebuilt active
+      set and rehearses conservative current rules in a copied home without
+      mutating the real home.
 - [ ] Add reviewed CSV import/converter if a spreadsheet review flow is needed.
-- [ ] Add scheduled profile-enrichment queue.
+- [x] Add scheduled profile-enrichment queue.
 - [ ] Add ops UI review table and restore button.
 
 ### Tests
@@ -444,6 +605,8 @@ Reduce the X watch list from the user's broad following import to a curated AI/s
 - [ ] model tries to emit an instruction instead of classification
 - [x] all-or-nothing reviewed rule import blocks every write when any row is rejected
 - [x] pause-only snapshot plus exact restore is proven in tests and copied-home proof
+- [x] curation decisions, evidence, and restore snapshots survive later
+      watch-source rebuild/delete
 
 ### Evaluation
 
@@ -469,17 +632,39 @@ Reduce the X watch list from the user's broad following import to a curated AI/s
 - [x] Restore copied home.
 - [x] Apply pause-only to real home only after copied-home proof passes.
 - [x] Run worker X monitor after curation.
-- [ ] Prove fewer X watch jobs and fewer failures.
-- [x] Prove seed accounts still active.
+- [x] Prove future curation audit rows survive watch-source registry rebuilds.
+- [x] Restore historical 2026-06-29 curation decision/evidence rows from the
+      reviewed proof artifact into the live DB.
+- [x] Prove current X watch-monitor worker/source-health pressure is lower and
+      currently healthy.
+- [x] Measure current rebuilt-list quality and copied-home rehearse any
+      conservative current excludes.
+- [x] Prove no seed keep-list handle currently found in the DB is paused.
 
 ### Completion Gate
 
 - [x] Active X source count reduced from 1,553 active to 1,508 active and 45
       paused by reviewed real-home pause-only proof.
-- [ ] Every kept or paused source has durable reason and evidence.
+- [x] Current rebuilt X source count reduced from 170 active to 159 active /
+      11 paused by current-list real-home manual review.
+- [ ] Every kept or paused source has durable reason and evidence. Future
+      curation rows are now retained across watch-source rebuilds, the
+      historical 2026-06-29 decision/evidence rows have been restored from the
+      reviewed proof artifact, and the rebuilt 170-active-source list now has a
+      current-list quality proof plus real-home manual review: 18 current
+      review-drop rows became durable keeps, 10 became durable excludes, and
+      `Earendil` became an explicit durable `needs_evidence` deferral because
+      it has no local profile, tweet, bookmark, or technical evidence either
+      way. Exact historical restore
+      snapshots remain unreconstructed, and a full gold-set/manual quality gate
+      remains open.
 - [x] Restore works in unit tests and the copied-home proof.
-- [ ] Worker proof shows curation improves source-health pressure.
-- [ ] No important seed account is paused.
+- [x] Worker/source-health pressure proof shows the current active X monitor
+      workload is 170/170 healthy with a same-day 170-handle sweep and zero
+      failures/rejects.
+- [x] No important seed account is paused in the current DB snapshot; seed
+      handles absent from the rebuilt active set are recorded separately and do
+      not prove broad seed recall.
 
 ## M2: Provider Policy, Auth Refresh, And Source Health Repair
 
@@ -1321,7 +1506,7 @@ Do not call this done until all are true:
 
 The implementation should proceed in this order:
 
-1. [ ] M0 proof harness and claim ledger
+1. [x] M0 proof harness and claim ledger
 2. [ ] M1 X curation dry-run, enrichment, reversible apply
 3. [ ] M2 provider policy/auth/source-health repair
 4. [ ] M3 adapter contract conversion, starting with blog/company page gap
@@ -1342,7 +1527,7 @@ Start with a bounded slice that proves the pattern:
 - [x] Add X curation durable schema.
 - [x] Implement deterministic X curation dry-run.
 - [x] Implement live profile enrichment command for `needs_profile_enrichment`.
-- [ ] Implement scheduled profile enrichment queue for `needs_profile_enrichment`.
+- [x] Implement scheduled profile enrichment queue for `needs_profile_enrichment`.
 - [x] Implement pause-only apply in copied home.
 - [x] Implement restore run.
 - [x] Implement reviewed manual-rule JSON import with all-or-nothing apply.
@@ -1357,4 +1542,10 @@ Start with a bounded slice that proves the pattern:
 
 This slice is complete only when a copied-home apply and restore are proven, and the real-home path remains either dry-run only or pause-only with explicit proof.
 
-2026-06-29 progress: M0 proof-ledger foundation and M1 first-slice local proof exist. Schema v22 added generic proof packet/claim/artifact/check tables with `arcwell proof record/read/list/promote/latest/verify-packet`; severe tests block fake passed/promoted packets, unresolved claims, duplicate claim keys, malformed artifact hashes, hostile claim text promotion, missing/tampered local artifacts, artifact path escapes, token/email-like proof leakage without echoing matched values, and broad operational/freshness/model-report proof claims without required evidence markers. Local M0 hardening proof is durable packet `proof-7064d398e84a37b3c6b3d40d` with proof bundle `.arcwell-dev/proofs/proof-ledger-hardening-20260629T130621Z-93998/artifacts/proof-packet.json`; `proof latest --capability m0-proof-ledger-hardening` returns that packet and `proof verify-packet` passes on the clean M0 bundle. M0 still lacks the baseline all-capability snapshot, MCP/slash/docs parity, and ops UI access. Schema v21 added X curation run/decision/evidence/manual-rule/restore-snapshot tables. `arcwell x curate-watch-sources --dry-run`, `--apply --mode pause-only`, `restore-watch-curation`, and `watch-curation-report` are implemented. `scripts/x-watch-curation-local-proof` passed against the real home with proof packet `.arcwell-dev/proofs/x-watch-curation-local-proof-20260629T122803Z-31456/artifacts/proof-packet.json` and durable proof-ledger record `.arcwell-dev/proofs/x-watch-curation-local-proof-20260629T122803Z-31456/artifacts/proof-ledger-record.json`: 1,553 active X handles before and after, zero dry-run pauses, 171 keep, 173 review-keep, 1,165 review-drop, 44 enrichment-needed decisions, and proof packet id `proof-4ac3b3e8c1238097fac26b43`. `arcwell x enrich-watch-profiles` fetched live X profile records for those 44 enrichment-needed handles, wrote canonical profile/source-health/sync-run evidence, and recorded proof packet `proof-057404a6477a36fa436c60d4`; a later real-home enrichment pass fetched/updated 500 additional profiles with zero failed batches. The classifier now supports broader engineering/platform/devtool signals, CamelCase-aware handle matching, and an initial seed allowlist; severe tests prove key developer-tool profiles and seed-allowlisted sparse technical accounts are kept. `arcwell x import-watch-manual-rules` now supports reviewed JSON keep/exclude rules, dry-runs by default, matches existing watch-source handles case-insensitively, requires existing watch sources and reviewed reasons, blocks all writes if any row is rejected, and has severe all-or-nothing pause/restore plus mixed-case handle coverage. `scripts/x-watch-curation-generate-reviewed-candidates` produced 289 conservative reviewed-candidate rules from curation/profile evidence: 244 keeps, 45 excludes, and zero protected seed excludes after adversarial review. `scripts/x-watch-curation-copied-home-pause-proof` passed with proof packet `.arcwell-dev/proofs/x-watch-curation-copied-home-pause-proof-20260629T165839Z-98279/artifacts/proof-packet.json` and durable packet `proof-f4defe8f09b3e92fb69183a1`: all 289 rules were imported into a copied real home, pause-only applied exactly 45 manual excludes, 244 manual keeps remained active, restore returned the copied DB to its original status/checksum, the proof packet verified cleanly, and the real home remained unchanged. After explicit user approval, `scripts/x-watch-curation-real-home-pause-proof` passed with proof packet `.arcwell-dev/proofs/x-watch-curation-real-home-pause-proof-20260629T172628Z-3381/artifacts/proof-packet.json` and durable packet `proof-7af2b88bfb178b1fd747b4fe`: a private SQLite backup was created, all 289 rules were imported into the real home, pause-only applied exactly the 45 reviewed excludes, 244 manual keeps remained active, total `x_handle` watch sources stayed 1,553, status counts changed from 1,553 active to 1,508 active / 45 paused, the proof packet verified cleanly, and zero redaction findings were reported. Post-apply live monitor proof first exposed missing X source-card `source.write` policy as the actual reason for opaque malformed-item failures; import reports now expose redacted rejection reasons, real-home override `override-e02dbb28-381b-4089-ae3f-214dc313a29e` repairs X `source_card_add` writes through 2026-07-29, and `.arcwell-dev/reviewed-inputs/x-watch-curation-post-apply-monitor-5-after-source-write-fix.json` proved 5/5 watched sources polled with 0 failures, 0 rejects, 10 imports, 10 duplicate skips, and 1 digest candidate. This is not operational curation; scheduled enrichment, ops UI, MCP/slash parity, expanded seed/gold-set review, and worker-pressure reduction remain open.
+2026-07-01 correction: M0 no longer lacks the real-home baseline snapshot or
+the user-visible docs/tooling claim audit. Those are proven by packets
+`proof-9c0cc9d46407d0d41e536d80` and `proof-04f6aefb36e55995281bad93`.
+Runtime fresh-thread MCP/slash smoke, ops UI proof access, source freshness,
+and recurrence remain later gates, not M0 completion evidence.
+
+2026-06-29 progress: M0 proof-ledger foundation and M1 first-slice local proof exist. Schema v22 added generic proof packet/claim/artifact/check tables with `arcwell proof record/read/list/promote/latest/verify-packet`; severe tests block fake passed/promoted packets, unresolved claims, duplicate claim keys, malformed artifact hashes, hostile claim text promotion, missing/tampered local artifacts, artifact path escapes, token/email-like proof leakage without echoing matched values, and broad operational/freshness/model-report proof claims without required evidence markers. Local M0 hardening proof is durable packet `proof-7064d398e84a37b3c6b3d40d` with proof bundle `.arcwell-dev/proofs/proof-ledger-hardening-20260629T130621Z-93998/artifacts/proof-packet.json`; `proof latest --capability m0-proof-ledger-hardening` returns that packet and `proof verify-packet` passes on the clean M0 bundle. M0 still lacked the baseline all-capability snapshot, MCP/slash/docs parity, and ops UI access at this proof point. Schema v21 added X curation run/decision/evidence/manual-rule/restore-snapshot tables. `arcwell x curate-watch-sources --dry-run`, `--apply --mode pause-only`, `restore-watch-curation`, and `watch-curation-report` are implemented. `scripts/x-watch-curation-local-proof` passed against the real home with proof packet `.arcwell-dev/proofs/x-watch-curation-local-proof-20260629T122803Z-31456/artifacts/proof-packet.json` and durable proof-ledger record `.arcwell-dev/proofs/x-watch-curation-local-proof-20260629T122803Z-31456/artifacts/proof-ledger-record.json`: 1,553 active X handles before and after, zero dry-run pauses, 171 keep, 173 review-keep, 1,165 review-drop, 44 enrichment-needed decisions, and proof packet id `proof-4ac3b3e8c1238097fac26b43`. `arcwell x enrich-watch-profiles` fetched live X profile records for those 44 enrichment-needed handles, wrote canonical profile/source-health/sync-run evidence, and recorded proof packet `proof-057404a6477a36fa436c60d4`; a later real-home enrichment pass fetched/updated 500 additional profiles with zero failed batches. The classifier now supports broader engineering/platform/devtool signals, CamelCase-aware handle matching, and an initial seed allowlist; severe tests prove key developer-tool profiles and seed-allowlisted sparse technical accounts are kept. `arcwell x import-watch-manual-rules` now supports reviewed JSON keep/exclude rules, dry-runs by default, matches existing watch-source handles case-insensitively, requires existing watch sources and reviewed reasons, blocks all writes if any row is rejected, and has severe all-or-nothing pause/restore plus mixed-case handle coverage. `scripts/x-watch-curation-generate-reviewed-candidates` produced 289 conservative reviewed-candidate rules from curation/profile evidence: 244 keeps, 45 excludes, and zero protected seed excludes after adversarial review. `scripts/x-watch-curation-copied-home-pause-proof` passed with proof packet `.arcwell-dev/proofs/x-watch-curation-copied-home-pause-proof-20260629T165839Z-98279/artifacts/proof-packet.json` and durable packet `proof-f4defe8f09b3e92fb69183a1`: all 289 rules were imported into a copied real home, pause-only applied exactly 45 manual excludes, 244 manual keeps remained active, restore returned the copied DB to its original status/checksum, the proof packet verified cleanly, and the real home remained unchanged. After explicit user approval, `scripts/x-watch-curation-real-home-pause-proof` passed with proof packet `.arcwell-dev/proofs/x-watch-curation-real-home-pause-proof-20260629T172628Z-3381/artifacts/proof-packet.json` and durable packet `proof-7af2b88bfb178b1fd747b4fe`: a private SQLite backup was created, all 289 rules were imported into the real home, pause-only applied exactly the 45 reviewed excludes, 244 manual keeps remained active, total `x_handle` watch sources stayed 1,553, status counts changed from 1,553 active to 1,508 active / 45 paused, the proof packet verified cleanly, and zero redaction findings were reported. Post-apply live monitor proof first exposed missing X source-card `source.write` policy as the actual reason for opaque malformed-item failures; import reports now expose redacted rejection reasons, real-home override `override-e02dbb28-381b-4089-ae3f-214dc313a29e` repairs X `source_card_add` writes through 2026-07-29, and `.arcwell-dev/reviewed-inputs/x-watch-curation-post-apply-monitor-5-after-source-write-fix.json` proved 5/5 watched sources polled with 0 failures, 0 rejects, 10 imports, 10 duplicate skips, and 1 digest candidate. This was not operational curation; scheduled enrichment, ops UI, MCP/slash parity, expanded seed/gold-set review, and worker-pressure reduction remained open at that proof point.

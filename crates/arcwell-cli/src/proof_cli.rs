@@ -48,6 +48,55 @@ pub(crate) fn proof(store: Store, args: ProofCommand) -> Result<()> {
             packet_id,
             reviewer,
         } => print_json(&store.promote_proof_packet(&packet_id, &reviewer)?),
+        ProofSubcommand::ReviewRecord {
+            scope,
+            title,
+            reviewer,
+            requested_proof_level,
+            judgment,
+            summary,
+            strongest_fake_done_path,
+            packet_id,
+            refutations_json,
+            skipped_categories_json,
+            findings_json,
+            metadata_json,
+        } => {
+            let refutations = parse_json_arg(&refutations_json, "--refutations-json")?;
+            let skipped_categories =
+                parse_json_arg(&skipped_categories_json, "--skipped-categories-json")?;
+            let findings = parse_typed_json::<Vec<AdversarialReviewFindingInput>>(
+                &findings_json,
+                "--findings-json",
+            )?;
+            let metadata = parse_json_arg(&metadata_json, "--metadata-json")?;
+            print_json(&store.record_adversarial_review(AdversarialReviewRunInput {
+                packet_id,
+                scope,
+                title,
+                reviewer,
+                requested_proof_level,
+                judgment,
+                summary,
+                strongest_fake_done_path,
+                refutations,
+                skipped_categories,
+                findings,
+                metadata,
+            })?)
+        }
+        ProofSubcommand::ReviewRead { review_id } => {
+            print_json(&store.read_adversarial_review(&review_id)?)
+        }
+        ProofSubcommand::ReviewList {
+            scope,
+            packet_id,
+            limit,
+        } => print_json(&store.list_adversarial_reviews(
+            scope.as_deref(),
+            packet_id.as_deref(),
+            limit,
+        )?),
     }
 }
 

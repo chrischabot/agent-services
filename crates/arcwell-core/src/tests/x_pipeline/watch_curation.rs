@@ -233,6 +233,71 @@ fn severe_x_watch_curation_pause_only_snapshots_and_restore_exact_row() {
 }
 
 #[test]
+fn severe_x_watch_curation_audit_survives_watch_source_rebuild_deletes() {
+    // CLAIM: curation decisions and restore snapshots are historical audit
+    // evidence, not volatile children of the current watch-source registry.
+    // ORACLE: deleting/rebuilding the x_handle watch row does not delete the
+    // curation decision, evidence rows, or restore snapshot.
+    // SEVERITY: Severe because definitive X watch rebuilds replace the
+    // registry and must not erase why prior curation happened.
+    let store = test_store("x-watch-curation-audit-retention");
+    let source = upsert_x_handle(
+        &store,
+        "offtopic_media",
+        json!({ "origin": "following", "description": "not a technical source" }),
+    );
+    insert_manual_rule(
+        &store,
+        "offtopic_media",
+        "manual_always_exclude",
+        "off_topic",
+        "Reviewed as off-topic for AI/devrel monitoring.",
+    );
+
+    let report = store.x_curate_watch_sources("pause-only").unwrap();
+    assert_eq!(report.run.paused_count, 1);
+    let decision_id = report.decisions[0].id.clone();
+
+    store
+        .conn
+        .execute(
+            "DELETE FROM watch_sources WHERE id = ?1",
+            params![source.id],
+        )
+        .unwrap();
+
+    let decision_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_watch_curation_decisions WHERE id = ?1",
+            params![decision_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(decision_count, 1);
+
+    let evidence_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_watch_curation_evidence WHERE decision_id = ?1",
+            params![decision_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(evidence_count >= 1);
+
+    let snapshot_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_watch_restore_snapshots WHERE run_id = ?1 AND watch_source_id = ?2",
+            params![report.run.id, source.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshot_count, 1);
+}
+
+#[test]
 fn severe_x_watch_manual_rule_import_is_reviewed_reversible_and_all_or_nothing() {
     // CLAIM: reviewed manual-rule import is dry-run by default, all-or-nothing
     // on apply, and manual excludes only pause sources through the reversible
@@ -377,6 +442,70 @@ fn severe_x_watch_manual_rule_import_matches_mixed_case_watch_source_locators() 
     assert_eq!(decision.handle, "OpenAI");
     assert_eq!(decision.recommendation, "paused_excluded");
     assert_eq!(decision.proposed_status, "paused");
+}
+
+#[test]
+fn severe_x_watch_manual_rule_can_defer_zero_evidence_without_pause_or_keep() {
+    // CLAIM: a reviewed zero-evidence handle can be explicitly deferred
+    // without converting absence of evidence into either keep evidence or a
+    // destructive pause.
+    // ORACLE: manual_needs_evidence imports durably, emits a needs_evidence
+    // decision, keeps the proposed status unchanged, and pause-only curation
+    // does not snapshot or pause the source.
+    // SEVERITY: Severe because otherwise current-list cleanup can look
+    // complete by silently treating unknown handles as reviewed keeps/drops.
+    let store = test_store("x-watch-manual-needs-evidence");
+    let source = upsert_x_handle(&store, "Earendil", json!({ "origin": "test" }));
+    insert_x_profile(&store, "Earendil", "Earendil", "");
+
+    let rules = vec![XWatchManualRuleInput {
+        handle: "Earendil".to_string(),
+        decision: "manual_needs_evidence".to_string(),
+        category: "zero_evidence".to_string(),
+        reason: "Reviewed profile enrichment and local corpus; no positive or negative evidence exists yet.".to_string(),
+        metadata: json!({ "review_scope": "current-list-zero-evidence" }),
+    }];
+
+    let dry_run = store
+        .import_x_watch_manual_rules(rules.clone(), "codex-review", true)
+        .unwrap();
+    assert_eq!(dry_run.rejected, 0);
+    assert_eq!(dry_run.items[0].status, "validated");
+
+    let applied = store
+        .import_x_watch_manual_rules(rules, "codex-review", false)
+        .unwrap();
+    assert_eq!(applied.rejected, 0);
+    assert_eq!(applied.imported, 1);
+
+    let curation = store.x_curate_watch_sources("dry-run").unwrap();
+    assert_eq!(curation.counts.get("needs_evidence"), Some(&1));
+    assert_eq!(curation.counts.get("keep"), None);
+    assert_eq!(curation.counts.get("paused_excluded"), None);
+    let decision = curation
+        .decisions
+        .iter()
+        .find(|decision| decision.watch_source_id == source.id)
+        .unwrap();
+    assert_eq!(decision.handle, "Earendil");
+    assert_eq!(decision.recommendation, "needs_evidence");
+    assert_eq!(decision.category, "zero_evidence");
+    assert_eq!(decision.proposed_status, "active");
+    assert!(decision.reason.contains("manual needs-evidence rule"));
+
+    let pause_only = store.x_curate_watch_sources("pause-only").unwrap();
+    assert_eq!(pause_only.run.paused_count, 0);
+    let still_active = store.read_watch_source(&source.id).unwrap().unwrap();
+    assert_eq!(still_active.status, "active");
+    let snapshot_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM x_watch_restore_snapshots WHERE run_id = ?1",
+            params![pause_only.run.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshot_count, 0);
 }
 
 #[test]

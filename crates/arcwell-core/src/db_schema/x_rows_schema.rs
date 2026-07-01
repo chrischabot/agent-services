@@ -802,7 +802,6 @@ pub(crate) fn ensure_x_watch_curation_schema_on(conn: &Connection) -> Result<()>
           created_at TEXT NOT NULL,
           applied_at TEXT,
           FOREIGN KEY(run_id) REFERENCES x_watch_curation_runs(id) ON DELETE CASCADE,
-          FOREIGN KEY(watch_source_id) REFERENCES watch_sources(id) ON DELETE CASCADE,
           UNIQUE(run_id, watch_source_id)
         );
 
@@ -834,12 +833,131 @@ pub(crate) fn ensure_x_watch_curation_schema_on(conn: &Connection) -> Result<()>
           restored_at TEXT,
           created_at TEXT NOT NULL,
           PRIMARY KEY(run_id, watch_source_id),
-          FOREIGN KEY(run_id) REFERENCES x_watch_curation_runs(id) ON DELETE CASCADE,
-          FOREIGN KEY(watch_source_id) REFERENCES watch_sources(id) ON DELETE CASCADE
+          FOREIGN KEY(run_id) REFERENCES x_watch_curation_runs(id) ON DELETE CASCADE
         );
         "#,
     )?;
     Ok(())
+}
+
+pub(crate) fn migrate_x_watch_curation_audit_retention_on(conn: &Connection) -> Result<()> {
+    ensure_x_watch_curation_schema_on(conn)?;
+    if !x_watch_curation_has_watch_source_cascade(conn)? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+
+        ALTER TABLE x_watch_curation_decisions
+        RENAME TO x_watch_curation_decisions_retention_old;
+        ALTER TABLE x_watch_curation_evidence
+        RENAME TO x_watch_curation_evidence_retention_old;
+        ALTER TABLE x_watch_restore_snapshots
+        RENAME TO x_watch_restore_snapshots_retention_old;
+
+        DROP INDEX IF EXISTS idx_x_watch_curation_decisions_run;
+        DROP INDEX IF EXISTS idx_x_watch_curation_decisions_handle;
+        DROP INDEX IF EXISTS idx_x_watch_curation_evidence_decision;
+
+        CREATE TABLE x_watch_curation_decisions (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          watch_source_id TEXT NOT NULL,
+          handle TEXT NOT NULL,
+          previous_status TEXT NOT NULL,
+          proposed_status TEXT NOT NULL,
+          recommendation TEXT NOT NULL,
+          category TEXT NOT NULL,
+          score INTEGER NOT NULL DEFAULT 0,
+          confidence REAL NOT NULL DEFAULT 0,
+          reason TEXT NOT NULL,
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          applied_at TEXT,
+          FOREIGN KEY(run_id) REFERENCES x_watch_curation_runs(id) ON DELETE CASCADE,
+          UNIQUE(run_id, watch_source_id)
+        );
+
+        INSERT INTO x_watch_curation_decisions
+          (id, run_id, watch_source_id, handle, previous_status, proposed_status,
+           recommendation, category, score, confidence, reason, evidence_json,
+           created_at, applied_at)
+        SELECT
+          id, run_id, watch_source_id, handle, previous_status, proposed_status,
+          recommendation, category, score, confidence, reason, evidence_json,
+          created_at, applied_at
+        FROM x_watch_curation_decisions_retention_old;
+
+        CREATE INDEX idx_x_watch_curation_decisions_run
+        ON x_watch_curation_decisions(run_id, recommendation, score DESC);
+        CREATE INDEX idx_x_watch_curation_decisions_handle
+        ON x_watch_curation_decisions(handle, created_at DESC);
+
+        CREATE TABLE x_watch_curation_evidence (
+          id TEXT PRIMARY KEY,
+          decision_id TEXT NOT NULL,
+          evidence_kind TEXT NOT NULL,
+          evidence_value TEXT NOT NULL,
+          weight INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(decision_id) REFERENCES x_watch_curation_decisions(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO x_watch_curation_evidence
+          (id, decision_id, evidence_kind, evidence_value, weight, created_at)
+        SELECT id, decision_id, evidence_kind, evidence_value, weight, created_at
+        FROM x_watch_curation_evidence_retention_old;
+
+        CREATE INDEX idx_x_watch_curation_evidence_decision
+        ON x_watch_curation_evidence(decision_id);
+
+        CREATE TABLE x_watch_restore_snapshots (
+          run_id TEXT NOT NULL,
+          watch_source_id TEXT NOT NULL,
+          previous_status TEXT NOT NULL,
+          previous_label TEXT NOT NULL,
+          previous_cadence TEXT NOT NULL,
+          previous_metadata_json TEXT NOT NULL DEFAULT '{}',
+          restored_at TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(run_id, watch_source_id),
+          FOREIGN KEY(run_id) REFERENCES x_watch_curation_runs(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO x_watch_restore_snapshots
+          (run_id, watch_source_id, previous_status, previous_label, previous_cadence,
+           previous_metadata_json, restored_at, created_at)
+        SELECT
+          run_id, watch_source_id, previous_status, previous_label, previous_cadence,
+          previous_metadata_json, restored_at, created_at
+        FROM x_watch_restore_snapshots_retention_old;
+
+        DROP TABLE x_watch_curation_evidence_retention_old;
+        DROP TABLE x_watch_curation_decisions_retention_old;
+        DROP TABLE x_watch_restore_snapshots_retention_old;
+
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn x_watch_curation_has_watch_source_cascade(conn: &Connection) -> Result<bool> {
+    for table in ["x_watch_curation_decisions", "x_watch_restore_snapshots"] {
+        let sql = format!("PRAGMA foreign_key_list({table})");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = rows(stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(2)?, row.get::<_, String>(6)?))
+        })?)?;
+        if rows.iter().any(|(foreign_table, on_delete)| {
+            foreign_table == "watch_sources" && on_delete == "CASCADE"
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn ensure_column_on(

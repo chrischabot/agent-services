@@ -2560,6 +2560,64 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 max_recent_follows,
             )?))
         }
+        "x_curate_watch_sources" => {
+            let mode = arguments
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("dry-run");
+            Ok(json!(store.x_curate_watch_sources(mode)?))
+        }
+        "x_watch_curation_report" => {
+            let report = if let Some(run_id) = arguments.get("run_id").and_then(Value::as_str) {
+                Some(store.x_watch_curation_report(run_id)?)
+            } else {
+                store.latest_x_watch_curation_report()?
+            };
+            Ok(json!(report))
+        }
+        "x_restore_watch_curation" => {
+            let run_id = required_string(&arguments, "run_id")?;
+            Ok(json!(store.restore_x_watch_curation_run(&run_id)?))
+        }
+        "x_import_watch_manual_rules" => {
+            let reviewed_by = required_string(&arguments, "reviewed_by")?;
+            let rules_value = arguments
+                .get("rules")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: rules"))?;
+            let rules: Vec<XWatchManualRuleInput> =
+                serde_json::from_value(rules_value).context("parsing X watch manual rules")?;
+            let apply = arguments
+                .get("apply")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(json!(store.import_x_watch_manual_rules(
+                rules,
+                &reviewed_by,
+                !apply
+            )?))
+        }
+        "x_enrich_watch_profiles" => {
+            let run_id = arguments.get("run_id").and_then(Value::as_str);
+            let handles = arguments
+                .get("handles")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(100) as usize;
+            Ok(json!(
+                store.x_enrich_watch_profiles(run_id, &handles, limit)?
+            ))
+        }
         "x_monitor_watch_sources" => {
             let max_sources = arguments
                 .get("max_sources")

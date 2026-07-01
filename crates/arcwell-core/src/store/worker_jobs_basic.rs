@@ -195,6 +195,7 @@ impl Store {
                 "reddit_fetch" => self.execute_reddit_fetch(&job.input_json),
                 "x_recent_search" => self.execute_x_recent_search(&job.input_json, Some(&job.id)),
                 "x_import_bookmarks" => self.execute_x_import_bookmarks(&job.input_json),
+                "x_profile_enrichment" => self.execute_x_profile_enrichment(&job.input_json),
                 "x_monitor_watch_source" => self.execute_x_monitor_watch_source(&job.input_json),
                 "radar_run" => self.execute_radar_run(&job.input_json),
                 "radar_scheduled_delivery" => {
@@ -759,8 +760,12 @@ impl Store {
         let doc = fetch_url_ingest_document(url)?;
         let markdown = render_url_ingest_page(&doc);
         let page_id = self.add_wiki_page(&doc.title, &markdown, &doc.canonical_url)?;
-        let source_health_key = self.record_blog_watch_source_success_for_url_ingest(
-            doc.canonical_url.as_str(),
+        let source_health_key = self.record_blog_watch_source_success_for_url_ingest_urls(
+            &[
+                doc.requested_url.as_str(),
+                doc.final_url.as_str(),
+                doc.canonical_url.as_str(),
+            ],
             &page_id,
         )?;
         let research_promotion =
@@ -774,6 +779,28 @@ impl Store {
             "source_health_key": source_health_key,
             "research_promotion": research_promotion
         }))
+    }
+
+    pub(crate) fn execute_x_profile_enrichment(&self, input: &Value) -> Result<Value> {
+        let handles = input
+            .get("handles")
+            .and_then(Value::as_array)
+            .context("x_profile_enrichment missing handles")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .context("x_profile_enrichment handles must be strings")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if handles.is_empty() {
+            bail!("x_profile_enrichment handles must not be empty");
+        }
+        let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let run_id = input.get("run_id").and_then(Value::as_str);
+        let report = self.x_enrich_watch_profiles(run_id, &handles, limit)?;
+        Ok(serde_json::to_value(report)?)
     }
 
     pub(crate) fn promote_research_url_ingest_document(

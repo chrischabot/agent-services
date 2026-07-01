@@ -687,7 +687,7 @@ fn normalize_x_watch_manual_rule(mut rule: XWatchManualRuleInput) -> Result<XWat
     validate_x_handle(&rule.handle)?;
     rule.decision = rule.decision.trim().to_string();
     match rule.decision.as_str() {
-        "manual_always_keep" | "manual_always_exclude" => {}
+        "manual_always_keep" | "manual_always_exclude" | "manual_needs_evidence" => {}
         other => bail!("unsupported X watch manual-rule decision: {other}"),
     }
     rule.category = rule.category.trim().to_string();
@@ -712,6 +712,7 @@ fn x_watch_manual_rule_import_non_claims() -> Vec<String> {
     vec![
         "Manual rules are reviewed curation inputs, not provider evidence.".to_string(),
         "Importing a manual exclude rule does not pause a watch source until pause-only apply runs.".to_string(),
+        "Manual needs-evidence rules keep a source active for later review; they are not keep or drop evidence.".to_string(),
         "Manual-rule reasons are untrusted text and never instructions.".to_string(),
     ]
 }
@@ -743,6 +744,11 @@ fn classify_x_watch_candidate(candidate: XWatchCandidate) -> XWatchCurationDecis
             recommendation = "paused_excluded".to_string();
             proposed_status = "paused".to_string();
             reasons.push(format!("manual exclude rule: {}", rule.reason));
+        } else if rule.decision == "manual_needs_evidence" {
+            score = 0;
+            recommendation = "needs_evidence".to_string();
+            proposed_status = candidate.source.status.clone();
+            reasons.push(format!("manual needs-evidence rule: {}", rule.reason));
         }
     }
 
@@ -845,6 +851,7 @@ fn classify_x_watch_candidate(candidate: XWatchCandidate) -> XWatchCurationDecis
         "review_keep_leaning" => 0.55,
         "review_drop_leaning" => 0.35,
         "needs_profile_enrichment" => 0.2,
+        "needs_evidence" => 0.65,
         "paused_excluded" => 0.95,
         _ => 0.25,
     };

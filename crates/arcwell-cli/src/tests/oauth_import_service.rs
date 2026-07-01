@@ -1,6 +1,31 @@
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
 
+fn fetch_http_text(addr: SocketAddr, path: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_error = None;
+    while std::time::Instant::now() < deadline {
+        match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)) {
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let request =
+                    format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+                std::io::Write::write_all(&mut stream, request.as_bytes()).unwrap();
+                let mut body = String::new();
+                std::io::Read::read_to_string(&mut stream, &mut body).unwrap();
+                return body;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+    panic!("HTTP listener {addr} did not become ready: {last_error:?}");
+}
+
 #[test]
 fn severe_x_oauth_callback_parser_verifies_state_path_and_decoding() {
     // CLAIM: loopback OAuth callback handling accepts only the expected
@@ -332,7 +357,7 @@ fn slash_command_files_have_cli_or_mcp_aliases() {
         })
         .collect::<Vec<_>>();
     command_names.sort();
-    assert_eq!(command_names.len(), 143);
+    assert_eq!(command_names.len(), 148);
     let missing = command_names
         .into_iter()
         .filter(|name| slash_alias_target(name).is_none() && !slash_alias_is_dynamic(name))
@@ -351,6 +376,10 @@ fn severe_launch_agent_plist_escapes_paths_and_clamps_worker_args() {
         std::path::Path::new("/tmp/logs 'quoted'"),
         999,
         1,
+        Some("127.0.0.1:65535".parse().unwrap()),
+        Some(std::path::Path::new("/tmp/arcwell-token & \"secret\"")),
+        999,
+        999,
     );
 
     assert!(plist.contains("/tmp/arcwell &amp; &quot;worker&quot;"));
@@ -358,8 +387,109 @@ fn severe_launch_agent_plist_escapes_paths_and_clamps_worker_args() {
     assert!(plist.contains("/tmp/logs &apos;quoted&apos;/worker.out.log"));
     assert!(plist.contains("<string>100</string>"));
     assert!(plist.contains("<string>250</string>"));
+    assert!(plist.contains("<string>--http-addr</string>"));
+    assert!(plist.contains("<string>127.0.0.1:65535</string>"));
+    assert!(plist.contains("<string>--http-auth-token-file</string>"));
+    assert!(plist.contains("/tmp/arcwell-token &amp; &quot;secret&quot;"));
+    assert!(plist.contains("<string>--http-max-uri-bytes</string>"));
+    assert!(plist.contains("<string>1024</string>"));
+    assert!(!plist.contains("<string>--http-auth-token</string>"));
     assert!(!plist.contains("<string>999</string>"));
     assert!(!plist.contains("<string>1</string>"));
+
+    let dir = test_paths("service-plist-cockpit-url").home;
+    fs::create_dir_all(&dir).unwrap();
+    let plist_path = dir.join("worker.plist");
+    fs::write(&plist_path, plist).unwrap();
+    assert_eq!(
+        service_plist_cockpit_url(&plist_path).as_deref(),
+        Some("http://127.0.0.1:65535/ops/ui")
+    );
+}
+
+#[test]
+fn severe_service_http_token_file_is_private_reused_and_not_a_process_arg() {
+    let paths = test_paths("service-http-token-file");
+    let token_path = ensure_service_http_token_file(&paths).unwrap();
+    let first = fs::read_to_string(&token_path).unwrap();
+    assert!(first.trim().len() >= 16);
+
+    let reused = ensure_service_http_token_file(&paths).unwrap();
+    let second = fs::read_to_string(&reused).unwrap();
+    assert_eq!(token_path, reused);
+    assert_eq!(first, second);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let plist = launch_agent_plist(
+        std::path::Path::new("/tmp/arcwell"),
+        &paths.home,
+        &paths.home.join("logs"),
+        10,
+        5000,
+        Some("127.0.0.1:65535".parse().unwrap()),
+        Some(&token_path),
+        8192,
+        65536,
+    );
+    assert!(plist.contains("--http-auth-token-file"));
+    assert!(plist.contains(&token_path.to_string_lossy().to_string()));
+    assert!(!plist.contains(first.trim()));
+
+    let store = Store::open(paths.clone()).unwrap();
+    let added = store.ensure_local_ops_ui_policy_rules().unwrap();
+    assert!(added.contains(&"allow-local-ops-ui-actions".to_string()));
+    let added_again = store.ensure_local_ops_ui_policy_rules().unwrap();
+    assert!(added_again.is_empty());
+    let ops_explain = store
+        .policy_explain(PolicyRequest {
+            action: "ops.worker.run_once".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: None,
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: Some("arcwell-worker".to_string()),
+            projected_usd: None,
+            metadata: Value::Null,
+            untrusted_excerpt: None,
+        })
+        .unwrap();
+    assert!(ops_explain.allowed);
+    assert_eq!(
+        ops_explain
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("allow-local-ops-ui-actions")
+    );
+    let enqueue_explain = store
+        .policy_explain(PolicyRequest {
+            action: "worker.enqueue".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("x_import_bookmarks".to_string()),
+            channel: None,
+            subject: None,
+            target: Some("bookmarks".to_string()),
+            projected_usd: None,
+            metadata: Value::Null,
+            untrusted_excerpt: None,
+        })
+        .unwrap();
+    assert!(enqueue_explain.allowed);
+    assert_eq!(
+        enqueue_explain
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("allow-local-ops-ui-x-bookmark-worker-enqueue")
+    );
 }
 
 #[test]
@@ -371,7 +501,17 @@ fn severe_service_plist_contract_rejects_corrupt_metadata_and_missing_binary() {
     let plist_path = dir.join("worker.plist");
     fs::write(
         &plist_path,
-        launch_agent_plist(&missing_binary, &dir, &log_dir, 10, 5000),
+        launch_agent_plist(
+            &missing_binary,
+            &dir,
+            &log_dir,
+            10,
+            5000,
+            None,
+            None,
+            8192,
+            65536,
+        ),
     )
     .unwrap();
 
@@ -414,7 +554,7 @@ fn severe_service_plist_contract_accepts_generated_worker_plist_with_hostile_pat
     let plist_path = dir.join("worker.plist");
     fs::write(
         &plist_path,
-        launch_agent_plist(&binary, &home, &log_dir, 10, 5000),
+        launch_agent_plist(&binary, &home, &log_dir, 10, 5000, None, None, 8192, 65536),
     )
     .unwrap();
 
@@ -551,6 +691,11 @@ fn severe_worker_run_max_ticks_exits_after_repeated_wall_clock_ticks() {
                 max_jobs_per_tick: 1,
                 idle_sleep_ms: 1,
                 max_ticks: Some(2),
+                http_addr: None,
+                http_auth_token: None,
+                http_auth_token_file: None,
+                http_max_uri_bytes: 8192,
+                http_max_body_bytes: 65536,
             },
         },
     )
@@ -564,4 +709,54 @@ fn severe_worker_run_max_ticks_exits_after_repeated_wall_clock_ticks() {
     let heartbeat = store.latest_worker_heartbeat().unwrap().unwrap();
     assert!(heartbeat.worker_id.starts_with("arcwell-worker-"));
     assert_eq!(heartbeat.processed_jobs, 0);
+}
+
+#[test]
+fn severe_worker_run_can_host_ops_ui_without_separate_service() {
+    // CLAIM: the resident worker process can host the same Rust /ops/ui cockpit
+    // router, so the dashboard does not require a second daemon or frontend
+    // dependency chain.
+    // ORACLE: bounded worker run starts an HTTP listener and serves /ops/ui
+    // from that worker process.
+    // SEVERITY: Severe because a cockpit that only works through a parallel
+    // process would violate Arcwell's source-owned service boundary.
+    let paths = test_paths("worker-run-http-ops-ui");
+    let store = Store::open(paths.clone()).unwrap();
+    store
+        .capture_memory_from_text(
+            "Worker-hosted cockpit proof.",
+            "worker-http-test",
+            Some("chris"),
+            false,
+            false,
+        )
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let handle = std::thread::spawn(move || {
+        worker(
+            store,
+            WorkerCommand {
+                command: WorkerSubcommand::Run {
+                    max_jobs_per_tick: 1,
+                    idle_sleep_ms: 250,
+                    max_ticks: Some(8),
+                    http_addr: Some(addr),
+                    http_auth_token: None,
+                    http_auth_token_file: None,
+                    http_max_uri_bytes: 8192,
+                    http_max_body_bytes: 65536,
+                },
+            },
+        )
+    });
+
+    let body = fetch_http_text(addr, "/ops/ui");
+    assert!(body.contains("HTTP/1.1 200 OK"), "{body}");
+    assert!(body.contains("Arcwell Ops Cockpit"), "{body}");
+    assert!(body.contains("Agent Visibility"), "{body}");
+    assert!(body.contains(&format!("http://{addr}/ops/ui")), "{body}");
+    handle.join().unwrap().unwrap();
 }

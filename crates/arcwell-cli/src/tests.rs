@@ -127,6 +127,28 @@ fn x_bookmarks_enqueue_body(
     )
 }
 
+fn x_watch_curation_run_body(csrf_token: &str, idempotency_key: &str, mode: &str) -> String {
+    format!(
+        "csrf_token={}&idempotency_key={}&mode={}",
+        url_component(csrf_token),
+        url_component(idempotency_key),
+        url_component(mode)
+    )
+}
+
+fn x_watch_curation_restore_body(
+    csrf_token: &str,
+    idempotency_key: &str,
+    run_id: &str,
+) -> String {
+    format!(
+        "csrf_token={}&idempotency_key={}&run_id={}",
+        url_component(csrf_token),
+        url_component(idempotency_key),
+        url_component(run_id)
+    )
+}
+
 fn knowledge_backlog_schedule_body(
     csrf_token: &str,
     idempotency_key: &str,

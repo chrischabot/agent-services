@@ -72,6 +72,48 @@ pub(crate) fn ensure_proof_packet_schema_on(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_proof_checks_packet_status
         ON proof_checks(packet_id, status);
+
+        CREATE TABLE IF NOT EXISTS adversarial_review_runs (
+          id TEXT PRIMARY KEY,
+          packet_id TEXT,
+          scope TEXT NOT NULL,
+          title TEXT NOT NULL,
+          reviewer TEXT NOT NULL,
+          requested_proof_level TEXT NOT NULL,
+          judgment TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          strongest_fake_done_path TEXT NOT NULL,
+          refutations_json TEXT NOT NULL DEFAULT '[]',
+          skipped_categories_json TEXT NOT NULL DEFAULT '[]',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          CHECK(judgment IN ('promote', 'hold', 'block')),
+          FOREIGN KEY(packet_id) REFERENCES proof_packets(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_adversarial_review_runs_scope_created
+        ON adversarial_review_runs(scope, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_adversarial_review_runs_packet
+        ON adversarial_review_runs(packet_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS adversarial_review_findings (
+          id TEXT PRIMARY KEY,
+          review_id TEXT NOT NULL,
+          severity INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          evidence_json TEXT NOT NULL DEFAULT '[]',
+          recommendation TEXT,
+          created_at TEXT NOT NULL,
+          CHECK(severity BETWEEN 0 AND 3),
+          CHECK(status IN ('blocking', 'non_blocking', 'resolved')),
+          FOREIGN KEY(review_id) REFERENCES adversarial_review_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_adversarial_review_findings_review
+        ON adversarial_review_findings(review_id, severity DESC);
         "#,
     )?;
     Ok(())

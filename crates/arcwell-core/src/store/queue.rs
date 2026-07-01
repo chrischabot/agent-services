@@ -41,6 +41,21 @@ impl Store {
         Ok(Some(source_key))
     }
 
+    pub(crate) fn record_blog_watch_source_success_for_url_ingest_urls(
+        &self,
+        urls: &[&str],
+        page_id: &str,
+    ) -> Result<Option<String>> {
+        for url in urls {
+            if let Some(source_key) =
+                self.record_blog_watch_source_success_for_url_ingest(url, page_id)?
+            {
+                return Ok(Some(source_key));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn record_blog_watch_source_failure_for_url_ingest(
         &self,
         url: &str,
@@ -2531,6 +2546,12 @@ impl Store {
         } else {
             None
         };
+        let x_profile_enrichment = self.enqueue_due_x_profile_enrichment_jobs(max_jobs)?;
+        let x_profile_enrichment = if x_profile_enrichment.inspected > 0 {
+            Some(x_profile_enrichment)
+        } else {
+            None
+        };
         let knowledge_cluster_model_writer = self.enqueue_due_knowledge_cluster_model_writer_jobs(
             max_jobs, "mock", None, None, None, true,
         )?;
@@ -2613,6 +2634,7 @@ impl Store {
             issue_schedule,
             email_delivery_verification,
             email_mailbox_placement_repair,
+            x_profile_enrichment,
             knowledge_cluster_model_writer,
             knowledge_entity_resolution,
             knowledge_cluster_editorial_decision,

@@ -542,10 +542,10 @@ pub(crate) fn render_edge_event_action(
         return "No safe action for this status.".to_string();
     }
     let Some(csrf_token) = csrf_token else {
-        return "Open /ops/ui from the authenticated HTTP server to use controls.".to_string();
+        return "Open /ops/ui from the service-hosted cockpit to use controls.".to_string();
     };
     if !controls_enabled {
-        return "Disabled: start server with ARCWELL_HTTP_AUTH_TOKEN to enable mutations."
+        return "Disabled: start the service with --http-addr to enable local browser controls."
             .to_string();
     }
     format!(

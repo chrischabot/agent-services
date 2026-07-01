@@ -164,6 +164,43 @@ pub(crate) enum ProofSubcommand {
         #[arg(long)]
         reviewer: String,
     },
+    ReviewRecord {
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long, default_value = "local_proof")]
+        requested_proof_level: String,
+        #[arg(long)]
+        judgment: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        strongest_fake_done_path: String,
+        #[arg(long)]
+        packet_id: Option<String>,
+        #[arg(long, default_value = "[]")]
+        refutations_json: String,
+        #[arg(long, default_value = "[]")]
+        skipped_categories_json: String,
+        #[arg(long, default_value = "[]")]
+        findings_json: String,
+        #[arg(long, default_value = "{}")]
+        metadata_json: String,
+    },
+    ReviewRead {
+        review_id: String,
+    },
+    ReviewList {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        packet_id: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -187,6 +224,12 @@ pub(crate) enum ServiceSubcommand {
         max_jobs_per_tick: usize,
         #[arg(long, default_value_t = 5000)]
         idle_sleep_ms: u64,
+        #[arg(long)]
+        http_addr: Option<SocketAddr>,
+        #[arg(long, default_value_t = 8192)]
+        http_max_uri_bytes: usize,
+        #[arg(long, default_value_t = 65536)]
+        http_max_body_bytes: u64,
         #[arg(long)]
         no_load: bool,
     },
@@ -218,6 +261,8 @@ pub(crate) struct ServeArgs {
     pub(crate) addr: SocketAddr,
     #[arg(long, env = "ARCWELL_HTTP_AUTH_TOKEN")]
     pub(crate) auth_token: Option<String>,
+    #[arg(long, env = "ARCWELL_HTTP_AUTH_TOKEN_FILE")]
+    pub(crate) auth_token_file: Option<PathBuf>,
     #[arg(long, default_value_t = 8192)]
     pub(crate) max_uri_bytes: usize,
     #[arg(long, default_value_t = 65536)]
@@ -243,6 +288,16 @@ pub(crate) enum WorkerSubcommand {
         idle_sleep_ms: u64,
         #[arg(long)]
         max_ticks: Option<usize>,
+        #[arg(long)]
+        http_addr: Option<SocketAddr>,
+        #[arg(long, env = "ARCWELL_HTTP_AUTH_TOKEN")]
+        http_auth_token: Option<String>,
+        #[arg(long, env = "ARCWELL_HTTP_AUTH_TOKEN_FILE")]
+        http_auth_token_file: Option<PathBuf>,
+        #[arg(long, default_value_t = 8192)]
+        http_max_uri_bytes: usize,
+        #[arg(long, default_value_t = 65536)]
+        http_max_body_bytes: u64,
     },
 }
 

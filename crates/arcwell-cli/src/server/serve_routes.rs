@@ -1,23 +1,54 @@
+use super::ops_handlers::{http_ops_x_watch_curation_restore, http_ops_x_watch_curation_run};
 use super::*;
 
 pub(crate) async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(args.addr).await?;
+    serve_listener(paths, args, listener).await
+}
+
+pub(crate) async fn serve_std_listener(
+    paths: AppPaths,
+    args: ServeArgs,
+    listener: std::net::TcpListener,
+) -> Result<()> {
+    listener
+        .set_nonblocking(true)
+        .context("setting HTTP listener nonblocking")?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .context("converting HTTP listener to tokio listener")?;
+    serve_listener(paths, args, listener).await
+}
+
+async fn serve_listener(
+    paths: AppPaths,
+    args: ServeArgs,
+    listener: tokio::net::TcpListener,
+) -> Result<()> {
     Store::open(paths.clone())?;
-    let state = HttpState::new(
-        paths,
-        args.auth_token,
-        args.max_uri_bytes,
-        args.max_body_bytes,
-    )?;
+    let auth_token = resolve_http_auth_token(args.auth_token, args.auth_token_file.as_deref())?;
+    let state = HttpState::new(paths, auth_token, args.max_uri_bytes, args.max_body_bytes)?;
     if !args.addr.ip().is_loopback() && state.auth_token.is_none() {
         bail!("HTTP auth token is required when binding to a non-loopback address");
     }
-    let app = Router::new()
+    let app = http_router(state);
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+pub(crate) fn http_router(state: HttpState) -> Router {
+    Router::new()
         .route("/health", get(http_health).post(http_mutation_rejected))
         .route("/profile", get(http_profile).post(http_mutation_rejected))
         .route("/memory", get(http_memories).post(http_mutation_rejected))
         .route("/wiki", get(http_wiki).post(http_mutation_rejected))
         .route("/ops", get(http_ops).post(http_mutation_rejected))
         .route("/ops/ui", get(http_ops_ui).post(http_mutation_rejected))
+        .route("/cockpit", get(http_ops_ui).post(http_mutation_rejected))
+        .route(
+            "/ops/cockpit",
+            get(http_ops_ui).post(http_mutation_rejected),
+        )
         .route(
             "/ops/actions/edge-events/dead-letter",
             post(http_ops_edge_event_dead_letter),
@@ -29,6 +60,14 @@ pub(crate) async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
         .route(
             "/ops/actions/x/bookmarks/enqueue",
             post(http_ops_x_bookmarks_enqueue),
+        )
+        .route(
+            "/ops/actions/x/watch-curation/run",
+            post(http_ops_x_watch_curation_run),
+        )
+        .route(
+            "/ops/actions/x/watch-curation/restore",
+            post(http_ops_x_watch_curation_restore),
         )
         .route(
             "/ops/actions/knowledge/backlog/schedule",
@@ -86,11 +125,22 @@ pub(crate) async fn serve(paths: AppPaths, args: ServeArgs) -> Result<()> {
             "/ops/actions/worker/run-once",
             post(http_ops_worker_run_once),
         )
-        .with_state(state);
+        .with_state(state)
+}
 
-    let listener = tokio::net::TcpListener::bind(args.addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+pub(crate) fn resolve_http_auth_token(
+    explicit: Option<String>,
+    file: Option<&Path>,
+) -> Result<Option<String>> {
+    if let Some(token) = explicit {
+        return Ok(Some(token));
+    }
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    let token = fs::read_to_string(file)
+        .with_context(|| format!("reading HTTP auth token file {}", file.display()))?;
+    Ok(Some(token.trim().to_string()))
 }
 
 #[derive(Clone)]

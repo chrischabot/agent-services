@@ -181,3 +181,85 @@ pub struct ProofRedactionFinding {
     pub kind: String,
     pub evidence_hash: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewRunInput {
+    pub packet_id: Option<String>,
+    pub scope: String,
+    pub title: String,
+    pub reviewer: String,
+    pub requested_proof_level: String,
+    pub judgment: String,
+    pub summary: String,
+    pub strongest_fake_done_path: String,
+    #[serde(default)]
+    pub refutations: Value,
+    #[serde(default)]
+    pub skipped_categories: Value,
+    #[serde(default)]
+    pub findings: Vec<AdversarialReviewFindingInput>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewFindingInput {
+    pub severity: i64,
+    pub status: String,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub evidence: Value,
+    pub recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewRun {
+    pub id: String,
+    pub packet_id: Option<String>,
+    pub scope: String,
+    pub title: String,
+    pub reviewer: String,
+    pub requested_proof_level: String,
+    pub judgment: String,
+    pub summary: String,
+    pub strongest_fake_done_path: String,
+    pub refutations: Value,
+    pub skipped_categories: Value,
+    pub metadata: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewFinding {
+    pub id: String,
+    pub review_id: String,
+    pub severity: i64,
+    pub status: String,
+    pub title: String,
+    pub body: String,
+    pub evidence: Value,
+    pub recommendation: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewReport {
+    pub review: AdversarialReviewRun,
+    pub findings: Vec<AdversarialReviewFinding>,
+    pub non_claims: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdversarialReviewSummary {
+    pub id: String,
+    pub packet_id: Option<String>,
+    pub scope: String,
+    pub title: String,
+    pub reviewer: String,
+    pub requested_proof_level: String,
+    pub judgment: String,
+    pub finding_count: usize,
+    pub blocking_finding_count: usize,
+    pub created_at: String,
+}

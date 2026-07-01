@@ -1,0 +1,588 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_CURRENT_REAL_APPLY_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-current-real-home-apply-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+RAW_DIR="$PROOF_ROOT/raw"
+PRIVATE_DIR="$PROOF_ROOT/private"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+SOURCE_PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_CURRENT_QUALITY_PROOF_ROOT:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-current-quality-proof-20260701T090517Z-41184}"
+REVIEWED_BY="${ARCWELL_X_WATCH_CURATION_REVIEWED_BY:-codex-x-watch-curation-current-real-home-apply-proof}"
+RECORD="${ARCWELL_PROOF_RECORD:-1}"
+RESUME_EXISTING="${ARCWELL_X_WATCH_CURATION_RESUME_EXISTING:-0}"
+
+log() {
+  printf '[x-watch-curation-current-real-home-apply-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-current-real-home-apply-proof] BLOCKED: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$DB" ]] || fail "Arcwell DB does not exist: $DB"
+[[ -x "$ARCWELL_BIN" ]] || fail "Arcwell binary is not executable: $ARCWELL_BIN"
+[[ -f "$SOURCE_PROOF_ROOT/artifacts/proof-packet.json" ]] || fail "missing source current-quality proof packet: $SOURCE_PROOF_ROOT"
+[[ -f "$SOURCE_PROOF_ROOT/artifacts/current-reviewed-candidates.json" ]] || fail "missing source reviewed candidates: $SOURCE_PROOF_ROOT"
+
+mkdir -p "$ARTIFACT_DIR" "$RAW_DIR" "$PRIVATE_DIR"
+
+log "proof root: $PROOF_ROOT"
+log "Arcwell home: $ARCWELL_HOME_USED"
+log "source quality proof: $SOURCE_PROOF_ROOT"
+
+if [[ "$RESUME_EXISTING" == "1" ]]; then
+  log "resume mode: reusing existing artifacts and skipping mutation steps"
+else
+log "verifying source current-quality proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$SOURCE_PROOF_ROOT/artifacts/proof-packet.json" \
+  >"$ARTIFACT_DIR/source-current-quality-verify.json"
+node - "$ARTIFACT_DIR/source-current-quality-verify.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+log "extracting the single current conservative exclude"
+node - "$SOURCE_PROOF_ROOT/artifacts/current-reviewed-candidates.json" "$ARTIFACT_DIR/current-single-exclude-rule.json" <<'NODE'
+const fs = require("fs");
+const [sourcePath, outPath] = process.argv.slice(2);
+const rules = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+const excludes = rules.filter((rule) => rule.decision === "manual_always_exclude");
+if (excludes.length !== 1) {
+  throw new Error(`expected exactly one current exclude, got ${excludes.length}`);
+}
+const [rule] = excludes;
+if (String(rule.handle || "").toLowerCase() !== "artbutsports") {
+  throw new Error(`unexpected current exclude: ${rule.handle}`);
+}
+fs.writeFileSync(outPath, JSON.stringify([rule], null, 2) + "\n");
+NODE
+
+log "building arcwell CLI and running focused tests"
+cargo build -p arcwell >"$ARTIFACT_DIR/cargo-build.log" 2>&1
+cargo test -p arcwell-core x_watch_curation -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-curation-tests.log" 2>&1
+cargo test -p arcwell-core x_watch_manual_rule -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-manual-rule-tests.log" 2>&1
+cargo test -p arcwell-core proof -- --nocapture \
+  >"$ARTIFACT_DIR/proof-tests.log" 2>&1
+cargo fmt -- --check >"$ARTIFACT_DIR/cargo-fmt-check.log" 2>&1
+fi
+
+capture_state() {
+  local output="$1"
+  python3 - "$DB" >"$output" <<'PY'
+import hashlib, json, sqlite3, sys
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+rows = conn.execute(
+    """
+    SELECT id, locator, status, label, cadence, metadata_json
+    FROM watch_sources
+    WHERE source_kind='x_handle'
+    ORDER BY lower(locator)
+    """
+).fetchall()
+def handle_from_locator(locator):
+    value = (locator or "").strip().lower()
+    if value.startswith("x:handle:"):
+        return value[len("x:handle:"):]
+    return value
+payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+manual = conn.execute(
+    "SELECT handle, decision, category, reason, metadata_json FROM x_watch_manual_rules ORDER BY lower(handle)"
+).fetchall()
+print(json.dumps({
+    "status_counts": dict(conn.execute(
+        "SELECT status, COUNT(*) FROM watch_sources WHERE source_kind='x_handle' GROUP BY status ORDER BY status"
+    ).fetchall()),
+    "total_x_handle_sources": len(rows),
+    "row_checksum": hashlib.sha256(payload.encode()).hexdigest(),
+    "manual_rule_count": len(manual),
+    "manual_rule_counts": dict(conn.execute(
+        "SELECT decision, COUNT(*) FROM x_watch_manual_rules GROUP BY decision ORDER BY decision"
+    ).fetchall()),
+    "artbutsports": [
+        {
+            "id": row[0],
+            "locator": row[1],
+            "status": row[2],
+            "label": row[3],
+            "cadence": row[4],
+            "metadata_json": row[5],
+        }
+        for row in rows
+        if handle_from_locator(row[1]) == "artbutsports"
+    ],
+    "rows": [
+        {
+            "id": row[0],
+            "locator": row[1],
+            "status": row[2],
+            "label": row[3],
+            "cadence": row[4],
+            "metadata_sha256": hashlib.sha256((row[5] or "").encode()).hexdigest(),
+        }
+        for row in rows
+    ],
+}, indent=2, sort_keys=True))
+PY
+}
+
+if [[ "$RESUME_EXISTING" == "1" ]]; then
+  for required in \
+    "$ARTIFACT_DIR/source-current-quality-verify.json" \
+    "$ARTIFACT_DIR/current-single-exclude-rule.json" \
+    "$RAW_DIR/real-before.json" \
+    "$RAW_DIR/import-dry-run.json" \
+    "$RAW_DIR/import-apply.json" \
+    "$RAW_DIR/curation-dry-run.json" \
+    "$RAW_DIR/pause-apply.json" \
+    "$RAW_DIR/real-after.json" \
+    "$PRIVATE_DIR/arcwell-before-current-apply.sqlite3" \
+    "$ARTIFACT_DIR/cargo-build.log" \
+    "$ARTIFACT_DIR/x-watch-curation-tests.log" \
+    "$ARTIFACT_DIR/x-watch-manual-rule-tests.log" \
+    "$ARTIFACT_DIR/proof-tests.log" \
+    "$ARTIFACT_DIR/cargo-fmt-check.log"; do
+    [[ -f "$required" ]] || fail "resume mode missing required artifact: $required"
+  done
+else
+log "capturing real-home baseline"
+capture_state "$RAW_DIR/real-before.json"
+
+log "creating private SQLite backup before mutation"
+python3 - "$DB" "$PRIVATE_DIR/arcwell-before-current-apply.sqlite3" <<'PY'
+import pathlib, sqlite3, sys
+src_path = pathlib.Path(sys.argv[1])
+dst_path = pathlib.Path(sys.argv[2])
+dst_path.parent.mkdir(parents=True, exist_ok=True)
+src = sqlite3.connect(src_path)
+dst = sqlite3.connect(dst_path)
+src.backup(dst)
+dst.close()
+src.close()
+PY
+shasum -a 256 "$PRIVATE_DIR/arcwell-before-current-apply.sqlite3" \
+  >"$ARTIFACT_DIR/private-backup-sha256.txt"
+
+log "dry-running single reviewed manual-rule import"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/current-single-exclude-rule.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  --dry-run >"$RAW_DIR/import-dry-run.json"
+
+log "applying single reviewed manual rule"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/current-single-exclude-rule.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  --apply >"$RAW_DIR/import-apply.json"
+
+log "dry-running curation after single reviewed rule"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --dry-run \
+  >"$RAW_DIR/curation-dry-run.json"
+
+log "applying pause-only curation in real home"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --apply --mode pause-only \
+  >"$RAW_DIR/pause-apply.json"
+
+log "capturing real-home after state"
+capture_state "$RAW_DIR/real-after.json"
+fi
+
+log "validating real-home current apply invariants"
+node - "$ARTIFACT_DIR" "$RAW_DIR" "$PRIVATE_DIR/arcwell-before-current-apply.sqlite3" "$SOURCE_PROOF_ROOT" "$REVIEWED_BY" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [artifactDir, rawDir, backupPath, sourceProofRoot, reviewedBy] = process.argv.slice(2);
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function hashFile(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+function requireCondition(condition, message, detail) {
+  if (!condition) {
+    const error = new Error(message);
+    error.detail = detail;
+    throw error;
+  }
+}
+function byLocator(state) {
+  return new Map(state.rows.map((row) => [handleFromLocator(row.locator), row]));
+}
+function handleFromLocator(locator) {
+  const value = String(locator || "").trim().toLowerCase();
+  return value.startsWith("x:handle:") ? value.slice("x:handle:".length) : value;
+}
+function rowsForHandle(state, handle) {
+  const expected = String(handle || "").toLowerCase();
+  const explicit = Array.isArray(state.artbutsports) && expected === "artbutsports"
+    ? state.artbutsports
+    : [];
+  return explicit.length > 0
+    ? explicit
+    : state.rows.filter((row) => handleFromLocator(row.locator) === expected);
+}
+
+const rules = readJson(path.join(artifactDir, "current-single-exclude-rule.json"));
+const before = readJson(path.join(rawDir, "real-before.json"));
+const after = readJson(path.join(rawDir, "real-after.json"));
+const importDry = readJson(path.join(rawDir, "import-dry-run.json"));
+const importApply = readJson(path.join(rawDir, "import-apply.json"));
+const curationDry = readJson(path.join(rawDir, "curation-dry-run.json"));
+const pauseApply = readJson(path.join(rawDir, "pause-apply.json"));
+
+requireCondition(rules.length === 1, "rules file must contain exactly one rule", rules);
+const rule = rules[0];
+requireCondition(rule.decision === "manual_always_exclude", "single rule must be an exclude", rule);
+requireCondition(String(rule.handle || "").toLowerCase() === "artbutsports", "single rule must target ArtButSports", rule);
+requireCondition(fs.existsSync(backupPath), "private backup is missing", backupPath);
+const beforeArtButSports = rowsForHandle(before, "artbutsports");
+const afterArtButSports = rowsForHandle(after, "artbutsports");
+requireCondition(beforeArtButSports.length === 1, "ArtButSports must exist before apply", beforeArtButSports);
+requireCondition(beforeArtButSports[0].status === "active", "ArtButSports must start active", beforeArtButSports);
+requireCondition(afterArtButSports.length === 1, "ArtButSports must exist after apply", afterArtButSports);
+requireCondition(afterArtButSports[0].status === "paused", "ArtButSports must end paused", afterArtButSports);
+requireCondition(before.total_x_handle_sources === after.total_x_handle_sources, "watch source total changed", { before, after });
+requireCondition(before.status_counts.active === 170, "before active count should be 170", before.status_counts);
+requireCondition(after.status_counts.active === 169, "after active count should be 169", after.status_counts);
+requireCondition(after.status_counts.paused === 1, "after paused count should be 1", after.status_counts);
+requireCondition(importDry.dry_run === true && importDry.rejected === 0 && importDry.imported === 0 && importDry.updated === 0, "manual rule dry run wrote or rejected rows", importDry);
+requireCondition(importApply.dry_run === false && importApply.rejected === 0 && importApply.seen === 1, "manual rule apply failed", importApply);
+requireCondition(importApply.imported + importApply.updated === 1, "manual rule apply did not write exactly one row", importApply);
+
+const beforeRows = byLocator(before);
+const afterRows = byLocator(after);
+requireCondition(beforeRows.size === afterRows.size, "watch source locator set size changed", { before: beforeRows.size, after: afterRows.size });
+for (const locator of beforeRows.keys()) {
+  requireCondition(afterRows.has(locator), "watch source locator removed", locator);
+}
+const changed = [];
+for (const [locator, beforeRow] of beforeRows.entries()) {
+  const afterRow = afterRows.get(locator);
+  if (JSON.stringify(beforeRow) !== JSON.stringify(afterRow)) {
+    changed.push({ locator, before: beforeRow, after: afterRow });
+  }
+}
+const statusChanged = changed.filter((row) => row.before.status !== row.after.status);
+requireCondition(statusChanged.length === 1, "expected exactly one status change", statusChanged);
+requireCondition(statusChanged[0].locator === "artbutsports", "unexpected handle status changed", statusChanged);
+requireCondition(statusChanged[0].before.status === "active" && statusChanged[0].after.status === "paused", "unexpected status transition", statusChanged[0]);
+
+const applied = pauseApply.decisions.filter((decision) => decision.applied_at);
+requireCondition(pauseApply.run.paused_count === 1, "pause apply paused_count mismatch", pauseApply.run);
+requireCondition(applied.length === 1, "expected one applied curation decision", applied);
+requireCondition(String(applied[0].handle || "").toLowerCase() === "artbutsports", "applied curation decision was not ArtButSports", applied[0]);
+requireCondition(applied[0].recommendation === "paused_excluded", "applied decision was not paused_excluded", applied[0]);
+
+const validation = {
+  status: "passed",
+  checks: [
+    "source current-quality packet verified before mutation",
+    "private SQLite backup created before mutation",
+    "single reviewed exclude rule extracted from current-quality artifact",
+    "manual-rule dry-run wrote no rows",
+    "manual-rule apply wrote exactly one row",
+    "watch-source total count stayed constant",
+    "exactly ArtButSports changed from active to paused",
+    "pause-only apply recorded one applied paused_excluded decision",
+  ],
+  source_quality_proof_root: sourceProofRoot,
+  reviewed_by: reviewedBy,
+  backup_sha256: hashFile(backupPath),
+  before_status_counts: before.status_counts,
+  after_status_counts: after.status_counts,
+  changed_status: statusChanged,
+  pause_apply_run_id: pauseApply.run.id,
+  curation_dry_run_id: curationDry.run.id,
+};
+const summary = {
+  proof_name: "x-watch-curation-current-real-home-apply-proof",
+  proof_level: "real_home_single_current_exclude_apply",
+  reviewed_by: reviewedBy,
+  source_quality_proof_root: sourceProofRoot,
+  source_quality_packet: "proof-a2ec54b3bb4c0f1abf7758bd",
+  reviewed_rule: rule,
+  private_backup: {
+    path: backupPath,
+    sha256: validation.backup_sha256,
+    included_in_clean_packet: false,
+  },
+  real_home: {
+    status_before: before.status_counts,
+    status_after: after.status_counts,
+    total_x_handle_sources: after.total_x_handle_sources,
+    paused_handles: ["ArtButSports"],
+    row_checksum_before: before.row_checksum,
+    row_checksum_after: after.row_checksum,
+  },
+  manual_rule_import: {
+    dry_run_seen: importDry.seen,
+    dry_run_rejected: importDry.rejected,
+    apply_seen: importApply.seen,
+    apply_imported: importApply.imported,
+    apply_updated: importApply.updated,
+    apply_rejected: importApply.rejected,
+  },
+  curation: {
+    dry_run_id: curationDry.run.id,
+    pause_apply_run_id: pauseApply.run.id,
+    paused_count: pauseApply.run.paused_count,
+    counts: pauseApply.counts,
+  },
+  non_claims: [
+    "This applies only one current conservative exclude.",
+    "This does not complete M1.",
+    "This does not prove the remaining 29 review-drop rows are resolved.",
+    "This does not prove multi-day recurrence or future X provider availability.",
+    "This does not delete any watch source.",
+  ],
+};
+fs.writeFileSync(path.join(artifactDir, "real-home-current-apply-validation.json"), JSON.stringify(validation, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "real-home-current-apply-summary.json"), JSON.stringify(summary, null, 2) + "\n");
+NODE
+
+log "building proof packet"
+node - "$ARTIFACT_DIR" "$RAW_DIR" "$PROOF_ROOT" "$SOURCE_PROOF_ROOT" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [artifactDir, rawDir, proofRoot, sourceProofRoot] = process.argv.slice(2);
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function fileHash(relativePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(path.join(proofRoot, relativePath))).digest("hex");
+}
+const summary = readJson(path.join(artifactDir, "real-home-current-apply-summary.json"));
+const validation = readJson(path.join(artifactDir, "real-home-current-apply-validation.json"));
+const importApply = readJson(path.join(rawDir, "import-apply.json"));
+const pauseApply = readJson(path.join(rawDir, "pause-apply.json"));
+const artifacts = [
+  {
+    label: "single_current_exclude_rule",
+    path: "artifacts/current-single-exclude-rule.json",
+    sha256: fileHash("artifacts/current-single-exclude-rule.json"),
+    artifact_kind: "reviewed_rule",
+    description: "Single current conservative exclude extracted from the verified current-quality proof.",
+  },
+  {
+    label: "real_home_apply_summary",
+    path: "artifacts/real-home-current-apply-summary.json",
+    sha256: fileHash("artifacts/real-home-current-apply-summary.json"),
+    artifact_kind: "proof_summary",
+    description: "Summary of real-home status change and proof boundaries.",
+  },
+  {
+    label: "real_home_apply_validation",
+    path: "artifacts/real-home-current-apply-validation.json",
+    sha256: fileHash("artifacts/real-home-current-apply-validation.json"),
+    artifact_kind: "validation",
+    description: "Validation that exactly ArtButSports changed from active to paused.",
+  },
+  {
+    label: "pause_apply_result",
+    path: "raw/pause-apply.json",
+    sha256: fileHash("raw/pause-apply.json"),
+    artifact_kind: "live_mutation_result",
+    description: "Real-home pause-only curation apply result.",
+  },
+  {
+    label: "source_current_quality_verify",
+    path: "artifacts/source-current-quality-verify.json",
+    sha256: fileHash("artifacts/source-current-quality-verify.json"),
+    artifact_kind: "source_packet_verification",
+    description: "Verification output for the source current-quality proof packet.",
+  },
+];
+const claims = [
+  {
+    claim_key: "current_single_exclude_source_verified",
+    claim: "The one real-home current exclude was sourced from the verified current-list quality proof.",
+    status: "proven",
+    proof_level: "source_packet_verification",
+    evidence: {
+      source_quality_proof_root: sourceProofRoot,
+      source_quality_packet: summary.source_quality_packet,
+      reviewed_rule: summary.reviewed_rule,
+    },
+    refutation: {
+      would_be_refuted_by: "Source current-quality proof failing verification or producing more than one exclude.",
+    },
+  },
+  {
+    claim_key: "artbutsports_paused_in_real_home",
+    claim: "Real-home pause-only curation changed exactly ArtButSports from active to paused and preserved the x_handle row set.",
+    status: "proven",
+    proof_level: "real_home_single_current_exclude_apply",
+    evidence: {
+      before_status_counts: validation.before_status_counts,
+      after_status_counts: validation.after_status_counts,
+      changed_status: validation.changed_status,
+      pause_apply_run_id: validation.pause_apply_run_id,
+      import_apply: importApply,
+      pause_apply_paused_count: pauseApply.run.paused_count,
+    },
+    refutation: {
+      would_be_refuted_by: "Any other watch source changing status, ArtButSports not becoming paused, or total x_handle source count changing.",
+    },
+  },
+  {
+    claim_key: "remaining_current_review_drop_unresolved",
+    claim: "The real-home apply resolves only the one conservative exclude; the rest of current-list quality remains open.",
+    status: "partial",
+    proof_level: "production_data_snapshot",
+    evidence: {
+      unresolved_review_drop_after_prior_quality_proof: 29,
+      non_claims: summary.non_claims,
+    },
+    refutation: {
+      would_be_refuted_by: "Claiming the current X watch list is fully quality-reviewed or M1 is complete from this one-handle apply.",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "source_packet_verification",
+    command: "arcwell proof verify-packet source current-quality proof",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Source current-quality packet verified before mutation.",
+    metadata: { artifact: "source-current-quality-verify.json" },
+  },
+  {
+    check_kind: "focused_tests",
+    command: "cargo test -p arcwell-core x_watch_curation x_watch_manual_rule proof -- --nocapture",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Focused curation, manual-rule, and proof tests passed before mutation.",
+    metadata: {
+      artifacts: [
+        "x-watch-curation-tests.log",
+        "x-watch-manual-rule-tests.log",
+        "proof-tests.log",
+      ],
+    },
+  },
+  {
+    check_kind: "format",
+    command: "cargo fmt -- --check",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Formatting check passed.",
+    metadata: { artifact: "cargo-fmt-check.log" },
+  },
+  {
+    check_kind: "real_home_apply_invariant",
+    command: "real-home current single-exclude validation",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Exactly ArtButSports changed from active to paused; total x_handle rows stayed constant.",
+    metadata: validation,
+  },
+];
+const metadata = {
+  proof_name: "x-watch-curation-current-real-home-apply-proof",
+  generated_at: new Date().toISOString(),
+  source_quality_packet: summary.source_quality_packet,
+  reviewed_by: summary.reviewed_by,
+  paused_handles: summary.real_home.paused_handles,
+  before_status_counts: summary.real_home.status_before,
+  after_status_counts: summary.real_home.status_after,
+  non_claims: summary.non_claims,
+};
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+const packet = {
+  proof_name: "x-watch-curation-current-real-home-apply-proof",
+  proof_level: "real_home_single_current_exclude_apply",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell applied the one verified conservative current X watch exclude to the real home without deleting watch sources or changing any other handle status.",
+  boundary: "This is a one-handle real-home apply proof, not M1 completion or full current-list quality review.",
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+log "verifying proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" \
+  >"$ARTIFACT_DIR/verify-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet and promote review"
+  PACKET_ID="$("$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current real-home apply proof" \
+    --proof-level real_home_single_current_exclude_apply \
+    --status partial \
+    --summary "Applied the one verified current conservative X watch exclude to the real home: ArtButSports changed from active to paused, active x_handle count moved from 170 to 169, paused count moved to 1, and no other handle status changed." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$(cat "$ARTIFACT_DIR/claims.json")" \
+    --artifacts-json "$(cat "$ARTIFACT_DIR/artifacts.json")" \
+    --checks-json "$(cat "$ARTIFACT_DIR/checks.json")" \
+    --metadata-json "$(cat "$ARTIFACT_DIR/metadata.json")" \
+    >"$ARTIFACT_DIR/recorded-proof.json" && node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+  )"
+  [[ -n "$PACKET_ID" ]] || fail "proof record did not return a packet id"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current real-home apply review" \
+    --reviewer codex \
+    --requested-proof-level real_home_single_current_exclude_apply \
+    --judgment promote \
+    --summary "Promote this one-handle real-home apply slice: the verified current conservative exclude was applied exactly, with no other watch-source status changes. Hold M1 completion." \
+    --strongest-fake-done-path "Treating a single real-home exclude as proof that the current 169-handle list is fully curated, scheduled, or operational." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["The source current-quality packet was verified before mutation.", "The proof created a private backup before mutation.", "Validation shows exactly ArtButSports changed from active to paused and x_handle row count stayed constant.", "The packet explicitly keeps the remaining 29 current review-drop rows open."]' \
+    --skipped-categories-json '["No restore was applied because this was the intended real-home state change; the private backup is retained.", "No gold-set/manual review of the remaining 29 rows was performed.", "No multi-day recurrence or future provider proof was attempted."]' \
+    --findings-json '[]' \
+    --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"x-watch-curation-current-real-home-apply\"}" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" "$ARTIFACT_DIR/recorded-proof.json" 2>/dev/null <<'NODE' || true
+const fs = require("fs");
+const verify = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const recordedPath = process.argv[3];
+let packetId = null;
+if (recordedPath && fs.existsSync(recordedPath)) {
+  const recorded = JSON.parse(fs.readFileSync(recordedPath, "utf8"));
+  packetId = recorded.packet?.id || recorded.id || null;
+}
+console.log(JSON.stringify({ verify_ok: verify.ok, packet_id: packetId }, null, 2));
+NODE

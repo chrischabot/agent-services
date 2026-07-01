@@ -1998,6 +1998,65 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
             ],
         ),
         tool(
+            "x_curate_watch_sources",
+            "Run the local X watch-source curation classifier and record a durable decision ledger. Default mode is dry-run; pause-only applies only reviewed manual_always_exclude decisions after restore snapshots.",
+            [(
+                "mode",
+                "string",
+                "Optional mode: dry-run or pause-only. Defaults to dry-run.",
+            )],
+        ),
+        tool(
+            "x_watch_curation_report",
+            "Read the latest or selected X watch-source curation run, including counts, decisions, evidence, and non-claims.",
+            [(
+                "run_id",
+                "string",
+                "Optional curation run id. Omit to read the latest run.",
+            )],
+        ),
+        tool(
+            "x_restore_watch_curation",
+            "Restore watch-source status, label, cadence, and metadata from a prior X watch curation run's restore snapshots.",
+            [("run_id", "string", "Curation run id to restore.")],
+        ),
+        tool_with_schema(
+            "x_import_watch_manual_rules",
+            "Import reviewed X watch curation manual rules. Dry-run by default; apply=true writes reviewed keep, exclude, or needs-evidence rules after validating every row.",
+            json!({
+                "rules": array_schema(
+                    "Reviewed manual rules to import.",
+                    object_schema(
+                        "One reviewed X watch curation manual rule.",
+                        json!({
+                            "handle": string_schema("Existing X watch-source handle."),
+                            "decision": string_schema("manual_always_keep, manual_always_exclude, or manual_needs_evidence."),
+                            "category": string_schema("Reviewed category, such as ai_devrel, platform_engineering, off_topic, or zero_evidence."),
+                            "reason": string_schema("Human-reviewed reason. Required and stored as audit evidence."),
+                            "metadata": object_schema("Optional metadata for review provenance.", json!({}), &[]),
+                        }),
+                        &["handle", "decision", "category", "reason"],
+                    ),
+                ),
+                "reviewed_by": string_schema("Reviewer id or operator name."),
+                "apply": boolean_schema("Set true to write rules. Defaults to false/dry-run."),
+            }),
+            &["rules", "reviewed_by"],
+        ),
+        tool(
+            "x_enrich_watch_profiles",
+            "Fetch live X profile identity evidence for explicit handles or the latest needs_profile_enrichment curation decisions, then write canonical profiles, source-health, and sync-run rows.",
+            [
+                (
+                    "run_id",
+                    "string",
+                    "Optional curation run id to pull needs_profile_enrichment handles from.",
+                ),
+                ("handles", "array", "Optional explicit handles to enrich."),
+                ("limit", "integer", "Maximum profiles to enrich."),
+            ],
+        ),
+        tool(
             "x_monitor_watch_sources",
             "Poll the definitive X watch-source list, ingest new watched-source tweets as source cards, and create digest candidates.",
             [

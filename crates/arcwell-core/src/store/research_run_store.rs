@@ -58,6 +58,8 @@ impl Store {
             knowledge_reports: self.list_knowledge_reports(50)?,
             x_knowledge_clusters: self.list_x_knowledge_clusters(50)?,
             x_editorial_decisions: self.list_x_editorial_decisions(50)?,
+            x_watch_curation_report: self.latest_x_watch_curation_report()?,
+            research_runs: self.list_research_runs()?.into_iter().take(50).collect(),
             jobs: self.list_wiki_jobs()?,
             edge_events: self.list_edge_events()?,
             cursors: self.list_cursors()?,
@@ -371,7 +373,7 @@ impl Store {
             let latest_sent_delivery_proof =
                 self.issue_schedule_tick_delivery_proof(latest_sent_tick)?;
             let has_active_job = self.issue_schedule_has_active_job(&schedule.id)?;
-            let due_slots = if schedule.status == "active" {
+            let due_slots = if schedule.status == "active" && !has_active_job {
                 self.issue_schedule_due_slots(&schedule, now_utc)?
             } else {
                 Vec::new()

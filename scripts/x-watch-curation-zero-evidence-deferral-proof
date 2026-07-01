@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+PROOF_ROOT="${ARCWELL_X_WATCH_ZERO_EVIDENCE_DEFERRAL_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-zero-evidence-deferral-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+RAW_DIR="$PROOF_ROOT/raw"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+REVIEWED_BY="${ARCWELL_X_WATCH_DEFERRAL_REVIEWED_BY:-codex-x-watch-curation-zero-evidence-deferral-proof}"
+RECORD="${ARCWELL_PROOF_RECORD:-1}"
+
+log() {
+  printf '[x-watch-curation-zero-evidence-deferral-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-zero-evidence-deferral-proof] BLOCKED: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$DB" ]] || fail "Arcwell DB does not exist: $DB"
+mkdir -p "$ARTIFACT_DIR" "$RAW_DIR"
+
+log "proof root: $PROOF_ROOT"
+log "Arcwell home: $ARCWELL_HOME_USED"
+
+log "building CLI and running focused tests"
+cargo build -p arcwell >"$ARTIFACT_DIR/cargo-build.log" 2>&1
+cargo test -p arcwell-core x_watch_manual_rule -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-manual-rule-tests.log" 2>&1
+cargo test -p arcwell-core x_watch_curation -- --nocapture \
+  >"$ARTIFACT_DIR/x-watch-curation-tests.log" 2>&1
+cargo fmt -- --check >"$ARTIFACT_DIR/cargo-fmt-check.log" 2>&1
+
+[[ -x "$ARCWELL_BIN" ]] || fail "Arcwell binary is not executable: $ARCWELL_BIN"
+
+capture_state() {
+  local output="$1"
+  python3 - "$DB" >"$output" <<'PY'
+import hashlib, json, sqlite3, sys
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+conn.row_factory = sqlite3.Row
+rows = conn.execute(
+    """
+    SELECT id, locator, status, label, cadence, metadata_json
+    FROM watch_sources
+    WHERE source_kind='x_handle'
+    ORDER BY lower(locator)
+    """
+).fetchall()
+payload = json.dumps([tuple(row) for row in rows], sort_keys=True, separators=(",", ":"))
+manual = conn.execute(
+    """
+    SELECT handle, decision, category, reason, metadata_json, updated_at
+    FROM x_watch_manual_rules
+    WHERE lower(handle)='earendil'
+    """
+).fetchone()
+source = conn.execute(
+    """
+    SELECT id, locator, status, label, cadence, metadata_json
+    FROM watch_sources
+    WHERE source_kind='x_handle'
+      AND lower(replace(locator,'x:handle:',''))='earendil'
+    """
+).fetchone()
+print(json.dumps({
+    "status_counts": dict(conn.execute(
+        "SELECT status, COUNT(*) FROM watch_sources WHERE source_kind='x_handle' GROUP BY status ORDER BY status"
+    ).fetchall()),
+    "total_x_handle_sources": len(rows),
+    "row_checksum": hashlib.sha256(payload.encode()).hexdigest(),
+    "earendil_source": dict(source) if source else None,
+    "earendil_manual_rule": dict(manual) if manual else None,
+}, indent=2, sort_keys=True))
+PY
+}
+
+log "capturing baseline state"
+capture_state "$RAW_DIR/real-before.json"
+
+log "writing reviewed zero-evidence deferral rule"
+python3 - "$ARTIFACT_DIR/earendil-deferral-rule.json" "$REVIEWED_BY" <<'PY'
+import json, sys
+out, reviewed_by = sys.argv[1], sys.argv[2]
+rules = [{
+    "handle": "Earendil",
+    "decision": "manual_needs_evidence",
+    "category": "zero_evidence",
+    "reason": "Manual zero-evidence review: live profile enrichment found a blank profile and the local corpus has no authored tweets, bookmarks, or positive/negative technical evidence; keep active for future evidence instead of pausing from absence.",
+    "metadata": {
+        "reviewed_by": reviewed_by,
+        "source": "x-watch-curation-zero-evidence-deferral-proof",
+        "review_scope": "current-list-zero-evidence",
+        "non_claim": "This is not a keep or exclude decision; it records deliberate deferral until stronger evidence exists."
+    }
+}]
+open(out, "w").write(json.dumps(rules, indent=2, sort_keys=True) + "\n")
+PY
+
+log "dry-running manual-rule import"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/earendil-deferral-rule.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  >"$RAW_DIR/manual-rule-dry-run.json"
+
+log "applying manual-rule import"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x import-watch-manual-rules \
+  --path "$ARTIFACT_DIR/earendil-deferral-rule.json" \
+  --reviewed-by "$REVIEWED_BY" \
+  --apply \
+  >"$RAW_DIR/manual-rule-apply.json"
+
+log "running dry-run curation"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --dry-run \
+  >"$RAW_DIR/curation-dry-run.json"
+
+log "running pause-only curation to prove deferral is non-destructive"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x curate-watch-sources --apply --mode pause-only \
+  >"$RAW_DIR/curation-pause-only.json"
+
+log "capturing final state"
+capture_state "$RAW_DIR/real-after.json"
+
+log "validating deferral proof"
+python3 - "$DB" "$RAW_DIR" "$ARTIFACT_DIR/current-zero-evidence-deferral-validation.json" <<'PY'
+import json, sqlite3, sys
+db, raw_dir, out = sys.argv[1], sys.argv[2], sys.argv[3]
+def read(name):
+    return json.load(open(f"{raw_dir}/{name}"))
+before = read("real-before.json")
+after = read("real-after.json")
+dry_import = read("manual-rule-dry-run.json")
+apply_import = read("manual-rule-apply.json")
+dry = read("curation-dry-run.json")
+pause = read("curation-pause-only.json")
+conn = sqlite3.connect(db)
+conn.row_factory = sqlite3.Row
+errors = []
+if before["status_counts"] != after["status_counts"]:
+    errors.append(f"status counts changed: before={before['status_counts']} after={after['status_counts']}")
+if before["total_x_handle_sources"] != after["total_x_handle_sources"]:
+    errors.append("x_handle total changed")
+if dry_import.get("rejected") != 0:
+    errors.append(f"dry import rejected rows: {dry_import.get('rejected')}")
+if apply_import.get("rejected") != 0:
+    errors.append(f"apply import rejected rows: {apply_import.get('rejected')}")
+if apply_import.get("imported", 0) + apply_import.get("updated", 0) != 1:
+    errors.append(f"expected exactly one imported or updated deferral rule: {apply_import}")
+manual = after.get("earendil_manual_rule")
+if not manual or manual.get("decision") != "manual_needs_evidence":
+    errors.append(f"Earendil manual rule is not manual_needs_evidence: {manual}")
+source = after.get("earendil_source")
+if not source or source.get("status") != "active":
+    errors.append(f"Earendil source is not active after pause-only: {source}")
+dry_decisions = [d for d in dry.get("decisions", []) if d.get("handle", "").lower().endswith("earendil")]
+if len(dry_decisions) != 1:
+    errors.append(f"expected one dry-run Earendil decision, got {len(dry_decisions)}")
+else:
+    d = dry_decisions[0]
+    if d.get("recommendation") != "needs_evidence":
+        errors.append(f"dry-run Earendil recommendation was not needs_evidence: {d.get('recommendation')}")
+    if d.get("proposed_status") != "active":
+        errors.append(f"dry-run Earendil proposed_status was not active: {d.get('proposed_status')}")
+pause_decisions = [d for d in pause.get("decisions", []) if d.get("handle", "").lower().endswith("earendil")]
+if len(pause_decisions) != 1:
+    errors.append(f"expected one pause-only Earendil decision, got {len(pause_decisions)}")
+else:
+    d = pause_decisions[0]
+    if d.get("recommendation") != "needs_evidence":
+        errors.append(f"pause-only Earendil recommendation was not needs_evidence: {d.get('recommendation')}")
+    if d.get("applied_at") is not None:
+        errors.append("pause-only Earendil decision unexpectedly has applied_at")
+snapshot_count = conn.execute(
+    """
+    SELECT COUNT(*)
+    FROM x_watch_restore_snapshots s
+    JOIN watch_sources w ON w.id=s.watch_source_id
+    WHERE s.run_id=?1
+      AND lower(replace(w.locator,'x:handle:',''))='earendil'
+    """,
+    (pause["run"]["id"],),
+).fetchone()[0]
+if snapshot_count != 0:
+    errors.append(f"Earendil had restore snapshots in pause run: {snapshot_count}")
+validation = {
+    "ok": not errors,
+    "errors": errors,
+    "before_status_counts": before["status_counts"],
+    "after_status_counts": after["status_counts"],
+    "before_total_x_handle_sources": before["total_x_handle_sources"],
+    "after_total_x_handle_sources": after["total_x_handle_sources"],
+    "manual_rule_imported": apply_import.get("imported", 0),
+    "manual_rule_updated": apply_import.get("updated", 0),
+    "dry_run_id": dry["run"]["id"],
+    "pause_only_run_id": pause["run"]["id"],
+    "pause_only_paused_count": pause["run"].get("paused_count"),
+    "earendil_recommendation": pause_decisions[0].get("recommendation") if pause_decisions else None,
+    "earendil_status_after": source.get("status") if source else None,
+    "earendil_restore_snapshot_count": snapshot_count,
+}
+open(out, "w").write(json.dumps(validation, indent=2, sort_keys=True) + "\n")
+if errors:
+    print(json.dumps(validation, indent=2, sort_keys=True))
+    raise SystemExit(1)
+PY
+
+node - "$PROOF_ROOT" "$ARTIFACT_DIR" "$RAW_DIR" <<'NODE' >"$ARTIFACT_DIR/proof-record-inputs.json"
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const [proofRoot, artifactDir, rawDir] = process.argv.slice(2);
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function fileHash(relativePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(path.join(proofRoot, relativePath))).digest("hex");
+}
+const validation = readJson(path.join(artifactDir, "current-zero-evidence-deferral-validation.json"));
+const artifacts = [
+  ["earendil_deferral_rule", "artifacts/earendil-deferral-rule.json", "reviewed_rule"],
+  ["deferral_validation", "artifacts/current-zero-evidence-deferral-validation.json", "validation"],
+  ["manual_rule_apply", "raw/manual-rule-apply.json", "live_mutation_result"],
+  ["curation_pause_only", "raw/curation-pause-only.json", "curation_run"],
+  ["real_before", "raw/real-before.json", "state_before"],
+  ["real_after", "raw/real-after.json", "state_after"],
+].map(([label, artifactPath, artifactKind]) => ({
+  label,
+  path: artifactPath,
+  sha256: fileHash(artifactPath),
+  artifact_kind: artifactKind,
+  description: `${label} for X watch zero-evidence deferral proof.`,
+}));
+const claims = [
+  {
+    claim_key: "earendil_zero_evidence_is_explicitly_deferred",
+    claim: "Earendil is no longer an unresolved loose review-drop row; it has a reviewed manual_needs_evidence rule and curation emits needs_evidence.",
+    status: "proven",
+    proof_level: "real_home_reviewed_deferral",
+    evidence: {
+      recommendation: validation.earendil_recommendation,
+      manual_rule_imported: validation.manual_rule_imported,
+      manual_rule_updated: validation.manual_rule_updated,
+      dry_run_id: validation.dry_run_id,
+    },
+    refutation: {
+      would_be_refuted_by: "Earendil still appearing as review_drop_leaning after the reviewed rule import.",
+    },
+  },
+  {
+    claim_key: "zero_evidence_deferral_is_non_destructive",
+    claim: "The zero-evidence deferral kept Earendil active and did not change real-home x_handle status counts.",
+    status: "proven",
+    proof_level: "real_home_pause_only_non_destructive",
+    evidence: {
+      before_status_counts: validation.before_status_counts,
+      after_status_counts: validation.after_status_counts,
+      before_total_x_handle_sources: validation.before_total_x_handle_sources,
+      after_total_x_handle_sources: validation.after_total_x_handle_sources,
+      pause_only_run_id: validation.pause_only_run_id,
+      earendil_restore_snapshot_count: validation.earendil_restore_snapshot_count,
+    },
+    refutation: {
+      would_be_refuted_by: "Any x_handle count change, Earendil becoming paused, or a restore snapshot being written for Earendil.",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "focused_tests",
+    command: "cargo test -p arcwell-core x_watch_manual_rule x_watch_curation -- --nocapture",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Focused curation and manual-rule tests passed, including manual_needs_evidence.",
+    metadata: {},
+  },
+  {
+    check_kind: "format",
+    command: "cargo fmt -- --check",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Formatting check passed.",
+    metadata: {},
+  },
+  {
+    check_kind: "real_home_validation",
+    command: "scripts/x-watch-curation-zero-evidence-deferral-proof validation",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Earendil emitted needs_evidence, stayed active, and x_handle counts stayed stable.",
+    metadata: validation,
+  },
+];
+const metadata = {
+  capability: "x_watch_curation_zero_evidence_deferral",
+  real_home: true,
+  non_claims: [
+    "This is not a keep or exclude decision for Earendil.",
+    "This does not complete M1, prove gold-set classifier quality, or prove multi-day recurrence.",
+    "This does not perform live provider search for Earendil beyond the already recorded policy-deferred attempt."
+  ],
+};
+process.stdout.write(JSON.stringify({ artifacts, claims, checks, metadata }, null, 2));
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording proof packet"
+  CLAIMS_JSON="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(JSON.stringify(p.claims));' "$ARTIFACT_DIR/proof-record-inputs.json")"
+  ARTIFACTS_JSON="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(JSON.stringify(p.artifacts));' "$ARTIFACT_DIR/proof-record-inputs.json")"
+  CHECKS_JSON="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(JSON.stringify(p.checks));' "$ARTIFACT_DIR/proof-record-inputs.json")"
+  METADATA_JSON="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(JSON.stringify(p.metadata));' "$ARTIFACT_DIR/proof-record-inputs.json")"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope "x_watch_curation" \
+    --title "X watch zero-evidence deferral" \
+    --proof-level "real_home_reviewed_deferral" \
+    --status "partial" \
+    --summary "Imported a reviewed manual_needs_evidence rule for Earendil, proved curation now emits needs_evidence, and proved pause-only curation did not pause Earendil or change x_handle status counts." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer "$REVIEWED_BY" \
+    --claims-json "$CLAIMS_JSON" \
+    --artifacts-json "$ARTIFACTS_JSON" \
+    --checks-json "$CHECKS_JSON" \
+    --metadata-json "$METADATA_JSON" \
+    >"$ARTIFACT_DIR/recorded-proof.json"
+  PACKET_ID="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(p.id || p.packet_id || (p.packet && p.packet.id) || "");' "$ARTIFACT_DIR/recorded-proof.json")"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope "x_watch_curation" \
+    --title "Adversarial review: X watch zero-evidence deferral" \
+    --reviewer "$REVIEWED_BY" \
+    --requested-proof-level "real_home_reviewed_deferral" \
+    --judgment "promote" \
+    --summary "Promote the narrow deferral slice: the proof resolves Earendil as explicit needs-evidence without claiming it is keep/drop evidence or completing M1." \
+    --strongest-fake-done-path "Claiming the current X watch curation milestone is complete because Earendil no longer appears as review_drop_leaning." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["The proof records needs_evidence, not keep or paused_excluded.", "The proof validates x_handle status counts before and after pause-only curation.", "The proof non-claims preserve gold-set, ops, MCP/slash, recurrence, and provider-proof gaps."]' \
+    --skipped-categories-json '["No live provider search was performed because provider.network was previously policy-deferred for from:Earendil.", "No broad gold-set classifier review was attempted.", "No multi-day recurrence proof was attempted."]' \
+    --findings-json '[]' \
+    --metadata-json "$METADATA_JSON" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "proof complete"
+log "validation: $ARTIFACT_DIR/current-zero-evidence-deferral-validation.json"

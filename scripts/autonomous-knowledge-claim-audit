@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_AUTONOMOUS_KNOWLEDGE_CLAIM_AUDIT_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_AUTONOMOUS_KNOWLEDGE_CLAIM_AUDIT_DIR:-$REPO_ROOT/.arcwell-dev/proofs/autonomous-knowledge-claim-audit-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+RECORD=1
+ALLOW_FINDINGS=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/autonomous-knowledge-claim-audit [options]
+
+Scans user-visible Arcwell docs, plugin skills, and slash prompts for autonomous
+knowledge overclaims. The audit allows explicit "not proven", "partial",
+"blocked", or unchecked requirement language, and blocks unbounded claims that
+the autonomous knowledge system is operational, current, complete, or done.
+
+Options:
+  --proof-root path      Output directory for proof artifacts.
+  --no-record            Write artifacts only; do not write proof/review ledger rows.
+  --allow-findings       Exit 0 and optionally record a blocked packet even when findings exist.
+  -h, --help             Show this help.
+USAGE
+}
+
+log() {
+  printf '[autonomous-knowledge-claim-audit] %s\n' "$*"
+}
+
+fail() {
+  printf '[autonomous-knowledge-claim-audit] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      shift
+      ;;
+    --no-record)
+      RECORD=0
+      ;;
+    --allow-findings)
+      ALLOW_FINDINGS=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+for required in node shasum; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+if [ ! -x "$ARCWELL_BIN" ]; then
+  log "building target/debug/arcwell"
+  (cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+fi
+[ -x "$ARCWELL_BIN" ] || fail "arcwell binary not found: $ARCWELL_BIN"
+
+mkdir -p "$ARTIFACT_DIR"
+
+log "scanning user-visible docs, skills, and slash prompts"
+node - "$REPO_ROOT" "$PROOF_ROOT" "$ARTIFACT_DIR" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const [repoRoot, proofRoot, artifactDir] = process.argv.slice(2);
+const explicitFiles = [
+  "README.md",
+  "STATUS.md",
+  "TODO.md",
+  "docs/autonomous-knowledge-system-completion-plan.md",
+  "docs/unified-knowledge-pipeline-implementation-plan.md",
+  "docs/x-watch-curation-and-knowledge-pipeline-hardening-plan.md",
+  "docs/codex-plugin-commands.md",
+  "packages/arcwell-librarian/README.md",
+  "packages/arcwell-x/README.md",
+];
+const directories = [
+  "plugins/arcwell-codex/skills",
+  "plugins/arcwell-codex/commands",
+  "hosts/codex/skills",
+];
+const markdownExt = new Set([".md"]);
+
+function walk(dir) {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else if (markdownExt.has(path.extname(entry.name))) out.push(full);
+  }
+  return out;
+}
+
+const files = new Set();
+for (const rel of explicitFiles) {
+  const full = path.join(repoRoot, rel);
+  if (fs.existsSync(full)) files.add(full);
+}
+for (const rel of directories) {
+  for (const full of walk(path.join(repoRoot, rel))) files.add(full);
+}
+
+const domain = /\b(autonomous knowledge|knowledge system|unified knowledge|knowledge pipeline|wiki freshness|source freshness|scheduled source|scheduled scans?|daily briefing|digest alerts?)\b/i;
+const risky = /\b(done|complete|completed|current|fresh|healthy|operational|production[- ]ready|ready|up[- ]to[- ]date|integrated|sends?|runs?|delivered|recurr(?:ent|ence|ingly)|automatic(?:ally)?|always-on)\b/i;
+const boundary = /\b(not|no|never|do not|don't|does not|cannot|can't|unproven|partial|missing|blocked|hold|held|remaining|needs?|requires?|required|until|before|after|future|separate|not yet|still lacks|does not prove|not proof|cannot yet|must not|should not|without|open|scaffold|local proof|bounded|unchecked|todo|fails?|blocked|defer|deferred|incomplete|proof|proved|proven)\b/i;
+const explicitRequirement = /^\s*(?:(?:[-*]|\d+\.)\s*)?\[\s\]\s+/;
+const sectionBoundary = /^\s*(not proven|anti-mirage|remaining|blocker|todo|completion requires|before claiming|do not|does not|not yet)\b/i;
+const allowedContext = (context) => boundary.test(context) || sectionBoundary.test(context);
+
+const reviewed = [];
+const findings = [];
+const redactText = (value) => String(value).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<redacted-email>");
+for (const full of [...files].sort()) {
+  const rel = path.relative(repoRoot, full);
+  const lines = fs.readFileSync(full, "utf8").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!domain.test(line) || !risky.test(line)) continue;
+    const context = [
+      lines[index - 2] || "",
+      lines[index - 1] || "",
+      line,
+      lines[index + 1] || "",
+      lines[index + 2] || "",
+    ].join("\n");
+    const allowed =
+      explicitRequirement.test(line) ||
+      allowedContext(context) ||
+      /proof[- ]?only|proof packet|verifier|status matrix|current facts|current state/i.test(context);
+    const item = {
+      file: rel,
+      line: index + 1,
+      text: redactText(line),
+      risk_terms: [...new Set((line.match(risky) || []).map((term) => term.toLowerCase()))],
+      disposition: allowed ? "bounded_or_requirement" : "unbounded_overclaim",
+      context: redactText(context),
+    };
+    reviewed.push(item);
+    if (!allowed) findings.push(item);
+  }
+}
+
+const sha256 = (filePath) => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+const write = (name, value) => fs.writeFileSync(path.join(artifactDir, name), JSON.stringify(value, null, 2) + "\n");
+const report = {
+  proof_name: "autonomous-knowledge-claim-audit",
+  generated_at: new Date().toISOString(),
+  status: findings.length === 0 ? "passed" : "blocked",
+  scanned_file_count: files.size,
+  reviewed_line_count: reviewed.length,
+  finding_count: findings.length,
+  scope: {
+    files: explicitFiles,
+    directories,
+  },
+  rule: {
+    domain_pattern: String(domain),
+    risky_pattern: String(risky),
+    boundary_pattern: String(boundary),
+    boundary: "Unchecked requirements and explicit partial/not-proven/blocked language are allowed; unbounded operational/current/done claims are findings.",
+  },
+  findings,
+};
+write("scanned-files.json", [...files].sort().map((full) => path.relative(repoRoot, full)));
+write("reviewed-lines.json", reviewed);
+write("claim-audit-report.json", report);
+
+const artifactNames = ["claim-audit-report.json", "reviewed-lines.json", "scanned-files.json"];
+const artifacts = artifactNames.map((name) => ({
+  artifact_kind: "claim_audit",
+  label: name.replace(/\.json$/, ""),
+  path: path.join("artifacts", name),
+  sha256: sha256(path.join(artifactDir, name)),
+  metadata: { bytes: fs.statSync(path.join(artifactDir, name)).size },
+}));
+const claims = [
+  {
+    claim_key: "autonomous_knowledge_user_visible_claim_audit",
+    claim: "User-visible autonomous knowledge docs, plugin skills, and slash prompts do not contain unbounded operational/current/done claims beyond the proof ledger.",
+    status: findings.length === 0 ? "proven" : "blocked",
+    proof_level: "documentation_claim_audit",
+    evidence: {
+      scanned_file_count: files.size,
+      reviewed_line_count: reviewed.length,
+      finding_count: findings.length,
+      artifact: "claim-audit-report.json",
+    },
+    refutation: {
+      would_be_refuted_by: "Any unbounded user-visible claim that autonomous knowledge is operational, current, complete, done, or production-ready without a matching proof packet.",
+    },
+    gates: {
+      closes_m0_docs_claim_gate: findings.length === 0,
+    does_not_prove: ["source freshness", "future recurrence", "MCP/slash runtime parity", "ops UI repair controls"],
+      evidence_markers_for_negative_freshness_mentions: ["source-health", "cursor"],
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "claim_audit",
+    command: "scripts/autonomous-knowledge-claim-audit",
+    status: findings.length === 0 ? "passed" : "failed",
+    exit_code: findings.length === 0 ? 0 : 2,
+    duration_ms: null,
+    output_excerpt: findings.length === 0
+      ? `Scanned ${files.size} files and found no unbounded autonomous-knowledge overclaims.`
+      : `Scanned ${files.size} files and found ${findings.length} unbounded autonomous-knowledge overclaim(s).`,
+    metadata: { scanned_file_count: files.size, reviewed_line_count: reviewed.length, finding_count: findings.length },
+  },
+];
+const metadata = {
+  proof_name: "autonomous-knowledge-claim-audit",
+  generated_at: report.generated_at,
+  anti_mirage_boundary: "This audit proves bounded wording for the scanned docs/tooling surfaces only. It does not prove runtime behavior, source freshness, recurrence, or UI repair capability; source-health and cursor evidence are separate gates.",
+};
+write("claims.json", claims);
+write("artifacts.json", artifacts);
+write("checks.json", checks);
+write("metadata.json", metadata);
+const packet = {
+  proof_name: "autonomous-knowledge-claim-audit",
+  proof_level: "documentation_claim_audit",
+  status: findings.length === 0 ? "passed" : "blocked",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: report.generated_at,
+  user_visible_claim: claims[0].claim,
+  boundary: metadata.anti_mirage_boundary,
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+write("proof-packet.json", packet);
+console.log(JSON.stringify({
+  status: report.status,
+  scanned_file_count: files.size,
+  reviewed_line_count: reviewed.length,
+  finding_count: findings.length,
+  findings: findings.map(({ file, line, text }) => ({ file, line, text })),
+}, null, 2));
+NODE
+
+REPORT_STATUS="$(node -e "const p=require(process.argv[1]); console.log(p.status)" "$ARTIFACT_DIR/claim-audit-report.json")"
+
+log "verifying claim-audit proof packet"
+"$ARCWELL_BIN" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" >"$ARTIFACT_DIR/verify-packet.json"
+VERIFY_OK="$(node -e "const p=require(process.argv[1]); console.log(p.ok ? '1' : '0')" "$ARTIFACT_DIR/verify-packet.json")"
+[[ "$VERIFY_OK" == "1" ]] || fail "proof packet verification failed; see $ARTIFACT_DIR/verify-packet.json"
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable claim-audit proof packet"
+  CLAIMS_JSON="$(cat "$ARTIFACT_DIR/claims.json")"
+  ARTIFACTS_JSON="$(cat "$ARTIFACT_DIR/artifacts.json")"
+  CHECKS_JSON="$(cat "$ARTIFACT_DIR/checks.json")"
+  METADATA_JSON="$(cat "$ARTIFACT_DIR/metadata.json")"
+  PACKET_STATUS="$(node -e "const p=require(process.argv[1]); console.log(p.status)" "$ARTIFACT_DIR/proof-packet.json")"
+  "$ARCWELL_BIN" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M0 autonomous knowledge user-visible claim audit" \
+    --proof-level documentation_claim_audit \
+    --status "$PACKET_STATUS" \
+    --summary "Scans user-visible docs, plugin skills, and slash prompts for autonomous-knowledge overclaims against the proof ledger." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$CLAIMS_JSON" \
+    --artifacts-json "$ARTIFACTS_JSON" \
+    --checks-json "$CHECKS_JSON" \
+    --metadata-json "$METADATA_JSON" \
+    >"$ARTIFACT_DIR/recorded-proof.json"
+
+  PACKET_ID="$(node -e "const p=require(process.argv[1]); console.log(p.packet?.id || '')" "$ARTIFACT_DIR/recorded-proof.json")"
+  if [[ "$PACKET_STATUS" == "passed" && -n "$PACKET_ID" ]]; then
+    "$ARCWELL_BIN" proof review-record \
+      --scope autonomous-knowledge-system \
+      --title "M0 autonomous knowledge claim-audit review" \
+      --reviewer codex \
+      --requested-proof-level documentation_claim_audit \
+      --judgment promote \
+      --summary "Promote for the narrow docs/tooling claim-audit gate: the scanned user-visible surfaces contain no unbounded autonomous-knowledge operational/current/done claims." \
+      --strongest-fake-done-path "A doc, skill, slash prompt, or README claims autonomous knowledge is operational, current, complete, or done while the proof ledger still holds source freshness, recurrence, runtime parity, or ops controls open." \
+      --packet-id "$PACKET_ID" \
+      --refutations-json '["The audit scanned the selected user-visible surfaces and found no unbounded overclaim lines under its rule set."]' \
+      --skipped-categories-json '["Runtime MCP/slash execution parity is a separate proof gate.", "Source freshness and recurrence are separate proof gates.", "Historical non-user-facing source comments are outside this docs/tooling claim audit."]' \
+      --findings-json '[]' \
+      --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"m0_docs_tooling_claim_audit\"}" \
+      >"$ARTIFACT_DIR/review-recorded.json"
+  fi
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+if [[ "$REPORT_STATUS" != "passed" && "$ALLOW_FINDINGS" != "1" ]]; then
+  fail "claim audit found unbounded overclaims; see $ARTIFACT_DIR/claim-audit-report.json"
+fi

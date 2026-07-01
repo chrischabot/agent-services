@@ -31,6 +31,26 @@ async fn severe_http_auth_rejects_missing_and_bad_tokens_when_configured() {
         bad_json.pointer("/error/type").and_then(Value::as_str),
         Some("bad_auth")
     );
+
+    let mut cookie_headers = HeaderMap::new();
+    cookie_headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("arcwell_ops_session=local-auth-token-123"),
+    );
+    let (cookie_status, cookie_json) = response_json(
+        http_ops(
+            State(test_http_state(
+                "http-auth-cookie",
+                Some("local-auth-token-123"),
+            )),
+            cookie_headers,
+            Uri::from_static("/ops"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(cookie_status, StatusCode::OK);
+    assert!(cookie_json.get("health").is_some(), "{cookie_json}");
 }
 
 #[tokio::test]
@@ -666,6 +686,82 @@ fn severe_ops_ui_distinguishes_backlog_families() {
 }
 
 #[test]
+fn severe_ops_ui_renders_cockpit_and_agent_visible_urls() {
+    // CLAIM: /ops/ui is a real cockpit, not just a raw table dump: it exposes
+    // memory, wiki, task, research, and event-history domains, and tells
+    // Codex agents where the browser-visible page lives.
+    // ORACLE: seeded memory/research/worker rows appear in the cockpit and raw
+    // ledgers, with URL hints for /ops/ui and aliases.
+    // SEVERITY: Severe because an ops UI that agents cannot find or explain to
+    // the user still fails as a human control surface.
+    let paths = test_paths("ops-ui-cockpit");
+    let store = Store::open(paths).unwrap();
+    store
+        .capture_memory_from_text(
+            "My cockpit preference is dense dashboards.",
+            "ops-ui-cockpit",
+            Some("chris"),
+            false,
+            false,
+        )
+        .unwrap();
+    store
+        .add_source_card(SourceCardInput {
+            title: "Ops cockpit research source".to_string(),
+            url: "https://example.com/ops-cockpit-research".to_string(),
+            source_type: "article".to_string(),
+            provider: "test".to_string(),
+            summary: "Source evidence for the cockpit research run.".to_string(),
+            claims: vec![],
+            retrieved_at: None,
+            metadata: json!({}),
+        })
+        .unwrap();
+    let brief = store
+        .create_research_brief_from_wiki("Ops cockpit research", true)
+        .unwrap();
+    store
+        .record_worker_heartbeat("ops-ui-cockpit-worker", 3, None)
+        .unwrap();
+
+    let snapshot = store.ops_snapshot().unwrap();
+    assert_eq!(snapshot.research_runs.len(), 1);
+    assert_eq!(snapshot.research_runs[0].id, brief.run.id);
+    assert!(!snapshot.memory_lifecycle_events.is_empty());
+
+    let html = render_ops_ui_with_options(
+        &snapshot,
+        &OpsUiOptions {
+            current_url: Some("http://127.0.0.1:8790/ops/ui".to_string()),
+            ..OpsUiOptions::default()
+        },
+        None,
+        false,
+    );
+    for needle in [
+        "Arcwell Ops Cockpit",
+        "Agent Visibility",
+        "/ops/ui",
+        "http://127.0.0.1:8790/ops/ui",
+        "/cockpit",
+        "/ops/cockpit",
+        "Memory Review",
+        "Wiki And Knowledge",
+        "Task Runner",
+        "Research And Reports",
+        "Event Stream",
+        "Event Log",
+        "System Stats",
+        "Research Runs",
+        "Memory Lifecycle Events",
+        "Ops cockpit research",
+        "ops-ui-cockpit-worker",
+    ] {
+        assert!(html.contains(needle), "missing {needle}: {html}");
+    }
+}
+
+#[test]
 fn severe_ops_ui_escapes_required_untrusted_domains() {
     // CLAIM: /ops/ui renders untrusted operational text as inert HTML text.
     // PRECONDITIONS: Stored channel/source/project/procedure/work/policy/error data may contain attacker HTML.
@@ -863,6 +959,7 @@ fn severe_ops_ui_filters_sorts_summarizes_and_details_without_raw_html() {
             sort: "status".to_string(),
             detail: Some(format!("edge:{}", visible.id)),
             notice: Some("duplicate".to_string()),
+            current_url: None,
         },
         Some("csrf-token-123"),
         true,
@@ -1178,6 +1275,7 @@ fn severe_ops_ui_surfaces_x_knowledge_clusters_and_editorial_decisions() {
             sort: "updated_desc".to_string(),
             detail: Some(format!("x-cluster:{}", cluster.id)),
             notice: None,
+            current_url: None,
         },
         None,
         false,
@@ -1199,6 +1297,7 @@ fn severe_ops_ui_surfaces_x_knowledge_clusters_and_editorial_decisions() {
             sort: "updated_desc".to_string(),
             detail: Some(format!("x-editorial:{}", decision.id)),
             notice: None,
+            current_url: None,
         },
         None,
         false,
@@ -1449,6 +1548,7 @@ fn severe_ops_ui_surfaces_radar_source_quality_without_raw_html() {
             sort: "status".to_string(),
             detail: None,
             notice: None,
+            current_url: None,
         },
         None,
         false,
@@ -1562,6 +1662,7 @@ fn severe_ops_ui_surfaces_radar_run_score_distribution() {
             sort: "updated_desc".to_string(),
             detail: Some(format!("radar-run:{}", report.run.id)),
             notice: None,
+            current_url: None,
         },
         None,
         false,
@@ -1738,6 +1839,7 @@ fn severe_ops_ui_surfaces_radar_delivery_failures_without_raw_html() {
             sort: "status".to_string(),
             detail: None,
             notice: None,
+            current_url: None,
         },
         None,
         false,
@@ -1786,6 +1888,26 @@ async fn severe_ops_ui_x_controls_require_auth_csrf_policy_and_idempotency() {
 
     let state = test_http_state("ops-ui-x-controls", Some("local-auth-token-123"));
     let store = Store::open(state.paths.clone()).unwrap();
+    let mut ui_headers = HeaderMap::new();
+    ui_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
+    let ui_response = http_ops_ui(
+        State(state.clone()),
+        ui_headers,
+        Uri::from_static("/ops/ui"),
+        Ok(Query(OpsUiQuery::default())),
+    )
+    .await;
+    assert_eq!(ui_response.status(), StatusCode::OK);
+    let session_cookie = ui_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert!(session_cookie.contains("arcwell_ops_session=local-auth-token-123"));
+    assert!(session_cookie.contains("HttpOnly"));
+    assert!(session_cookie.contains("SameSite=Strict"));
+
     let valid_schedule_body = x_bookmarks_schedule_body(
         &state.csrf_token,
         "ops-ui-x-schedule-denied",
@@ -1806,10 +1928,20 @@ async fn severe_ops_ui_x_controls_require_auth_csrf_policy_and_idempotency() {
     .await;
     assert_eq!(missing_auth_status, StatusCode::UNAUTHORIZED);
 
+    let mut cookie_authed_headers = HeaderMap::new();
+    cookie_authed_headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&session_cookie).unwrap(),
+    );
+    cookie_authed_headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://127.0.0.1:8787"),
+    );
+
     let (bad_csrf_status, bad_csrf_json) = response_json(
         http_ops_x_bookmarks_schedule(
             State(state.clone()),
-            authed_local_headers(),
+            cookie_authed_headers.clone(),
             Uri::from_static("/ops/actions/x/bookmarks/schedule"),
             Bytes::from(x_bookmarks_schedule_body(
                 "wrong-csrf",
@@ -1832,7 +1964,7 @@ async fn severe_ops_ui_x_controls_require_auth_csrf_policy_and_idempotency() {
     let (policy_status, policy_json) = response_json(
         http_ops_x_bookmarks_schedule(
             State(state.clone()),
-            authed_local_headers(),
+            cookie_authed_headers.clone(),
             Uri::from_static("/ops/actions/x/bookmarks/schedule"),
             Bytes::from(valid_schedule_body),
         )
@@ -1846,6 +1978,29 @@ async fn severe_ops_ui_x_controls_require_auth_csrf_policy_and_idempotency() {
     );
     assert!(store.list_watch_sources().unwrap().is_empty());
     assert_eq!(store.list_policy_decisions(10).unwrap().len(), 1);
+    let (denied_curation_status, denied_curation_json) = response_json(
+        http_ops_x_watch_curation_run(
+            State(state.clone()),
+            authed_local_headers(),
+            Uri::from_static("/ops/actions/x/watch-curation/run"),
+            Bytes::from(x_watch_curation_run_body(
+                &state.csrf_token,
+                "ops-ui-x-curation-denied",
+                "dry-run",
+            )),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(denied_curation_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        denied_curation_json
+            .pointer("/error/type")
+            .and_then(Value::as_str),
+        Some("ops_action_failed")
+    );
+    assert!(store.latest_x_watch_curation_report().unwrap().is_none());
+    assert_eq!(store.list_policy_decisions(10).unwrap().len(), 2);
 
     std::fs::write(
         state.paths.home.join("arcwell-policy.toml"),
@@ -1861,6 +2016,24 @@ id = "allow-ops-x-bookmarks-enqueue"
 effect = "allow"
 action = "ops.x_bookmarks.enqueue"
 reason = "local operator may enqueue X bookmark import"
+
+[[rules]]
+id = "allow-ops-x-watch-curation-dry-run"
+effect = "allow"
+action = "ops.x_watch_curation.dry_run"
+reason = "local operator may run non-destructive X watch curation"
+
+[[rules]]
+id = "allow-ops-x-watch-curation-pause-only"
+effect = "allow"
+action = "ops.x_watch_curation.pause_only"
+reason = "local operator may apply reviewed pause-only X watch curation"
+
+[[rules]]
+id = "allow-ops-x-watch-curation-restore"
+effect = "allow"
+action = "ops.x_watch_curation.restore"
+reason = "local operator may restore a reversible X watch curation run"
 
 [[rules]]
 id = "allow-ops-worker-run-once"
@@ -1888,7 +2061,7 @@ reason = "ops controls may enqueue local worker jobs"
     let (allowed_status, _) = response_text(
         http_ops_x_bookmarks_schedule(
             State(state.clone()),
-            authed_local_headers(),
+            cookie_authed_headers.clone(),
             Uri::from_static("/ops/actions/x/bookmarks/schedule"),
             Bytes::from(allowed_schedule_body.clone()),
         )
@@ -1917,6 +2090,130 @@ reason = "ops controls may enqueue local worker jobs"
     assert_eq!(
         store.list_policy_decisions(10).unwrap().len(),
         decisions_after_schedule
+    );
+
+    let curated_source = store
+        .upsert_watch_source(WatchSourceInput {
+            source_kind: "x_handle".to_string(),
+            locator: "manualdropops".to_string(),
+            label: "@manualdropops - manualdropops".to_string(),
+            cadence: "warm".to_string(),
+            status: "active".to_string(),
+            metadata: json!({ "origin": "ops-ui-x-curation" }),
+        })
+        .unwrap();
+    store
+        .import_x_watch_manual_rules(
+            vec![XWatchManualRuleInput {
+                handle: "manualdropops".to_string(),
+                decision: "manual_always_exclude".to_string(),
+                category: "off_topic".to_string(),
+                reason: "Reviewed as off-topic for ops UI curation coverage.".to_string(),
+                metadata: json!({ "review_ticket": "ops-ui-x-curation" }),
+            }],
+            "ops-ui-test",
+            false,
+        )
+        .unwrap();
+    let dry_body = x_watch_curation_run_body(
+        &state.csrf_token,
+        "ops-ui-x-curation-dry-run",
+        "dry-run",
+    );
+    let (dry_status, _) = response_text(
+        http_ops_x_watch_curation_run(
+            State(state.clone()),
+            authed_local_headers(),
+            Uri::from_static("/ops/actions/x/watch-curation/run"),
+            Bytes::from(dry_body.clone()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(dry_status, StatusCode::SEE_OTHER);
+    let dry_report = store.latest_x_watch_curation_report().unwrap().unwrap();
+    assert_eq!(dry_report.run.mode, "dry_run");
+    assert_eq!(dry_report.counts.get("paused_excluded"), Some(&1));
+    assert_eq!(
+        store
+            .list_watch_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id == curated_source.id)
+            .unwrap()
+            .status,
+        "active"
+    );
+    let decisions_after_dry_run = store.list_policy_decisions(20).unwrap().len();
+    let (dry_duplicate_status, _) = response_text(
+        http_ops_x_watch_curation_run(
+            State(state.clone()),
+            authed_local_headers(),
+            Uri::from_static("/ops/actions/x/watch-curation/run"),
+            Bytes::from(dry_body),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(dry_duplicate_status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        store.list_policy_decisions(20).unwrap().len(),
+        decisions_after_dry_run
+    );
+
+    let (pause_status, _) = response_text(
+        http_ops_x_watch_curation_run(
+            State(state.clone()),
+            authed_local_headers(),
+            Uri::from_static("/ops/actions/x/watch-curation/run"),
+            Bytes::from(x_watch_curation_run_body(
+                &state.csrf_token,
+                "ops-ui-x-curation-pause-only",
+                "pause-only",
+            )),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(pause_status, StatusCode::SEE_OTHER);
+    let pause_report = store.latest_x_watch_curation_report().unwrap().unwrap();
+    assert_eq!(pause_report.run.mode, "pause_only");
+    assert_eq!(pause_report.run.paused_count, 1);
+    assert_eq!(
+        store
+            .list_watch_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id == curated_source.id)
+            .unwrap()
+            .status,
+        "paused"
+    );
+
+    let (restore_status, _) = response_text(
+        http_ops_x_watch_curation_restore(
+            State(state.clone()),
+            authed_local_headers(),
+            Uri::from_static("/ops/actions/x/watch-curation/restore"),
+            Bytes::from(x_watch_curation_restore_body(
+                &state.csrf_token,
+                "ops-ui-x-curation-restore",
+                &pause_report.run.id,
+            )),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        store
+            .list_watch_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id == curated_source.id)
+            .unwrap()
+            .status,
+        "active"
     );
 
     let (enqueue_status, _) = response_text(
@@ -2018,5 +2315,10 @@ reason = "ops controls may enqueue local worker jobs"
     assert!(html.contains("X Controls"));
     assert!(html.contains("/ops/actions/x/bookmarks/schedule"));
     assert!(html.contains("/ops/actions/x/bookmarks/enqueue"));
+    assert!(html.contains("/ops/actions/x/watch-curation/run"));
+    assert!(html.contains("/ops/actions/x/watch-curation/restore"));
+    assert!(html.contains("X Watch Curation"));
+    assert!(html.contains("manualdropops"));
+    assert!(html.contains("manual_always_exclude"));
     assert!(html.contains("/ops/actions/worker/run-once"));
 }

@@ -107,7 +107,15 @@ typing part of the name. Use the displayed command name from the picker.
 ### Health, Ops, And Services
 
 - `/arcwell-health` uses `arcwell_health`.
-- `/ops` uses `ops_snapshot`.
+- `/ops` uses `ops_snapshot`. If `arcwell service status --compact` reports
+  `cockpit_url`, give the user that exact URL. Service-hosted cockpits install a
+  private token file and mint the browser cookie automatically from `/ops/ui`, so
+  do not ask the user to copy auth tokens. `service install --http-addr` also
+  seeds the narrow local ops-control policy rules needed by the cockpit buttons;
+  provider/cost/source-write/promotion gates still apply at execution. If an
+  Arcwell HTTP server is otherwise running, report the visible cockpit path
+  `/ops/ui`; `/cockpit` and `/ops/cockpit` are aliases. When the agent starts a
+  one-off server, include the exact local URL.
 - `/worker-run-once` uses `worker_run_once`.
 - `/backup-create` uses `backup_create`.
 - `/backup-status` uses `arcwell backup status`.
@@ -282,6 +290,16 @@ typing part of the name. Use the displayed command name from the picker.
 - `/x-import-bookmarks` uses `x_import_bookmarks`.
 - `/x-bookmarks` uses `x_bookmarks`.
 - `/x-watch-rebuild` uses `x_rebuild_definitive_watch_sources`.
+- `/x-watch-curate` uses `x_curate_watch_sources`; default to dry-run unless
+  the user explicitly asks for `pause-only` apply.
+- `/x-watch-curation-report` uses `x_watch_curation_report` for the latest or
+  selected curation run.
+- `/x-watch-curation-restore` uses `x_restore_watch_curation` for an explicit
+  run id with restore snapshots.
+- `/x-watch-manual-rules-import` uses `x_import_watch_manual_rules`; dry-run
+  unless the user explicitly asks to apply reviewed rules.
+- `/x-watch-profiles-enrich` uses `x_enrich_watch_profiles` for explicit
+  handles or `needs_profile_enrichment` decisions from a curation run.
 - `/x-import-following-watch-sources` uses `x_import_following_watch_sources`.
 - `/x-import-json` uses `x_import_json_file`.
 - `/x-discover-archives` uses `x_discover_archives`.

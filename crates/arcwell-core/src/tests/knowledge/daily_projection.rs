@@ -104,6 +104,124 @@ fn severe_issue_schedule_worker_enqueues_native_daily_briefing_once() {
 }
 
 #[test]
+fn severe_issue_schedule_worker_repairs_pending_tick_without_job() {
+    // CLAIM: an interrupted schedule enqueue cannot leave a pending tick that
+    // permanently hides the due slot.
+    // ORACLE: a scheduled tick row with no attached job is still reported due,
+    // and the next enqueue pass attaches one knowledge_daily_briefing job to
+    // the existing tick instead of creating a duplicate tick.
+    // SEVERITY: Severe because a crash between tick insert and job insert is a
+    // realistic local-worker failure mode that otherwise looks "not due".
+    let store = test_store("issue-schedule-repair-orphan-pending-tick");
+    let (input, created_at, due_at) = due_utc_schedule_input(
+        "Native daily briefing orphan tick repair",
+        "email:friend@example.com",
+        json!({ "window_hours": 24, "max_catch_up_ticks": 3 }),
+    );
+    let schedule = store.upsert_issue_schedule(input).unwrap();
+    force_issue_schedule_created_at(&store, &schedule.id, &created_at);
+    let due_at = DateTime::parse_from_rfc3339(&due_at)
+        .unwrap()
+        .with_timezone(&Utc)
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap()
+        .to_rfc3339();
+    let tick_key = issue_schedule_tick_key(&schedule.id, &due_at, &schedule);
+    let orphan = store
+        .create_issue_schedule_tick(&schedule.id, &tick_key, &due_at)
+        .unwrap();
+    assert!(orphan.job_id.is_none(), "{orphan:#?}");
+
+    let before = store.issue_schedule_ops_summary_at(Utc::now()).unwrap();
+    let before = before
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(before.catch_up_status, "due", "{before:#?}");
+    assert_eq!(
+        before.next_due_at.as_deref(),
+        Some(due_at.as_str()),
+        "{before:#?}"
+    );
+    assert_eq!(before.due_slot_count, 1, "{before:#?}");
+    assert!(!before.has_active_job, "{before:#?}");
+
+    let repaired = store.enqueue_due_issue_schedule_jobs(10).unwrap();
+    assert_eq!(repaired.enqueued, 1, "{repaired:#?}");
+    assert_eq!(repaired.jobs.len(), 1, "{repaired:#?}");
+    let ticks = store.list_issue_schedule_ticks(Some(&schedule.id)).unwrap();
+    assert_eq!(ticks.len(), 1, "{ticks:#?}");
+    assert_eq!(ticks[0].id, orphan.id);
+    assert!(ticks[0].job_id.is_some(), "{ticks:#?}");
+    let job = store
+        .get_wiki_job(ticks[0].job_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.kind, "knowledge_daily_briefing");
+    assert_eq!(job.input_json.get("tick_id"), Some(&json!(orphan.id)));
+}
+
+#[test]
+fn severe_issue_schedule_unsupported_kind_creates_blocked_tick_once() {
+    // CLAIM: unsupported issue schedule kinds are durable blocked schedule
+    // state, not an ephemeral worker error that repeats forever.
+    // ORACLE: the first enqueue pass materializes one blocked scheduled tick
+    // with the error; the next pass sees the terminal tick and does not create
+    // another row or active job.
+    // SEVERITY: Severe because unsupported local schedule config should be
+    // diagnosable from ops rather than becoming a quiet retry loop.
+    let store = test_store("issue-schedule-unsupported-kind-blocked-once");
+    let (input, created_at, _) = due_utc_schedule_input(
+        "Unsupported native issue schedule",
+        "email:friend@example.com",
+        json!({ "window_hours": 24, "max_catch_up_ticks": 3 }),
+    );
+    let schedule = store.upsert_issue_schedule(input).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE issue_schedules SET kind = 'unsupported_issue_schedule_kind' WHERE id = ?1",
+            params![schedule.id],
+        )
+        .unwrap();
+    force_issue_schedule_created_at(&store, &schedule.id, &created_at);
+
+    let first = store.enqueue_due_issue_schedule_jobs(10).unwrap();
+    assert_eq!(first.enqueued, 0, "{first:#?}");
+    assert_eq!(first.skipped, 1, "{first:#?}");
+    assert_eq!(first.errors.len(), 1, "{first:#?}");
+    assert!(
+        first.errors[0].contains("unsupported issue schedule kind"),
+        "{first:#?}"
+    );
+    let ticks = store.list_issue_schedule_ticks(Some(&schedule.id)).unwrap();
+    assert_eq!(ticks.len(), 1, "{ticks:#?}");
+    assert_eq!(ticks[0].status, "blocked", "{ticks:#?}");
+    assert!(ticks[0].job_id.is_none(), "{ticks:#?}");
+    assert!(
+        ticks[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported issue schedule kind"),
+        "{ticks:#?}"
+    );
+
+    let second = store.enqueue_due_issue_schedule_jobs(10).unwrap();
+    assert_eq!(second.enqueued, 0, "{second:#?}");
+    assert!(second.errors.is_empty(), "{second:#?}");
+    assert_eq!(
+        store
+            .list_issue_schedule_ticks(Some(&schedule.id))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn severe_ops_issue_schedule_summary_surfaces_not_due_with_next_scheduled_slot() {
     // CLAIM: ops distinguishes a healthy pre-due schedule from a missed slot.
     // ORACLE: with yesterday's scheduled tick already recorded and now before
@@ -210,6 +328,154 @@ fn severe_ops_issue_schedule_summary_surfaces_due_slots_before_catch_up_enqueue(
     assert_eq!(after.catch_up_status, "active_job", "{after:#?}");
     assert_eq!(after.due_slot_count, 0, "{after:#?}");
     assert!(after.due_slots.is_empty(), "{after:#?}");
+}
+
+#[test]
+fn severe_manual_issue_ticks_do_not_suppress_scheduled_catch_up_slots() {
+    // CLAIM: manual editorial reruns are audit/history rows, not the durable
+    // checkpoint for the resident fixed-time schedule.
+    // ORACLE: a manual tick after a missed scheduled slot does not hide that
+    // scheduled slot from ops, and the worker still enqueues the scheduled
+    // catch-up tick exactly once.
+    // SEVERITY: Severe because manual 7am briefing reruns must not break
+    // tomorrow's laptop-wake catch-up behavior.
+    let store = test_store("issue-schedule-manual-does-not-suppress-catchup");
+    let now = Utc::now();
+    let due_at = (now - ChronoDuration::minutes(1))
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap();
+    let prior_scheduled_due_at = due_at - ChronoDuration::days(1);
+    let created_at = due_at - ChronoDuration::days(2);
+    let manual_due_at = due_at + ChronoDuration::seconds(30);
+    let schedule = store
+        .upsert_issue_schedule(IssueScheduleInput {
+            name: "Native daily briefing manual rerun isolation".to_string(),
+            kind: "knowledge_daily_briefing".to_string(),
+            channel: "email".to_string(),
+            recipient_ref: "email:friend@example.com".to_string(),
+            time_zone: "utc".to_string(),
+            hour: due_at.hour() as i64,
+            minute: due_at.minute() as i64,
+            catch_up_hours: 72,
+            status: Some("active".to_string()),
+            metadata: json!({ "window_hours": 24, "max_catch_up_ticks": 3 }),
+        })
+        .unwrap();
+    force_issue_schedule_created_at(&store, &schedule.id, &created_at.to_rfc3339());
+    let prior_scheduled_tick = store
+        .create_issue_schedule_tick(
+            &schedule.id,
+            "issue-prior-scheduled-before-manual-rerun",
+            &prior_scheduled_due_at.to_rfc3339(),
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(&prior_scheduled_tick.id, "sent", None, None, None)
+        .unwrap();
+    let manual_tick = store
+        .create_issue_schedule_tick(
+            &schedule.id,
+            "manual-editorial-after-due-before-catchup",
+            &manual_due_at.to_rfc3339(),
+        )
+        .unwrap();
+    store
+        .update_issue_schedule_tick(&manual_tick.id, "sent", None, None, None)
+        .unwrap();
+
+    let summary = store.issue_schedule_ops_summary_at(now).unwrap();
+    let summary = summary
+        .iter()
+        .find(|item| item.schedule_id == schedule.id)
+        .unwrap();
+    assert_eq!(summary.catch_up_status, "due", "{summary:#?}");
+    assert_eq!(summary.due_slot_count, 1, "{summary:#?}");
+    assert_eq!(
+        summary.next_due_at.as_deref(),
+        Some(due_at.to_rfc3339().as_str()),
+        "{summary:#?}"
+    );
+
+    let enqueued = store.enqueue_due_issue_schedule_jobs(10).unwrap();
+    assert_eq!(enqueued.enqueued, 1, "{enqueued:#?}");
+    let ticks = store.list_issue_schedule_ticks(Some(&schedule.id)).unwrap();
+    assert!(
+        ticks
+            .iter()
+            .any(|tick| tick.tick_key.starts_with("issue-") && tick.due_at == due_at.to_rfc3339()),
+        "{ticks:#?}"
+    );
+}
+
+#[test]
+fn severe_daily_briefing_delivery_policy_context_beats_x_evidence_ordering() {
+    // CLAIM: generated daily briefing candidates use the daily-briefing
+    // delivery policy context even when the candidate also cites X evidence.
+    // ORACLE: with an X-origin card first in the candidate's source list and
+    // the generated daily briefing card second, the delivery context is still
+    // arcwell-knowledge/knowledge_daily_briefing_delivery.
+    // SEVERITY: Severe because otherwise real briefings with X source-card
+    // evidence can be blocked by unrelated X digest delivery policy.
+    let store = test_store("daily-briefing-policy-context-ordering");
+    let x_card = store
+        .add_source_card(SourceCardInput {
+            title: "X evidence for daily briefing".to_string(),
+            url: "https://x.com/example/status/123".to_string(),
+            source_type: "x_tweet".to_string(),
+            provider: "x".to_string(),
+            summary: "X evidence should be cited but must not own the policy context.".to_string(),
+            claims: vec![SourceClaim {
+                claim: "X evidence belongs to a daily briefing candidate.".to_string(),
+                kind: "evidence".to_string(),
+                confidence: 0.7,
+            }],
+            retrieved_at: None,
+            metadata: json!({ "x_id": "123", "source_role": "secondary" }),
+        })
+        .unwrap();
+    let briefing_card = store
+        .add_source_card(SourceCardInput {
+            title: "Arcwell AI daily briefing 2026-07-01".to_string(),
+            url: "https://example.com/arcwell/knowledge-daily-briefing/proof".to_string(),
+            source_type: "knowledge_daily_briefing".to_string(),
+            provider: "arcwell".to_string(),
+            summary: "Generated source-backed daily briefing summary.".to_string(),
+            claims: vec![SourceClaim {
+                claim: "Daily briefing candidate was generated from source-backed evidence."
+                    .to_string(),
+                kind: "summary".to_string(),
+                confidence: 0.82,
+            }],
+            retrieved_at: None,
+            metadata: json!({
+                "generated": true,
+                "source_kind": "knowledge_daily_briefing",
+                "source_role": "generated_synthesis"
+            }),
+        })
+        .unwrap();
+    let candidate = DigestCandidate {
+        id: "digest-daily-briefing-policy-context-ordering".to_string(),
+        topic: "Arcwell AI daily briefing: 2026-07-01".to_string(),
+        score: 1.0,
+        reason: "test fixture".to_string(),
+        status: "ready".to_string(),
+        source_card_ids: vec![x_card.id, briefing_card.id],
+        review_status: "approved".to_string(),
+        reviewed_at: None,
+        reviewed_by: None,
+        review_note: None,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+
+    let (package, source) = store
+        .digest_candidate_delivery_policy_context(&candidate)
+        .unwrap();
+    assert_eq!(package, "arcwell-knowledge");
+    assert_eq!(source, "knowledge_daily_briefing_delivery");
 }
 
 #[test]

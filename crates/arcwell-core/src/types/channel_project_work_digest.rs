@@ -798,6 +798,8 @@ pub struct OpsSnapshot {
     pub knowledge_reports: Vec<KnowledgeReport>,
     pub x_knowledge_clusters: Vec<XKnowledgeCluster>,
     pub x_editorial_decisions: Vec<XEditorialDecision>,
+    pub x_watch_curation_report: Option<XWatchCurationReport>,
+    pub research_runs: Vec<ResearchRun>,
     pub jobs: Vec<WikiJob>,
     pub edge_events: Vec<EdgeEvent>,
     pub cursors: Vec<CursorState>,

@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_DAILY_BRIEFING_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_DAILY_BRIEFING_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/daily-briefing-catchup-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+SOURCE_HOME="${ARCWELL_DAILY_BRIEFING_SOURCE_HOME:-${ARCWELL_HOME:-$HOME/.arcwell}}"
+PROOF_HOME="${ARCWELL_DAILY_BRIEFING_PROOF_HOME:-}"
+RECIPIENT="${ARCWELL_DAILY_BRIEFING_EMAIL_TO:-daily-briefing-proof@example.com}"
+FROM="${ARCWELL_DAILY_BRIEFING_EMAIL_FROM:-agent@example.com}"
+ALLOW_INCOMPLETE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/daily-briefing-catchup-proof [options]
+
+Copies an Arcwell home, creates a native daily briefing schedule whose slot is
+already overdue, points email delivery at a local mock Cloudflare endpoint, and
+runs one worker pass. The proof passes only when the copied home catches up the
+missed slot, materializes a source-backed daily briefing, and attempts exactly
+one controlled email delivery.
+
+Options:
+  --source-home path       Source ARCWELL_HOME to copy. Default: ARCWELL_HOME or ~/.arcwell.
+  --proof-root path        Output directory for proof artifacts.
+  --recipient email        Controlled proof recipient. Default: daily-briefing-proof@example.com.
+  --from email             Controlled proof sender. Default: agent@example.com.
+  --allow-incomplete       Write the proof packet and exit 0 even if the proof is incomplete.
+  -h, --help               Show this help.
+
+Boundary:
+  This is copied-home controlled-provider proof. It does not prove that a real
+  future wall-clock 7am send happened in the live home, and it does not prove
+  mailbox placement unless a separate mailbox observation is recorded.
+USAGE
+}
+
+log() {
+  printf '[daily-briefing-catchup-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[daily-briefing-catchup-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source-home)
+      [[ $# -ge 2 ]] || fail "--source-home requires a path"
+      SOURCE_HOME="$2"
+      shift
+      ;;
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      shift
+      ;;
+    --recipient)
+      [[ $# -ge 2 ]] || fail "--recipient requires an email address"
+      RECIPIENT="$2"
+      shift
+      ;;
+    --from)
+      [[ $# -ge 2 ]] || fail "--from requires an email address"
+      FROM="$2"
+      shift
+      ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$PROOF_HOME" ]; then
+  PROOF_HOME="$PROOF_ROOT/home"
+fi
+export ARCWELL_HOME="$PROOF_HOME"
+
+for required in node rsync sqlite3; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+
+if [ ! -x "$ARCWELL_BIN" ]; then
+  log "building target/debug/arcwell"
+  (cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+fi
+if [ ! -x "$ARCWELL_BIN" ]; then
+  fail "arcwell binary not found: $ARCWELL_BIN"
+fi
+if [ ! -d "$SOURCE_HOME" ]; then
+  fail "source Arcwell home not found: $SOURCE_HOME"
+fi
+
+mkdir -p "$ARTIFACT_DIR" "$ARCWELL_HOME"
+
+log "proof root: $PROOF_ROOT"
+log "copying source home into disposable proof home"
+rsync -a --exclude 'backups/' --exclude 'proofs/' "$SOURCE_HOME"/ "$ARCWELL_HOME"/ >/dev/null
+
+DB="$ARCWELL_HOME/arcwell.sqlite3"
+[ -f "$DB" ] || fail "copied Arcwell database not found: $DB"
+
+log "clearing copied operational queues while preserving source/wiki/report evidence"
+sqlite3 "$DB" <<'SQL'
+PRAGMA foreign_keys = OFF;
+DELETE FROM wiki_jobs;
+DELETE FROM issue_schedule_ticks;
+DELETE FROM issue_schedules;
+DELETE FROM digest_deliveries;
+DELETE FROM digest_candidates;
+DELETE FROM channel_delivery_attempts;
+DELETE FROM channel_delivery_observations;
+DELETE FROM channel_messages;
+DELETE FROM policy_decisions;
+DELETE FROM policy_approvals;
+PRAGMA foreign_keys = ON;
+SQL
+
+MOCK_BASE_FILE="$ARTIFACT_DIR/email-api-base.txt"
+MOCK_LOG_FILE="$ARTIFACT_DIR/email-provider-requests.jsonl"
+node - "$MOCK_BASE_FILE" "$MOCK_LOG_FILE" <<'NODE' &
+const fs = require("fs");
+const http = require("http");
+const [basePath, logPath] = process.argv.slice(2);
+
+const server = http.createServer((req, res) => {
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => {
+    const body = Buffer.concat(chunks).toString("utf8");
+    fs.appendFileSync(
+      logPath,
+      `${JSON.stringify({
+        method: req.method,
+        url: req.url,
+        content_type: req.headers["content-type"] || null,
+        authorization: req.headers.authorization ? "<redacted>" : null,
+        body,
+      })}\n`
+    );
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: { id: "daily_briefing_catchup_email_ok" } }));
+  });
+});
+
+server.listen(0, "127.0.0.1", () => {
+  const address = server.address();
+  fs.writeFileSync(basePath, `http://127.0.0.1:${address.port}\n`);
+});
+
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+NODE
+MOCK_PID=$!
+trap 'kill "$MOCK_PID" >/dev/null 2>&1 || true' EXIT
+
+for _ in $(seq 1 50); do
+  [ -s "$MOCK_BASE_FILE" ] && break
+  sleep 0.1
+done
+[ -s "$MOCK_BASE_FILE" ] || fail "controlled Cloudflare Email endpoint did not start"
+EMAIL_API_BASE="$(tr -d '\n' <"$MOCK_BASE_FILE")"
+
+log "capturing copied source/report counts"
+"$ARCWELL_BIN" source-card search agent >"$ARTIFACT_DIR/source-card-search-agent.json" || true
+sqlite3 "$DB" -json \
+  "SELECT COUNT(*) AS knowledge_reports FROM knowledge_reports;" \
+  >"$ARTIFACT_DIR/knowledge-report-count.json"
+sqlite3 "$DB" -json \
+  "SELECT COUNT(*) AS source_cards FROM source_cards;" \
+  >"$ARTIFACT_DIR/source-card-count.json"
+
+cat >"$ARCWELL_HOME/arcwell-policy.toml" <<POLICY
+[[rules]]
+id = "allow-daily-briefing-account-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_ACCOUNT_ID"
+reason = "allow controlled daily briefing account secret in copied-home proof"
+priority = 20
+
+[[rules]]
+id = "allow-daily-briefing-token-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_EMAIL_API_TOKEN"
+reason = "allow controlled daily briefing token secret in copied-home proof"
+priority = 20
+
+[[rules]]
+id = "allow-daily-briefing-from-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "ARCWELL_AGENT_EMAIL_FROM"
+reason = "allow controlled daily briefing sender secret in copied-home proof"
+priority = 20
+
+[[rules]]
+id = "allow-daily-briefing-base-secret"
+effect = "allow"
+action = "secret.write"
+provider = "email"
+target = "CLOUDFLARE_EMAIL_API_BASE"
+reason = "allow controlled daily briefing email API base secret in copied-home proof"
+priority = 20
+
+[[rules]]
+id = "allow-daily-briefing-worker-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-knowledge"
+source = "knowledge_daily_briefing"
+reason = "allow native daily briefing issue schedule worker enqueue in copied-home proof"
+priority = 20
+
+[[rules]]
+id = "allow-daily-briefing-source-write"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "arcwell"
+source = "source_card_add"
+reason = "allow generated daily briefing audit source card in copied-home proof"
+priority = 15
+
+[[rules]]
+id = "allow-daily-briefing-auto-approval"
+effect = "allow"
+action = "digest_candidate.auto_approve"
+package = "arcwell-knowledge"
+source = "knowledge_daily_briefing"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "email:$RECIPIENT"
+reason = "allow daily briefing auto approval for controlled proof recipient"
+priority = 10
+
+[[rules]]
+id = "allow-daily-briefing-digest-delivery"
+effect = "allow"
+action = "digest_candidate.deliver"
+package = "arcwell-knowledge"
+source = "knowledge_daily_briefing_delivery"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "email:$RECIPIENT"
+reason = "allow daily briefing controlled email delivery"
+priority = 10
+
+[[rules]]
+id = "allow-daily-briefing-email-send"
+effect = "allow"
+action = "channel.send"
+package = "arcwell-email"
+provider = "cloudflare_email"
+source = "email_send"
+channel = "email"
+subject = "email:$RECIPIENT"
+target = "$RECIPIENT"
+reason = "allow daily briefing controlled Cloudflare Email send"
+priority = 10
+POLICY
+
+log "authorizing controlled recipient and storing controlled provider config"
+"$ARCWELL_BIN" email authorize "$RECIPIENT" --send >"$ARTIFACT_DIR/email-authorization.json"
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_ACCOUNT_ID dailybriefingacct --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_EMAIL_API_TOKEN daily-briefing-token --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value ARCWELL_AGENT_EMAIL_FROM "$FROM" --provider email >/dev/null
+"$ARCWELL_BIN" secrets set-value CLOUDFLARE_EMAIL_API_BASE "$EMAIL_API_BASE" --provider email >/dev/null
+
+read -r DUE_HOUR DUE_MINUTE CREATED_AT < <(node <<'NODE'
+const due = new Date(Date.now() - 10 * 60 * 1000);
+const created = new Date(Date.now() - 23 * 60 * 60 * 1000);
+process.stdout.write(`${due.getUTCHours()} ${due.getUTCMinutes()} ${created.toISOString()}\n`);
+NODE
+)
+
+log "creating overdue native daily briefing schedule"
+"$ARCWELL_BIN" knowledge schedule-daily-briefing \
+  --name "Daily briefing catch-up proof $RUN_STAMP" \
+  --channel email \
+  --recipient-ref "email:$RECIPIENT" \
+  --time-zone utc \
+  --hour "$DUE_HOUR" \
+  --minute "$DUE_MINUTE" \
+  --catch-up-hours 72 \
+  --max-reports 20 \
+  --max-source-cards 120 \
+  --status active \
+  >"$ARTIFACT_DIR/schedule.json"
+
+SCHEDULE_ID="$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(j.id)' "$ARTIFACT_DIR/schedule.json")"
+
+log "backdating schedule creation in copied home to simulate laptop-off missed slot"
+sqlite3 "$DB" <<SQL
+UPDATE issue_schedules
+SET created_at = '$CREATED_AT',
+    updated_at = '$CREATED_AT',
+    metadata_json = json_set(
+      metadata_json,
+      '$.window_hours', 336,
+      '$.max_catch_up_ticks', 1,
+      '$.report_scan_limit', 500,
+      '$.source_card_scan_limit', 2000,
+      '$.proof_scenario', 'copied-home missed slot catch-up'
+    )
+WHERE id = '$SCHEDULE_ID';
+SQL
+
+"$ARCWELL_BIN" ops --compact >"$ARTIFACT_DIR/ops-before.json"
+
+log "running one worker pass"
+if "$ARCWELL_BIN" worker run-once --max-jobs 5 >"$ARTIFACT_DIR/worker-first.json" 2>"$ARTIFACT_DIR/worker-first.err"; then
+  WORKER_FIRST_EXIT=0
+else
+  WORKER_FIRST_EXIT=$?
+fi
+
+"$ARCWELL_BIN" knowledge issue-schedule-ticks --schedule-id "$SCHEDULE_ID" >"$ARTIFACT_DIR/ticks-after-first.json"
+"$ARCWELL_BIN" knowledge issue-schedules >"$ARTIFACT_DIR/schedules-after-first.json"
+"$ARCWELL_BIN" ops --compact >"$ARTIFACT_DIR/ops-after-first.json"
+
+log "running a second worker pass to prove duplicate suppression"
+if "$ARCWELL_BIN" worker run-once --max-jobs 5 >"$ARTIFACT_DIR/worker-second.json" 2>"$ARTIFACT_DIR/worker-second.err"; then
+  WORKER_SECOND_EXIT=0
+else
+  WORKER_SECOND_EXIT=$?
+fi
+"$ARCWELL_BIN" knowledge issue-schedule-ticks --schedule-id "$SCHEDULE_ID" >"$ARTIFACT_DIR/ticks-after-second.json"
+"$ARCWELL_BIN" ops --compact >"$ARTIFACT_DIR/ops-after-second.json"
+
+log "validating proof artifacts"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$SCHEDULE_ID" "$RECIPIENT" "$WORKER_FIRST_EXIT" "$WORKER_SECOND_EXIT" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, proofRoot, scheduleId, recipient, workerFirstExitRaw, workerSecondExitRaw] =
+  process.argv.slice(2);
+
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const readMaybe = (name, fallback) => {
+  try {
+    return read(name);
+  } catch {
+    return fallback;
+  }
+};
+const readJsonl = (name) => {
+  const file = path.join(artifactDir, name);
+  if (!fs.existsSync(file) || fs.statSync(file).size === 0) return [];
+  return fs.readFileSync(file, "utf8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line));
+};
+const failures = [];
+const notes = [];
+const check = (condition, message) => {
+  if (!condition) failures.push(message);
+};
+
+const sourceCardCount = readMaybe("source-card-count.json", [{ source_cards: 0 }])[0]?.source_cards || 0;
+const reportCount = readMaybe("knowledge-report-count.json", [{ knowledge_reports: 0 }])[0]?.knowledge_reports || 0;
+const workerFirst = readMaybe("worker-first.json", {});
+const workerSecond = readMaybe("worker-second.json", {});
+const ticksFirst = readMaybe("ticks-after-first.json", []);
+const ticksSecond = readMaybe("ticks-after-second.json", []);
+const opsBefore = readMaybe("ops-before.json", {});
+const opsAfterFirst = readMaybe("ops-after-first.json", {});
+const opsAfterSecond = readMaybe("ops-after-second.json", {});
+const providerRequests = readJsonl("email-provider-requests.jsonl");
+
+const summaryBefore = (opsBefore.issue_schedule_summary || []).find((item) => item.schedule_id === scheduleId);
+const summaryAfterFirst = (opsAfterFirst.issue_schedule_summary || []).find((item) => item.schedule_id === scheduleId);
+const summaryAfterSecond = (opsAfterSecond.issue_schedule_summary || []).find((item) => item.schedule_id === scheduleId);
+const firstJob = (workerFirst.jobs || []).find((job) => job.kind === "knowledge_daily_briefing");
+
+check(Number(workerFirstExitRaw) === 0, `first worker pass exited ${workerFirstExitRaw}`);
+check(Number(workerSecondExitRaw) === 0, `second worker pass exited ${workerSecondExitRaw}`);
+check(sourceCardCount > 0, "copied home has no source cards");
+check(reportCount > 0, "copied home has no knowledge reports");
+check(summaryBefore && summaryBefore.catch_up_status === "due", "ops before worker should report due catch-up");
+check(summaryBefore && summaryBefore.due_slot_count >= 1, "ops before worker should expose at least one due slot");
+check(workerFirst.issue_schedule && workerFirst.issue_schedule.enqueued === 1, "first worker pass should enqueue one issue schedule job");
+check(firstJob, "first worker pass should claim a knowledge_daily_briefing job");
+check(firstJob && firstJob.status === "completed", "knowledge_daily_briefing job should complete");
+check(firstJob && firstJob.result_json && firstJob.result_json.status === "sent", "knowledge_daily_briefing result should be sent");
+check(ticksFirst.length === 1, "first pass should create exactly one issue tick");
+check(ticksFirst[0] && ticksFirst[0].status === "sent", "first issue tick should be sent");
+check(ticksFirst[0] && ticksFirst[0].candidate_id, "sent issue tick should link a digest candidate");
+check(ticksFirst[0] && ticksFirst[0].delivery_id, "sent issue tick should link a digest delivery");
+check(providerRequests.length === 1, "controlled provider should receive exactly one email request");
+check(workerSecond.issue_schedule && workerSecond.issue_schedule.enqueued === 0, "second worker pass should not enqueue duplicate issue job");
+check(ticksSecond.length === 1, "second pass should not create a duplicate issue tick");
+check(summaryAfterFirst && summaryAfterFirst.catch_up_status === "not_due", "ops after first worker should report not_due");
+check(summaryAfterSecond && summaryAfterSecond.catch_up_status === "not_due", "ops after second worker should remain not_due");
+
+if (firstJob && firstJob.result_json && firstJob.result_json.delivery) {
+  const delivery = firstJob.result_json.delivery;
+  if (JSON.stringify(delivery).includes("daily-briefing-token")) {
+    failures.push("proof artifacts leaked controlled email token");
+  }
+}
+for (const request of providerRequests) {
+  if (String(request.authorization || "").includes("daily-briefing-token")) {
+    failures.push("provider request log leaked controlled email token");
+  }
+  if (!String(request.body || "").includes(recipient)) {
+    notes.push("provider request body did not visibly include proof recipient");
+  }
+}
+
+const packet = {
+  proof_name: "daily-briefing-catchup-proof",
+  proof_level: "Copied-home controlled-provider proof",
+  generated_at: new Date().toISOString(),
+  status: failures.length === 0 ? "passed" : "incomplete",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME,
+  schedule_id: scheduleId,
+  recipient_ref: `email:${recipient}`,
+  copied_source_card_count: sourceCardCount,
+  copied_knowledge_report_count: reportCount,
+  before: {
+    catch_up_status: summaryBefore?.catch_up_status || null,
+    due_slot_count: summaryBefore?.due_slot_count || null,
+    next_due_at: summaryBefore?.next_due_at || null,
+  },
+  first_worker: {
+    exit: Number(workerFirstExitRaw),
+    issue_schedule: workerFirst.issue_schedule || null,
+    processed: workerFirst.processed ?? null,
+    completed: workerFirst.completed ?? null,
+    job_status: firstJob?.status || null,
+    result_status: firstJob?.result_json?.status || null,
+  },
+  after_first: {
+    tick_count: ticksFirst.length,
+    tick_status: ticksFirst[0]?.status || null,
+    has_candidate: Boolean(ticksFirst[0]?.candidate_id),
+    has_delivery: Boolean(ticksFirst[0]?.delivery_id),
+    catch_up_status: summaryAfterFirst?.catch_up_status || null,
+  },
+  second_worker: {
+    exit: Number(workerSecondExitRaw),
+    issue_schedule: workerSecond.issue_schedule || null,
+    processed: workerSecond.processed ?? null,
+  },
+  after_second: {
+    tick_count: ticksSecond.length,
+    catch_up_status: summaryAfterSecond?.catch_up_status || null,
+  },
+  provider_request_count: providerRequests.length,
+  failures,
+  notes,
+  artifacts: {
+    schedule: path.join(artifactDir, "schedule.json"),
+    ops_before: path.join(artifactDir, "ops-before.json"),
+    worker_first: path.join(artifactDir, "worker-first.json"),
+    ticks_after_first: path.join(artifactDir, "ticks-after-first.json"),
+    ops_after_first: path.join(artifactDir, "ops-after-first.json"),
+    worker_second: path.join(artifactDir, "worker-second.json"),
+    ticks_after_second: path.join(artifactDir, "ticks-after-second.json"),
+    provider_requests: path.join(artifactDir, "email-provider-requests.jsonl"),
+  },
+  anti_mirage_boundary:
+    "This proves copied-home catch-up enqueue, source-backed daily briefing materialization, controlled provider send attempt, and duplicate suppression. It does not prove the live future 7am wall-clock send or mailbox placement.",
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+console.log(JSON.stringify(packet, null, 2));
+NODE
+
+PACKET_STATUS="$(node -e "const p=require(process.argv[1]); console.log(p.status)" "$ARTIFACT_DIR/proof-packet.json")"
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+if [[ "$PACKET_STATUS" != "passed" && "$ALLOW_INCOMPLETE" != "1" ]]; then
+  fail "daily briefing catch-up proof is $PACKET_STATUS; rerun with --allow-incomplete to keep artifacts without failing"
+fi

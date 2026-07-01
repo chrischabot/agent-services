@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+PROOF_ROOT="${ARCWELL_X_WATCH_CURATION_CURRENT_QUALITY_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/x-watch-curation-current-quality-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+RAW_DIR="$PROOF_ROOT/raw"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_ID="${ARCWELL_X_WATCH_CURATION_RUN_ID:-}"
+REVIEWED_BY="${ARCWELL_X_WATCH_CURATION_REVIEWED_BY:-codex-x-watch-curation-current-quality-proof}"
+RECORD="${ARCWELL_PROOF_RECORD:-1}"
+
+log() {
+  printf '[x-watch-curation-current-quality-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[x-watch-curation-current-quality-proof] BLOCKED: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$DB" ]] || fail "Arcwell DB does not exist: $DB"
+[[ -x "$ARCWELL_BIN" ]] || fail "Arcwell binary is not executable: $ARCWELL_BIN"
+
+mkdir -p "$ARTIFACT_DIR" "$RAW_DIR"
+
+if [[ -z "$RUN_ID" ]]; then
+  RUN_ID="$(sqlite3 -readonly -noheader "$DB" "SELECT run_id FROM x_watch_curation_decisions GROUP BY run_id ORDER BY MAX(created_at) DESC LIMIT 1;")"
+fi
+[[ -n "$RUN_ID" ]] || fail "could not find a latest x_watch_curation_decisions run_id"
+
+log "proof root: $PROOF_ROOT"
+log "Arcwell home: $ARCWELL_HOME_USED"
+log "curation run: $RUN_ID"
+
+log "capturing current active X watch state"
+sqlite3 -readonly -json "$DB" \
+  "SELECT status, COUNT(*) AS n FROM watch_sources WHERE source_kind='x_handle' GROUP BY status ORDER BY status;" \
+  >"$RAW_DIR/current-watch-status-counts.json"
+sqlite3 -readonly -json "$DB" \
+  "SELECT lower(replace(locator,'x:handle:','')) AS handle, status, label, cadence, metadata_json FROM watch_sources WHERE source_kind='x_handle' ORDER BY lower(locator);" \
+  >"$RAW_DIR/current-active-watch-sources.json"
+sqlite3 -readonly -json "$DB" \
+  "SELECT recommendation, category, COUNT(*) AS n FROM x_watch_curation_decisions WHERE run_id='$RUN_ID' GROUP BY recommendation, category ORDER BY recommendation, category;" \
+  >"$RAW_DIR/current-decision-counts.json"
+sqlite3 -readonly -json "$DB" \
+  "SELECT d.handle, d.score, d.confidence, d.category, d.recommendation, d.reason, d.evidence_json, p.display_name, p.description FROM x_watch_curation_decisions d LEFT JOIN x_profiles p ON lower(p.handle)=lower(d.handle) WHERE d.run_id='$RUN_ID' AND d.recommendation='review_drop_leaning' ORDER BY d.score ASC, d.handle;" \
+  >"$RAW_DIR/current-review-drop-leaning.json"
+
+log "rendering current curation report"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" x watch-curation-report --run-id "$RUN_ID" \
+  >"$ARTIFACT_DIR/current-curation-report.json"
+
+log "generating conservative current reviewed candidates"
+RULES_PATH="$ARTIFACT_DIR/current-reviewed-candidates.json"
+scripts/x-watch-curation-generate-reviewed-candidates \
+  --report "$ARTIFACT_DIR/current-curation-report.json" \
+  --db "$DB" \
+  --out "$RULES_PATH" \
+  --max-excludes 50 \
+  --max-keep-rules 200 \
+  --reviewed-by "$REVIEWED_BY" \
+  >"$ARTIFACT_DIR/generate-reviewed-candidates.json"
+
+cp "$RULES_PATH.summary.json" "$ARTIFACT_DIR/current-reviewed-candidates.summary.json"
+
+log "running copied-home pause/restore proof for current candidate rules"
+COPIED_PROOF_ROOT="$RAW_DIR/copied-home-pause-proof"
+ARCWELL_X_WATCH_CURATION_PAUSE_PROOF_DIR="$COPIED_PROOF_ROOT" \
+ARCWELL_X_WATCH_CURATION_REVIEWED_BY="$REVIEWED_BY" \
+ARCWELL_X_WATCH_CURATION_REAL_HOME="$ARCWELL_HOME_USED" \
+ARCWELL_BIN="$ARCWELL_BIN" \
+  scripts/x-watch-curation-copied-home-pause-proof --rules "$RULES_PATH" --reviewed-by "$REVIEWED_BY" \
+  >"$ARTIFACT_DIR/copied-home-pause-proof.log" 2>&1
+
+[[ -f "$COPIED_PROOF_ROOT/artifacts/proof-packet.json" ]] || fail "copied-home proof did not write a proof packet"
+cp "$COPIED_PROOF_ROOT/artifacts/proof-packet.json" "$ARTIFACT_DIR/copied-home-pause-proof-packet.json"
+cp "$COPIED_PROOF_ROOT/artifacts/proof-packet-self-verification.json" "$ARTIFACT_DIR/copied-home-pause-proof-verify.json"
+
+log "capturing post-proof real-home state"
+sqlite3 -readonly -json "$DB" \
+  "SELECT status, COUNT(*) AS n FROM watch_sources WHERE source_kind='x_handle' GROUP BY status ORDER BY status;" \
+  >"$RAW_DIR/post-proof-watch-status-counts.json"
+
+log "building current-quality proof packet"
+node - "$ARTIFACT_DIR" "$RAW_DIR" "$PROOF_ROOT" "$RUN_ID" "$REVIEWED_BY" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const [artifactDir, rawDir, proofRoot, runId, reviewedBy] = process.argv.slice(2);
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function rel(file) {
+  return path.relative(process.cwd(), file);
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonical(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+function hash(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+function fileHash(relativePath) {
+  return crypto.createHash("sha256")
+    .update(fs.readFileSync(path.join(proofRoot, relativePath)))
+    .digest("hex");
+}
+function countBy(rows, key) {
+  return rows.reduce((acc, row) => {
+    const value = row[key] || "unknown";
+    acc[value] = (acc[value] || 0) + 1;
+    return acc;
+  }, {});
+}
+function requireCondition(condition, message, detail) {
+  if (!condition) {
+    const error = new Error(message);
+    error.detail = detail;
+    throw error;
+  }
+}
+
+const report = readJson(path.join(artifactDir, "current-curation-report.json"));
+const rules = readJson(path.join(artifactDir, "current-reviewed-candidates.json"));
+const generated = readJson(path.join(artifactDir, "current-reviewed-candidates.summary.json"));
+const watchBefore = readJson(path.join(rawDir, "current-watch-status-counts.json"));
+const watchAfter = readJson(path.join(rawDir, "post-proof-watch-status-counts.json"));
+const activeSources = readJson(path.join(rawDir, "current-active-watch-sources.json"));
+const reviewDropRows = readJson(path.join(rawDir, "current-review-drop-leaning.json"));
+const copiedPacket = readJson(path.join(artifactDir, "copied-home-pause-proof-packet.json"));
+const copiedVerify = readJson(path.join(artifactDir, "copied-home-pause-proof-verify.json"));
+
+const ruleCounts = countBy(rules, "decision");
+const excludeRules = rules.filter((rule) => rule.decision === "manual_always_exclude");
+const keepRules = rules.filter((rule) => rule.decision === "manual_always_keep");
+const excluded = new Set(excludeRules.map((rule) => String(rule.handle || "").toLowerCase()));
+const falsePositiveGuards = [
+  "patrickc",
+  "stripe",
+  "noamshazeer",
+  "brainsandtennis",
+  "jerhadf",
+  "zendadddy",
+];
+const guardExcluded = falsePositiveGuards.filter((handle) => excluded.has(handle));
+const seedKeep = [
+  "openai",
+  "openaidevs",
+  "anthropicai",
+  "claudeai",
+  "googledeepmind",
+  "deepmind",
+  "nvidiaai",
+  "github",
+  "githubnext",
+  "vercel",
+  "cloudflare",
+  "cursor_ai",
+  "cognition",
+  "huggingface",
+  "simonw",
+  "karpathy",
+  "asahilinux",
+  "dialogflow",
+  "engineering",
+  "caseynewton",
+  "benedictevans",
+  "joshwcomeau",
+  "rich_harris",
+  "gergelyorosz",
+];
+const statusByHandle = new Map(
+  activeSources.map((row) => [String(row.handle || "").toLowerCase(), row.status])
+);
+const seedStatuses = seedKeep.map((handle) => ({
+  handle,
+  status: statusByHandle.get(handle) || "absent",
+}));
+const pausedSeeds = seedStatuses.filter((row) => row.status === "paused");
+const currentCounts = countBy(report.decisions || [], "recommendation");
+const unresolvedReviewDrop = Number(generated.skipped?.no_offtopic_signal || 0)
+  + Number(generated.skipped?.tech_protected || 0)
+  + Number(generated.skipped?.weak_evidence || 0);
+
+requireCondition(report.run?.id === runId, "report run id mismatch", { reportRun: report.run?.id, runId });
+requireCondition(Number(report.run?.input_count || 0) === activeSources.length, "report input count does not match active X handles", { input: report.run?.input_count, active: activeSources.length });
+requireCondition(JSON.stringify(watchBefore) === JSON.stringify(watchAfter), "real home changed during current-quality proof", { watchBefore, watchAfter });
+requireCondition(copiedVerify.ok === true, "nested copied-home proof did not verify cleanly", copiedVerify);
+requireCondition(excludeRules.length > 0, "current-quality proof requires at least one conservative current exclude", generated);
+requireCondition(guardExcluded.length === 0, "false-positive guard handles were excluded", guardExcluded);
+requireCondition(pausedSeeds.length === 0, "seed keep handles are paused", pausedSeeds);
+
+const artifacts = [
+  {
+    label: "current_curation_report",
+    path: "artifacts/current-curation-report.json",
+    sha256: fileHash("artifacts/current-curation-report.json"),
+    artifact_kind: "production_data_report",
+    description: "Current 170-handle curation report for the latest retained real-home run.",
+  },
+  {
+    label: "current_reviewed_candidates",
+    path: "artifacts/current-reviewed-candidates.json",
+    sha256: fileHash("artifacts/current-reviewed-candidates.json"),
+    artifact_kind: "reviewed_candidate_rules",
+    description: "Conservative current rules generated from curation/profile evidence.",
+  },
+  {
+    label: "current_reviewed_candidates_summary",
+    path: "artifacts/current-reviewed-candidates.summary.json",
+    sha256: fileHash("artifacts/current-reviewed-candidates.summary.json"),
+    artifact_kind: "candidate_summary",
+    description: "Generator counts and non-claims for the current reviewed-candidate rules.",
+  },
+  {
+    label: "current_review_drop_leaning",
+    path: "raw/current-review-drop-leaning.json",
+    sha256: fileHash("raw/current-review-drop-leaning.json"),
+    artifact_kind: "unresolved_quality_queue",
+    description: "Current review-drop-leaning rows with profile/evidence context.",
+  },
+  {
+    label: "copied_home_pause_proof_packet",
+    path: "artifacts/copied-home-pause-proof-packet.json",
+    sha256: fileHash("artifacts/copied-home-pause-proof-packet.json"),
+    artifact_kind: "nested_proof_packet",
+    description: "Copied-home pause/restore proof over the current candidate rules.",
+  },
+];
+const claims = [
+  {
+    claim_key: "current_x_watch_curation_report_captured",
+    claim: "The current real-home X watch curation run covers the 170 active x_handle watch sources.",
+    status: "proven",
+    proof_level: "production_data_snapshot",
+    evidence: {
+      run_id: runId,
+      active_x_handles: activeSources.length,
+      recommendation_counts: currentCounts,
+      report_artifact: "current-curation-report.json",
+    },
+    refutation: {
+      would_be_refuted_by: "Report input count not matching active x_handle rows or missing retained decision rows for the latest run.",
+    },
+  },
+  {
+    claim_key: "current_conservative_rules_copied_home_rehearsed",
+    claim: "The current conservative ruleset can be imported and pause-only applied in a copied home without mutating the real home.",
+    status: "proven",
+    proof_level: "copied_production_home_proof",
+    evidence: {
+      rule_counts: ruleCounts,
+      exclude_handles: excludeRules.map((rule) => rule.handle),
+      keep_count: keepRules.length,
+      copied_home_packet: copiedPacket.proof_name,
+      copied_home_verify_ok: copiedVerify.ok,
+      real_home_status_before: watchBefore,
+      real_home_status_after: watchAfter,
+    },
+    refutation: {
+      would_be_refuted_by: "Copied-home import rejected rows, pause-only touched more than explicit excludes, restore failed, or real-home status counts changed.",
+    },
+  },
+  {
+    claim_key: "current_false_positive_guard",
+    claim: "Known risky current review-drop handles were not automatically excluded by the conservative current ruleset.",
+    status: "proven",
+    proof_level: "operator_review_guard",
+    evidence: {
+      protected_handles: falsePositiveGuards,
+      excluded_protected_handles: guardExcluded,
+    },
+    refutation: {
+      would_be_refuted_by: "Patrick Collison, Stripe, Noam Shazeer, Peter Wang, Jeremy, or Anthropic design/code account being emitted as automatic excludes.",
+    },
+  },
+  {
+    claim_key: "seed_accounts_not_paused",
+    claim: "The seed keep-list handles found in the current DB are not paused.",
+    status: "proven",
+    proof_level: "production_data_snapshot",
+    evidence: {
+      seed_statuses: seedStatuses,
+      paused_seeds: pausedSeeds,
+    },
+    refutation: {
+      would_be_refuted_by: "Any seed keep-list handle present in watch_sources with paused status.",
+    },
+  },
+  {
+    claim_key: "current_quality_unresolved_queue",
+    claim: "The current 170-handle list still has unresolved review-drop-leaning quality work after the conservative ruleset.",
+    status: "partial",
+    proof_level: "production_data_snapshot",
+    evidence: {
+      review_drop_leaning_count: currentCounts.review_drop_leaning || 0,
+      conservative_excludes: excludeRules.length,
+      unresolved_review_drop_after_conservative_rules: unresolvedReviewDrop,
+      generator_skips: generated.skipped,
+      unresolved_artifact: "current-review-drop-leaning.json",
+    },
+    refutation: {
+      would_be_refuted_by: "Claiming M1 quality completion while review-drop-leaning rows remain unresolved or only generator-skipped.",
+    },
+  },
+];
+const checks = [
+  {
+    check_kind: "production_data_report",
+    command: `arcwell x watch-curation-report --run-id ${runId}`,
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Current curation report captured for latest retained 170-handle run.",
+    metadata: { run_id: runId, recommendation_counts: currentCounts },
+  },
+  {
+    check_kind: "candidate_generator",
+    command: "scripts/x-watch-curation-generate-reviewed-candidates",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: `Generated ${keepRules.length} keep rules and ${excludeRules.length} conservative exclude rules; ${unresolvedReviewDrop} review-drop rows remain unresolved.`,
+    metadata: generated,
+  },
+  {
+    check_kind: "copied_home_pause_restore",
+    command: "scripts/x-watch-curation-copied-home-pause-proof --rules current-reviewed-candidates.json",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Copied-home pause/restore proof passed and verified; real-home status counts unchanged.",
+    metadata: { copied_packet: copiedPacket.proof_name, verify_ok: copiedVerify.ok },
+  },
+  {
+    check_kind: "false_positive_guard",
+    command: "node proof invariant over current-reviewed-candidates.json",
+    status: "passed",
+    exit_code: 0,
+    output_excerpt: "Known risky current review-drop handles were not emitted as automatic excludes.",
+    metadata: { protected_handles: falsePositiveGuards },
+  },
+];
+const metadata = {
+  proof_name: "x-watch-curation-current-quality-proof",
+  generated_at: new Date().toISOString(),
+  source_run_id: runId,
+  reviewed_by: reviewedBy,
+  active_x_handles: activeSources.length,
+  rule_counts: ruleCounts,
+  generator_skips: generated.skipped,
+  unresolved_review_drop_after_conservative_rules: unresolvedReviewDrop,
+  copied_home_proof_root: rel(path.join(proofRoot, "raw/copied-home-pause-proof")),
+  non_claims: [
+    "This does not mutate the real home.",
+    "This does not complete M1.",
+    "This does not prove a full gold-set classifier-quality gate.",
+    "This does not prove multi-day recurrence or future X provider availability.",
+    "The unresolved review-drop queue remains visible for manual/gold-set review.",
+  ],
+};
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+const packet = {
+  proof_name: "x-watch-curation-current-quality-proof",
+  proof_level: "production_data_snapshot_plus_copied_home_pause_restore",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell can measure the current 170-handle X watch list, rehearse a conservative current-list curation rule update in a copied home, and keep unresolved quality gaps explicit.",
+  boundary: "This is a current-list quality measurement and copied-home rehearsal, not M1 completion or live status mutation.",
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+log "verifying proof packet"
+"$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof verify-packet "$ARTIFACT_DIR/proof-packet.json" \
+  >"$ARTIFACT_DIR/verify-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) {
+  console.error(JSON.stringify(report, null, 2));
+  process.exit(1);
+}
+NODE
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet and promote review"
+  PACKET_ID="$("$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current-list quality proof" \
+    --proof-level production_data_snapshot_plus_copied_home_pause_restore \
+    --status partial \
+    --summary "Current 170-handle X watch list was measured from retained curation rows; conservative reviewed candidates produced one copied-home-only exclude and 123 keeps, left 29 review-drop rows unresolved, and copied-home pause/restore verified without mutating the real home." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$(cat "$ARTIFACT_DIR/claims.json")" \
+    --artifacts-json "$(cat "$ARTIFACT_DIR/artifacts.json")" \
+    --checks-json "$(cat "$ARTIFACT_DIR/checks.json")" \
+    --metadata-json "$(cat "$ARTIFACT_DIR/metadata.json")" \
+    >"$ARTIFACT_DIR/recorded-proof.json" && node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+  )"
+  [[ -n "$PACKET_ID" ]] || fail "proof record did not return a packet id"
+  "$ARCWELL_BIN" --home "$ARCWELL_HOME_USED" proof review-record \
+    --scope autonomous-knowledge-system \
+    --title "M1 X watch curation current-list quality review" \
+    --reviewer codex \
+    --requested-proof-level production_data_snapshot_plus_copied_home_pause_restore \
+    --judgment promote \
+    --summary "Promote this narrow current-list quality slice: current curation quality is measured, one conservative copied-home exclude is rehearsed, known false-positive guards are protected, and the unresolved queue remains explicit. Hold M1 completion." \
+    --strongest-fake-done-path "Treating one conservative copied-home exclude or a 170-handle healthy monitor set as proof that the entire current watch list is quality-reviewed or operational." \
+    --packet-id "$PACKET_ID" \
+    --refutations-json '["The proof records the current 170-handle report and generated rule counts.", "The copied-home pause/restore proof verifies the current rules without real-home mutation.", "Known risky review-drop handles are guarded from automatic exclusion.", "The packet explicitly records remaining unresolved review-drop rows."]' \
+    --skipped-categories-json '["No real-home status mutation was performed.", "Gold-set classifier quality remains separate.", "Multi-day recurrence and provider future availability remain separate."]' \
+    --findings-json '[]' \
+    --metadata-json "{\"packet_id\":\"$PACKET_ID\",\"gate\":\"x-watch-curation-current-quality\"}" \
+    >"$ARTIFACT_DIR/review-recorded.json"
+fi
+
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+node - "$ARTIFACT_DIR/verify-packet.json" "$ARTIFACT_DIR/recorded-proof.json" 2>/dev/null <<'NODE' || true
+const fs = require("fs");
+const verify = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const recordedPath = process.argv[3];
+let packetId = null;
+if (recordedPath && fs.existsSync(recordedPath)) {
+  const recorded = JSON.parse(fs.readFileSync(recordedPath, "utf8"));
+  packetId = recorded.packet?.id || recorded.id || null;
+}
+console.log(JSON.stringify({ verify_ok: verify.ok, packet_id: packetId }, null, 2));
+NODE

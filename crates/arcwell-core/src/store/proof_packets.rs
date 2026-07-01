@@ -379,6 +379,158 @@ impl Store {
             .with_context(|| format!("promoted proof packet not found: {packet_id}"))
     }
 
+    pub fn record_adversarial_review(
+        &self,
+        input: AdversarialReviewRunInput,
+    ) -> Result<AdversarialReviewReport> {
+        validate_adversarial_review_input(&input)?;
+        if let Some(packet_id) = &input.packet_id {
+            self.read_proof_packet(packet_id)?.with_context(|| {
+                format!("proof packet not found for adversarial review: {packet_id}")
+            })?;
+        }
+        let review_id = format!(
+            "arev-{}",
+            &sha256(
+                format!(
+                    "{}\n{}\n{}\n{}",
+                    input.scope,
+                    input.title,
+                    input.judgment,
+                    Uuid::new_v4()
+                )
+                .as_bytes()
+            )[..24]
+        );
+        let created_at = now();
+        let record_result = (|| -> Result<()> {
+            self.conn.execute("BEGIN IMMEDIATE", [])?;
+            self.conn.execute(
+                r#"
+                INSERT INTO adversarial_review_runs
+                  (id, packet_id, scope, title, reviewer, requested_proof_level,
+                   judgment, summary, strongest_fake_done_path, refutations_json,
+                   skipped_categories_json, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "#,
+                params![
+                    review_id,
+                    input.packet_id,
+                    input.scope,
+                    input.title,
+                    input.reviewer,
+                    input.requested_proof_level,
+                    input.judgment,
+                    input.summary,
+                    input.strongest_fake_done_path,
+                    canonical_json(&input.refutations)?,
+                    canonical_json(&input.skipped_categories)?,
+                    canonical_json(&input.metadata)?,
+                    created_at,
+                ],
+            )?;
+            for (index, finding) in input.findings.iter().enumerate() {
+                let id = proof_child_id(
+                    "arev-finding",
+                    &review_id,
+                    &format!("{}-{index}", finding.title),
+                );
+                self.conn.execute(
+                    r#"
+                    INSERT INTO adversarial_review_findings
+                      (id, review_id, severity, status, title, body, evidence_json,
+                       recommendation, created_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "#,
+                    params![
+                        id,
+                        review_id,
+                        finding.severity,
+                        finding.status,
+                        finding.title,
+                        finding.body,
+                        canonical_json(&finding.evidence)?,
+                        finding.recommendation,
+                        created_at,
+                    ],
+                )?;
+            }
+            self.conn.execute("COMMIT", [])?;
+            Ok(())
+        })();
+        if let Err(error) = record_result {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(error);
+        }
+        self.read_adversarial_review(&review_id)?
+            .with_context(|| format!("created adversarial review not found: {review_id}"))
+    }
+
+    pub fn read_adversarial_review(
+        &self,
+        review_id: &str,
+    ) -> Result<Option<AdversarialReviewReport>> {
+        validate_id(review_id)?;
+        let review = self
+            .conn
+            .query_row(
+                r#"
+                SELECT id, packet_id, scope, title, reviewer, requested_proof_level,
+                       judgment, summary, strongest_fake_done_path, refutations_json,
+                       skipped_categories_json, metadata_json, created_at
+                FROM adversarial_review_runs
+                WHERE id = ?1
+                "#,
+                params![review_id],
+                adversarial_review_run_from_row,
+            )
+            .optional()?;
+        let Some(review) = review else {
+            return Ok(None);
+        };
+        let findings = self.list_adversarial_review_findings(review_id)?;
+        Ok(Some(AdversarialReviewReport {
+            review,
+            findings,
+            non_claims: adversarial_review_non_claims(),
+        }))
+    }
+
+    pub fn list_adversarial_reviews(
+        &self,
+        scope: Option<&str>,
+        packet_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AdversarialReviewSummary>> {
+        let limit = limit.clamp(1, 500);
+        if let Some(scope) = scope {
+            validate_key(scope)?;
+        }
+        if let Some(packet_id) = packet_id {
+            validate_id(packet_id)?;
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT r.id, r.packet_id, r.scope, r.title, r.reviewer,
+                   r.requested_proof_level, r.judgment,
+                   COUNT(f.id) AS finding_count,
+                   SUM(CASE WHEN f.status = 'blocking' THEN 1 ELSE 0 END) AS blocking_finding_count,
+                   r.created_at
+            FROM adversarial_review_runs r
+            LEFT JOIN adversarial_review_findings f ON f.review_id = r.id
+            WHERE (?1 IS NULL OR r.scope = ?1)
+              AND (?2 IS NULL OR r.packet_id = ?2)
+            GROUP BY r.id
+            ORDER BY r.created_at DESC, r.id DESC
+            LIMIT ?3
+            "#,
+        )?;
+        rows(stmt.query_map(
+            params![scope, packet_id, limit],
+            adversarial_review_summary_from_row,
+        )?)
+    }
+
     fn list_proof_claims(&self, packet_id: &str) -> Result<Vec<ProofClaim>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -415,6 +567,22 @@ impl Store {
             "#,
         )?;
         rows(stmt.query_map(params![packet_id], proof_check_from_row)?)
+    }
+
+    fn list_adversarial_review_findings(
+        &self,
+        review_id: &str,
+    ) -> Result<Vec<AdversarialReviewFinding>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, review_id, severity, status, title, body, evidence_json,
+                   recommendation, created_at
+            FROM adversarial_review_findings
+            WHERE review_id = ?1
+            ORDER BY severity DESC, title
+            "#,
+        )?;
+        rows(stmt.query_map(params![review_id], adversarial_review_finding_from_row)?)
     }
 }
 
@@ -631,6 +799,14 @@ fn proof_packet_non_claims() -> Vec<String> {
         "A proof packet proves only the explicit claims listed in the packet.".to_string(),
         "Local proof artifacts are not live external recurrence proof unless the claims and artifacts say so.".to_string(),
         "Generated summaries, model scores, and unchecked source text are not primary evidence by themselves.".to_string(),
+    ]
+}
+
+fn adversarial_review_non_claims() -> Vec<String> {
+    vec![
+        "An adversarial review records a human or agent judgment; it does not execute the proof gates by itself.".to_string(),
+        "A promote judgment is only valid for the requested proof level and linked packet/scope.".to_string(),
+        "Hold and block findings must stay visible until a later proof packet or review resolves them.".to_string(),
     ]
 }
 
@@ -1136,6 +1312,74 @@ fn validate_proof_packet_status(status: &str) -> Result<()> {
     }
 }
 
+fn validate_adversarial_review_input(input: &AdversarialReviewRunInput) -> Result<()> {
+    if let Some(packet_id) = &input.packet_id {
+        validate_id(packet_id)?;
+    }
+    validate_required_text("scope", &input.scope, 200)?;
+    validate_required_text("title", &input.title, 300)?;
+    validate_required_text("reviewer", &input.reviewer, 200)?;
+    validate_required_text("requested_proof_level", &input.requested_proof_level, 120)?;
+    validate_adversarial_review_judgment(&input.judgment)?;
+    validate_required_text("summary", &input.summary, PROOF_PACKET_MAX_TEXT)?;
+    validate_required_text(
+        "strongest_fake_done_path",
+        &input.strongest_fake_done_path,
+        PROOF_PACKET_MAX_TEXT,
+    )?;
+    validate_json_size("review.refutations", &input.refutations)?;
+    validate_json_size("review.skipped_categories", &input.skipped_categories)?;
+    validate_json_size("review.metadata", &input.metadata)?;
+    if input.findings.len() > PROOF_PACKET_MAX_ITEMS {
+        bail!("too many adversarial review findings");
+    }
+    if matches!(input.judgment.as_str(), "hold" | "block") && input.findings.is_empty() {
+        bail!("hold/block adversarial reviews must record at least one finding");
+    }
+    if input.judgment == "promote"
+        && input
+            .findings
+            .iter()
+            .any(|finding| finding.status == "blocking")
+    {
+        bail!("promote adversarial review cannot contain blocking findings");
+    }
+    let mut titles = BTreeSet::new();
+    for finding in &input.findings {
+        if !(0..=3).contains(&finding.severity) {
+            bail!("finding.severity must be between 0 and 3");
+        }
+        validate_adversarial_review_finding_status(&finding.status)?;
+        validate_required_text("finding.title", &finding.title, 300)?;
+        if !titles.insert(finding.title.clone()) {
+            bail!(
+                "duplicate adversarial review finding title: {}",
+                finding.title
+            );
+        }
+        validate_required_text("finding.body", &finding.body, PROOF_PACKET_MAX_TEXT)?;
+        validate_json_size("finding.evidence", &finding.evidence)?;
+        if let Some(recommendation) = &finding.recommendation {
+            validate_required_text("finding.recommendation", recommendation, 2_000)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_adversarial_review_judgment(judgment: &str) -> Result<()> {
+    match judgment {
+        "promote" | "hold" | "block" => Ok(()),
+        other => bail!("unsupported adversarial review judgment: {other}"),
+    }
+}
+
+fn validate_adversarial_review_finding_status(status: &str) -> Result<()> {
+    match status {
+        "blocking" | "non_blocking" | "resolved" => Ok(()),
+        other => bail!("unsupported adversarial review finding status: {other}"),
+    }
+}
+
 fn validate_proof_claim_status(status: &str) -> Result<()> {
     match status {
         "proven" | "partial" | "blocked" | "refuted" | "not_claimed" => Ok(()),
@@ -1227,5 +1471,62 @@ fn proof_packet_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pr
         blocker_count: nonnegative_usize(row.get(7)?),
         created_at: row.get(8)?,
         promoted_at: row.get(9)?,
+    })
+}
+
+fn adversarial_review_run_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AdversarialReviewRun> {
+    let refutations_json: String = row.get(9)?;
+    let skipped_categories_json: String = row.get(10)?;
+    let metadata_json: String = row.get(11)?;
+    Ok(AdversarialReviewRun {
+        id: row.get(0)?,
+        packet_id: row.get(1)?,
+        scope: row.get(2)?,
+        title: row.get(3)?,
+        reviewer: row.get(4)?,
+        requested_proof_level: row.get(5)?,
+        judgment: row.get(6)?,
+        summary: row.get(7)?,
+        strongest_fake_done_path: row.get(8)?,
+        refutations: parse_json_column(&refutations_json, 9)?,
+        skipped_categories: parse_json_column(&skipped_categories_json, 10)?,
+        metadata: parse_json_column(&metadata_json, 11)?,
+        created_at: row.get(12)?,
+    })
+}
+
+fn adversarial_review_finding_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AdversarialReviewFinding> {
+    let evidence_json: String = row.get(6)?;
+    Ok(AdversarialReviewFinding {
+        id: row.get(0)?,
+        review_id: row.get(1)?,
+        severity: row.get(2)?,
+        status: row.get(3)?,
+        title: row.get(4)?,
+        body: row.get(5)?,
+        evidence: parse_json_column(&evidence_json, 6)?,
+        recommendation: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+fn adversarial_review_summary_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AdversarialReviewSummary> {
+    Ok(AdversarialReviewSummary {
+        id: row.get(0)?,
+        packet_id: row.get(1)?,
+        scope: row.get(2)?,
+        title: row.get(3)?,
+        reviewer: row.get(4)?,
+        requested_proof_level: row.get(5)?,
+        judgment: row.get(6)?,
+        finding_count: nonnegative_usize(row.get(7)?),
+        blocking_finding_count: nonnegative_usize(row.get(8)?),
+        created_at: row.get(9)?,
     })
 }

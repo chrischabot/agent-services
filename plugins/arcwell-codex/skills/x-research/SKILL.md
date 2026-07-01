@@ -48,6 +48,12 @@ Rules:
   failed local source-card/wiki projections.
 - Use `x_recent_search` for immediate live X API search and `x_enqueue_recent_search` plus `worker_run_once` when the search should be queued.
 - Use `cursor_get` for `x:recent-search:<query>` when checking incremental state.
+- Use `x_curate_watch_sources` before applying X watch-source changes; default
+  to `dry-run`. Use `x_import_watch_manual_rules` only for reviewed
+  keep/exclude/needs-evidence decisions, `x_watch_curation_report` to inspect
+  decisions/evidence/non-claims, `x_restore_watch_curation` for explicit run-id
+  restores, and `x_enrich_watch_profiles` when the report requests profile
+  evidence. Do not treat `manual_needs_evidence` as keep or exclude evidence.
 - Use `secret_value_set` only for local provider/API tokens and do not print token values back to the user.
 - Search/list imported items before writing a report.
 - Use linked source cards and wiki pages for durable evidence.
@@ -56,6 +62,11 @@ Rules:
 Useful tools:
 
 - `x_rebuild_definitive_watch_sources`
+- `x_curate_watch_sources`
+- `x_watch_curation_report`
+- `x_restore_watch_curation`
+- `x_import_watch_manual_rules`
+- `x_enrich_watch_profiles`
 - `x_import_json_file`
 - `x_discover_archives`
 - `x_import_archive`

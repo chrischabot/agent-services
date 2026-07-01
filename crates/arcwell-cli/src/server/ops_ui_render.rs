@@ -7,6 +7,7 @@ pub(crate) struct OpsUiOptions {
     pub(crate) sort: String,
     pub(crate) detail: Option<String>,
     pub(crate) notice: Option<String>,
+    pub(crate) current_url: Option<String>,
 }
 
 impl OpsUiOptions {
@@ -17,6 +18,7 @@ impl OpsUiOptions {
             sort: trimmed_non_empty(query.sort).unwrap_or_else(|| "updated_desc".to_string()),
             detail: trimmed_non_empty(query.detail),
             notice: trimmed_non_empty(query.notice),
+            current_url: None,
         }
     }
 }
@@ -69,32 +71,53 @@ pub(crate) fn render_ops_ui_with_options(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Arcwell Ops</title>
+<title>Arcwell Cockpit</title>
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 *{box-sizing:border-box}
-body{margin:0;background:#f6f7f9;color:#1f2328}
-main{max-width:1440px;margin:0 auto;padding:24px}
-h1{font-size:28px;margin:0 0 6px}
-h2{font-size:18px;margin:0 0 10px}
-p{margin:4px 0 14px}.muted{color:#57606a}.notice{border-left:4px solid #1f6feb;padding:8px 10px;background:white}
+body{margin:0;background:#f5f7f8;color:#20242a}
+main{max-width:1500px;margin:0 auto;padding:24px}
+h1{font-size:30px;margin:0 0 6px;letter-spacing:0}
+h2{font-size:18px;margin:0 0 10px;letter-spacing:0}
+h3{font-size:15px;margin:0 0 8px;letter-spacing:0}
+p{margin:4px 0 14px}.muted{color:#59636e}.notice{border-left:4px solid #1f6feb;padding:8px 10px;background:white}
 .section{margin-top:24px}
+.hero{border:1px solid #d6dee6;background:white;border-radius:8px;padding:18px;display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,420px);gap:18px;align-items:start}
+.hero-main{min-width:0}.hero aside{border-left:1px solid #d6dee6;padding-left:18px;min-width:0}
+.topline{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+.pill{font-size:13px;font-weight:700;border-radius:999px;padding:3px 9px;background:#eef2f6;border:1px solid #d6dee6;display:inline-flex;align-items:center;gap:6px}
+.pill.ok{background:#eaf7ed;border-color:#b7dfc1;color:#116329}.pill.bad{background:#fff1f0;border-color:#ffc4bd;color:#b42318}.pill.warn{background:#fff8c5;border-color:#eac54f;color:#7d4e00}
+.url-hint{display:grid;gap:6px;font-size:13px}.url-hint code{background:#eef2f6;border:1px solid #d6dee6;border-radius:6px;padding:2px 5px}
+.nav{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0 0}
+.nav a{border:1px solid #d6dee6;background:#f8fafc;border-radius:999px;padding:5px 9px;font-size:13px;color:#20242a}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
-.metric{border:1px solid #d8dee4;background:white;padding:10px;border-radius:6px;min-width:0}
-.metric span{display:block;color:#57606a;font-size:12px}.metric b{display:block;font-size:22px;line-height:1.15;margin-top:4px;overflow-wrap:anywhere}
+.metric{border:1px solid #d6dee6;background:white;padding:10px;border-radius:8px;min-width:0}
+.metric span{display:block;color:#59636e;font-size:12px}.metric b{display:block;font-size:22px;line-height:1.15;margin-top:4px;overflow-wrap:anywhere}
 .summary-grid .metric b{font-size:16px;line-height:1.25}
+.cockpit-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
+.panel{border:1px solid #d6dee6;background:white;border-radius:8px;padding:12px;min-width:0}
+.panel-header{display:flex;justify-content:space-between;gap:8px;align-items:start;margin-bottom:10px}
+.panel-kpi{font-size:24px;font-weight:700;line-height:1.15}
+.fact-list{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.fact-list li{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #edf1f5;padding-top:6px;font-size:13px;min-width:0}
+.fact-list span{color:#59636e}.fact-list b{text-align:right;overflow-wrap:anywhere}
+.cockpit-band{display:grid;grid-template-columns:2fr 1fr;gap:10px;margin-top:14px}
+.timeline-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.timeline-list li{border-left:3px solid #8aa4b8;padding:0 0 0 9px;min-width:0}
+.timeline-list .time{display:block;font-size:12px;color:#59636e}
+.timeline-list .event{display:block;font-size:13px;overflow-wrap:anywhere}
 .ops-form{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end;margin-top:18px}
-.ops-form label{display:grid;gap:4px;font-size:12px;color:#57606a}
+.ops-form label{display:grid;gap:4px;font-size:12px;color:#59636e}
 .control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:14px}
-.control-grid form{border:1px solid #d8dee4;background:white;border-radius:6px;padding:10px;display:grid;gap:8px;min-width:0}
+.control-grid form{border:1px solid #d6dee6;background:white;border-radius:8px;padding:10px;display:grid;gap:8px;min-width:0}
 .control-grid .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-.control-grid label{display:grid;gap:4px;font-size:12px;color:#57606a}
-input,select,button{font:inherit;border:1px solid #d8dee4;border-radius:6px;background:white;color:inherit;padding:7px;max-width:100%;min-width:0}
+.control-grid label{display:grid;gap:4px;font-size:12px;color:#59636e}
+input,select,button{font:inherit;border:1px solid #d6dee6;border-radius:6px;background:white;color:inherit;padding:7px;max-width:100%;min-width:0}
 button{font-weight:600;cursor:pointer}.danger{color:#b42318}.actions form{display:flex;gap:6px;flex-wrap:wrap}.actions input[name=reason]{min-width:220px}
-.detail{border:1px solid #d8dee4;background:white;padding:12px;border-radius:6px}
-.ok{color:#116329}.bad{color:#b42318}.warn{color:#9a6700}.pill{font-size:13px;font-weight:600}
-table{width:100%;border-collapse:collapse;background:white;border:1px solid #d8dee4}
-th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:8px;vertical-align:top;font-size:13px;overflow-wrap:anywhere;word-break:break-word;max-width:520px}
+.detail{border:1px solid #d6dee6;background:white;padding:12px;border-radius:8px}
+.ok{color:#116329}.bad{color:#b42318}.warn{color:#9a6700}
+table{width:100%;border-collapse:collapse;background:white;border:1px solid #d6dee6}
+th,td{text-align:left;border-bottom:1px solid #d6dee6;padding:8px;vertical-align:top;font-size:13px;overflow-wrap:anywhere;word-break:break-word;max-width:520px}
 th{white-space:nowrap;overflow-wrap:normal;word-break:normal}
 th{background:#eef2f6}
 a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}
@@ -103,37 +126,51 @@ code,pre{white-space:pre-wrap;word-break:break-word}
 .bar span{display:block;min-width:1px;border-radius:2px}
 .bar .selected{background:#1f883d}.bar .over{background:#9a6700}.bar .below{background:#6e7781}.bar .duplicate{background:#8250df}.bar .quota{background:#bf8700}.bar .other{background:#57606a}
 .scroll{overflow:auto}
-@media (max-width:720px){main{padding:14px}h1{font-size:24px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ops-form,.control-grid .fields{grid-template-columns:1fr}th,td{font-size:12px;padding:7px;max-width:none}.scroll{overflow:visible}.ops-table{border:0;background:transparent}.ops-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}.ops-table tr{display:block;border:1px solid #d8dee4;border-radius:6px;background:white;margin:0 0 8px;overflow:hidden}.ops-table td{display:grid;grid-template-columns:minmax(94px,34%) minmax(0,1fr);gap:8px;border-bottom:1px solid #d8dee4}.ops-table td::before{content:attr(data-label);font-weight:600;color:#57606a;overflow-wrap:normal;word-break:normal}.ops-table td[colspan]{display:block}.ops-table td[colspan]::before{content:""}}
-@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}.muted,.metric span,.ops-form label,.control-grid label{color:#8b949e}.metric,table,.detail,.notice,.control-grid form,input,select,button{background:#161b22;border-color:#30363d}th,td{border-color:#30363d}th{background:#21262d}.ops-table tr{background:#161b22;border-color:#30363d}.ops-table td::before{color:#8b949e}a{color:#58a6ff}}
+@media (max-width:980px){.hero,.cockpit-band{grid-template-columns:1fr}.hero aside{border-left:0;border-top:1px solid #d6dee6;padding-left:0;padding-top:14px}.cockpit-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:720px){main{padding:14px}h1{font-size:24px}.grid,.cockpit-grid{grid-template-columns:1fr}.ops-form,.control-grid .fields{grid-template-columns:1fr}th,td{font-size:12px;padding:7px;max-width:none}.scroll{overflow:visible}.ops-table{border:0;background:transparent}.ops-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}.ops-table tr{display:block;border:1px solid #d6dee6;border-radius:8px;background:white;margin:0 0 8px;overflow:hidden}.ops-table td{display:grid;grid-template-columns:minmax(94px,34%) minmax(0,1fr);gap:8px;border-bottom:1px solid #d6dee6}.ops-table td::before{content:attr(data-label);font-weight:600;color:#59636e;overflow-wrap:normal;word-break:normal}.ops-table td[colspan]{display:block}.ops-table td[colspan]::before{content:""}}
+@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}.muted,.metric span,.ops-form label,.control-grid label,.fact-list span,.timeline-list .time{color:#8b949e}.hero,.metric,table,.detail,.notice,.control-grid form,.panel,input,select,button{background:#161b22;border-color:#30363d}.hero aside,.fact-list li{border-color:#30363d}.nav a,.url-hint code{background:#21262d;border-color:#30363d;color:#e6edf3}th,td{border-color:#30363d}th{background:#21262d}.ops-table tr{background:#161b22;border-color:#30363d}.ops-table td::before{color:#8b949e}a{color:#58a6ff}.pill{background:#21262d;border-color:#30363d}}
 </style>
 </head>
 <body><main>"#,
     );
-    html.push_str(&format!(
-        "<h1>Arcwell Ops <span class=\"pill {}\">{}</span></h1>",
+    html.push_str(&render_cockpit_hero(
+        snapshot,
+        &health_score,
         health_class,
-        if snapshot.health.ok {
-            "healthy"
-        } else {
-            "needs attention"
-        }
+        options.current_url.as_deref(),
     ));
-    html.push_str("<p class=\"muted\">Local operations snapshot with filtered queues, source health, credential summaries, and narrow authenticated remediation controls where supported.</p>");
     if let Some(notice) = &options.notice {
         html.push_str(&format!(
             "<p class=\"notice\">{}</p>",
             html_escape(&ops_notice_text(notice))
         ));
     }
+    html.push_str(&render_cockpit_panels(
+        snapshot,
+        options,
+        failed_deliveries,
+        mailbox_unverified_email_deliveries,
+        failed_radar_deliveries,
+        failed_job_sources,
+        job_privacy_blocks,
+    ));
     html.push_str(&render_ops_filter_form(options));
+    html.push_str("<div id=\"controls\"></div>");
     html.push_str(&render_x_ops_control_panel(csrf_token, controls_enabled));
     html.push_str(&render_knowledge_ops_control_panel(
         csrf_token,
         controls_enabled,
     ));
-    html.push_str("<section class=\"grid\">");
+    html.push_str(
+        "<section id=\"stats\" class=\"section\"><h2>System Stats</h2><div class=\"grid\">",
+    );
     for (label, value) in [
         ("Health score", health_score.score as usize),
+        (
+            "Active profile items",
+            snapshot.health.profile_items as usize,
+        ),
+        ("Active memories", snapshot.health.memories as usize),
         ("Jobs", snapshot.jobs.len()),
         ("Dead letters", snapshot.health.dead_lettered_jobs as usize),
         ("Edge events", snapshot.edge_events.len()),
@@ -143,6 +180,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         ("Radar runs", snapshot.radar_runs.len()),
         ("Radar source quality", snapshot.radar_source_quality.len()),
         ("Radar deliveries", snapshot.radar_deliveries.len()),
+        ("Research runs", snapshot.research_runs.len()),
         (
             "Knowledge adapter runs",
             snapshot.knowledge_adapter_runs.len(),
@@ -208,10 +246,11 @@ code,pre{white-space:pre-wrap;word-break:break-word}
             value
         ));
     }
-    html.push_str("</section>");
+    html.push_str("</div></section>");
     html.push_str(&render_backlog_age_table(snapshot));
     html.push_str(&render_issue_schedule_summary_table(snapshot));
     html.push_str(&render_ops_summary(snapshot, &health_score));
+    html.push_str(&render_event_log_table(snapshot, options));
     if let Some(detail) = &options.detail {
         html.push_str(&render_ops_detail(snapshot, detail));
     }
@@ -240,6 +279,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         html.push_str("</pre>");
     }
     html.push_str("</section>");
+    html.push_str("<div id=\"raw\"></div>");
     html.push_str(&ops_table(
         "Health And Backups",
         &["home", "db", "schema", "latest backup", "warnings"],
@@ -605,6 +645,7 @@ code,pre{white-space:pre-wrap;word-break:break-word}
             }),
         &[0, 1],
     ));
+    html.push_str(&render_x_watch_curation_report(snapshot, options));
     html.push_str(&ops_table_with_raw_columns(
         "Radar Runs",
         &[
@@ -858,6 +899,27 @@ code,pre{white-space:pre-wrap;word-break:break-word}
         }),
     ));
     html.push_str(&ops_table(
+        "Research Runs",
+        &[
+            "run",
+            "status",
+            "query",
+            "result page",
+            "created",
+            "updated",
+        ],
+        snapshot.research_runs.iter().take(50).map(|run| {
+            vec![
+                short_id(&run.id),
+                run.status.clone(),
+                run.query.clone(),
+                run.result_page_id.clone().unwrap_or_default(),
+                run.created_at.clone(),
+                run.updated_at.clone(),
+            ]
+        }),
+    ));
+    html.push_str(&ops_table(
         "Memory Review",
         &[
             "operation",
@@ -877,6 +939,27 @@ code,pre{white-space:pre-wrap;word-break:break-word}
                 candidate.content.clone(),
             ]
         }),
+    ));
+    html.push_str(&ops_table(
+        "Memory Lifecycle Events",
+        &[
+            "event", "hook", "user", "source", "status", "input", "created",
+        ],
+        snapshot
+            .memory_lifecycle_events
+            .iter()
+            .take(50)
+            .map(|event| {
+                vec![
+                    event.event_type.clone(),
+                    event.hook.clone().unwrap_or_default(),
+                    event.user_id.clone().unwrap_or_default(),
+                    event.source_ref.clone().unwrap_or_default(),
+                    event.status.clone(),
+                    event.input.clone().unwrap_or_default(),
+                    event.created_at.clone(),
+                ]
+            }),
     ));
     html.push_str(&ops_table(
         "Memory Decisions",
@@ -1065,6 +1148,560 @@ code,pre{white-space:pre-wrap;word-break:break-word}
     ));
     html.push_str("</main></body></html>");
     html
+}
+
+fn render_x_watch_curation_report(snapshot: &OpsSnapshot, options: &OpsUiOptions) -> String {
+    let Some(report) = &snapshot.x_watch_curation_report else {
+        return ops_table(
+            "X Watch Curation",
+            &["run", "mode", "status", "input", "counts", "non-claims"],
+            [vec![
+                "none".to_string(),
+                String::new(),
+                String::new(),
+                "0".to_string(),
+                String::new(),
+                "Run dry-run curation before treating watch-source narrowing as reviewed."
+                    .to_string(),
+            ]],
+        );
+    };
+    let counts = report
+        .counts
+        .iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut html = ops_table_with_raw_columns(
+        "X Watch Curation",
+        &["run", "mode", "status", "input", "counts", "non-claims"],
+        [vec![
+            detail_link("x-curation", &report.run.id, &short_id(&report.run.id)),
+            report.run.mode.clone(),
+            report.run.status.clone(),
+            report.run.input_count.to_string(),
+            counts,
+            report.non_claims.join("\n"),
+        ]],
+        &[0],
+    );
+    html.push_str(&ops_table_with_raw_columns(
+        "X Watch Curation Decisions",
+        &[
+            "handle",
+            "recommendation",
+            "category",
+            "score",
+            "confidence",
+            "previous",
+            "proposed",
+            "reason",
+            "applied",
+        ],
+        report
+            .decisions
+            .iter()
+            .filter(|decision| {
+                matches_status(&decision.recommendation, options)
+                    && matches_query(
+                        options,
+                        [
+                            decision.handle.as_str(),
+                            decision.recommendation.as_str(),
+                            decision.category.as_str(),
+                            decision.reason.as_str(),
+                            decision.previous_status.as_str(),
+                            decision.proposed_status.as_str(),
+                        ],
+                    )
+            })
+            .take(100)
+            .map(|decision| {
+                vec![
+                    decision.handle.clone(),
+                    decision.recommendation.clone(),
+                    decision.category.clone(),
+                    decision.score.to_string(),
+                    format!("{:.2}", decision.confidence),
+                    decision.previous_status.clone(),
+                    decision.proposed_status.clone(),
+                    decision.reason.clone(),
+                    decision.applied_at.clone().unwrap_or_default(),
+                ]
+            }),
+        &[],
+    ));
+    html
+}
+
+fn render_cockpit_hero(
+    snapshot: &OpsSnapshot,
+    score: &OpsHealthScore,
+    health_class: &str,
+    current_url: Option<&str>,
+) -> String {
+    let status_label = if snapshot.health.ok {
+        "healthy"
+    } else {
+        "needs attention"
+    };
+    let worker_label = snapshot
+        .worker
+        .as_ref()
+        .map(|worker| format!("worker {} seen {}", worker.worker_id, worker.last_seen_at))
+        .unwrap_or_else(|| "no worker heartbeat".to_string());
+    let warning_label = if snapshot.health.warnings.is_empty() {
+        "no current health warnings".to_string()
+    } else {
+        format!("{} warning(s)", snapshot.health.warnings.len())
+    };
+    let current_url_hint = current_url
+        .map(|url| {
+            format!(
+                "<span>Current request: <code>{}</code></span>",
+                html_escape(url)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r##"<section class="hero" id="overview">
+<div class="hero-main">
+<div class="topline"><span class="pill {health_class}">{status_label}</span><span class="pill">score {score}</span><span class="pill warn">{warnings}</span></div>
+<h1>Arcwell Ops Cockpit</h1>
+<p class="muted">One local browser surface for Arcwell memory review, wiki and knowledge state, worker jobs, research runs, deliveries, source health, policy, cost, secrets, and event history. The lower ledgers keep the raw evidence visible.</p>
+<nav class="nav" aria-label="Cockpit sections">
+<a href="#memory">Memory</a><a href="#wiki">Wiki</a><a href="#tasks">Tasks</a><a href="#research">Research</a><a href="#events">Events</a><a href="#controls">Controls</a><a href="#stats">Stats</a><a href="#raw">Raw Ledgers</a>
+</nav>
+</div>
+<aside>
+<h2>Agent Visibility</h2>
+<div class="url-hint">
+<span>When `arcwell serve` is running, agents should tell the user that this cockpit is visible at <code>/ops/ui</code>.</span>
+{current_url_hint}
+<span>Local example: <code>http://127.0.0.1:8787/ops/ui</code></span>
+<span>Aliases: <code>/cockpit</code> and <code>/ops/cockpit</code></span>
+<span>Current worker: {worker}</span>
+</div>
+</aside>
+</section>"##,
+        health_class = health_class,
+        status_label = html_escape(status_label),
+        score = score.score,
+        warnings = html_escape(&warning_label),
+        current_url_hint = current_url_hint,
+        worker = html_escape(&worker_label),
+    )
+}
+
+fn render_cockpit_panels(
+    snapshot: &OpsSnapshot,
+    options: &OpsUiOptions,
+    failed_deliveries: usize,
+    mailbox_unverified_email_deliveries: usize,
+    failed_radar_deliveries: usize,
+    failed_job_sources: usize,
+    job_privacy_blocks: usize,
+) -> String {
+    let review_required = snapshot
+        .memory_candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .metadata
+                .get("review_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let sensitive_or_personal = snapshot
+        .memory_candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.sensitivity.as_str(), "sensitive" | "personal"))
+        .count();
+    let memory_statuses = summarize_counts(
+        snapshot
+            .memory_candidates
+            .iter()
+            .map(|candidate| candidate.status.as_str()),
+    );
+    let research_done = snapshot
+        .research_runs
+        .iter()
+        .filter(|run| {
+            run.result_page_id.is_some()
+                || matches!(run.status.as_str(), "completed" | "complete" | "done")
+        })
+        .count();
+    let active_jobs = snapshot
+        .jobs
+        .iter()
+        .filter(|job| matches!(job.status.as_str(), "pending" | "running" | "leased"))
+        .count();
+    let non_healthy_sources = snapshot
+        .source_health
+        .iter()
+        .filter(|source| source.status != "healthy")
+        .count();
+    let all_event_count = recent_cockpit_events(snapshot).len();
+    let recent_events = filtered_cockpit_events(snapshot, options);
+
+    let mut html = String::new();
+    html.push_str("<section class=\"cockpit-grid\" aria-label=\"Arcwell cockpit domains\">");
+    html.push_str(&render_cockpit_panel(
+        "memory",
+        "Memory Review",
+        snapshot.backlog.pending_memory_candidates.to_string(),
+        "pending candidates",
+        [
+            ("review required", review_required.to_string()),
+            ("sensitive/personal", sensitive_or_personal.to_string()),
+            ("active memories", snapshot.health.memories.to_string()),
+            ("profile items", snapshot.health.profile_items.to_string()),
+            ("statuses", memory_statuses),
+        ],
+    ));
+    html.push_str(&render_cockpit_panel(
+        "wiki",
+        "Wiki And Knowledge",
+        snapshot.health.wiki_pages.to_string(),
+        "wiki pages",
+        [
+            ("source cards", snapshot.source_cards.len().to_string()),
+            ("watch sources", snapshot.watch_sources.len().to_string()),
+            (
+                "knowledge clusters",
+                snapshot.knowledge_clusters.len().to_string(),
+            ),
+            (
+                "knowledge reports",
+                snapshot.knowledge_reports.len().to_string(),
+            ),
+            ("non-healthy sources", non_healthy_sources.to_string()),
+        ],
+    ));
+    html.push_str(&render_cockpit_panel(
+        "tasks",
+        "Task Runner",
+        snapshot.jobs.len().to_string(),
+        "retained jobs",
+        [
+            ("active jobs", active_jobs.to_string()),
+            ("pending", snapshot.backlog.pending_wiki_jobs.to_string()),
+            ("failed", snapshot.backlog.failed_wiki_jobs.to_string()),
+            (
+                "dead-lettered",
+                snapshot.backlog.dead_lettered_wiki_jobs.to_string(),
+            ),
+            (
+                "next runnable",
+                snapshot
+                    .backlog
+                    .next_pending_wiki_job_at
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+        ],
+    ));
+    html.push_str(&render_cockpit_panel(
+        "research",
+        "Research And Reports",
+        snapshot.research_runs.len().to_string(),
+        "recent runs",
+        [
+            ("done/report-backed", research_done.to_string()),
+            (
+                "research statuses",
+                summarize_counts(snapshot.research_runs.iter().map(|run| run.status.as_str())),
+            ),
+            ("radar runs", snapshot.radar_runs.len().to_string()),
+            (
+                "radar delivery failures",
+                failed_radar_deliveries.to_string(),
+            ),
+            ("job roles", snapshot.job_hunting.role_count.to_string()),
+        ],
+    ));
+    html.push_str(&render_cockpit_panel(
+        "delivery",
+        "Delivery And Channels",
+        snapshot.channel_messages.len().to_string(),
+        "channel messages",
+        [
+            ("failed attempts", failed_deliveries.to_string()),
+            (
+                "mailbox unverified",
+                mailbox_unverified_email_deliveries.to_string(),
+            ),
+            (
+                "digest candidates",
+                snapshot.digest_candidates.len().to_string(),
+            ),
+            (
+                "digest deliveries",
+                snapshot.digest_deliveries.len().to_string(),
+            ),
+            (
+                "issue schedules",
+                snapshot.issue_schedules.len().to_string(),
+            ),
+        ],
+    ));
+    html.push_str(&render_cockpit_panel(
+        "history",
+        "History And Governance",
+        all_event_count.min(100).to_string(),
+        "recent events",
+        [
+            (
+                "memory lifecycle",
+                snapshot.memory_lifecycle_events.len().to_string(),
+            ),
+            ("work runs", snapshot.work_runs.len().to_string()),
+            (
+                "controller events",
+                snapshot.controller_events.len().to_string(),
+            ),
+            (
+                "policy decisions",
+                snapshot.policy_decisions.len().to_string(),
+            ),
+            ("job source failures", failed_job_sources.to_string()),
+            ("job privacy blocks", job_privacy_blocks.to_string()),
+        ],
+    ));
+    html.push_str("</section>");
+    html.push_str("<section id=\"events\" class=\"cockpit-band\">");
+    html.push_str("<div class=\"panel\"><div class=\"panel-header\"><h2>Event Stream</h2><span class=\"muted\">latest cross-ledger events</span></div><ul class=\"timeline-list\">");
+    for event in recent_events.into_iter().take(8) {
+        html.push_str(&format!(
+            "<li><span class=\"time\">{} · {} · {}</span><span class=\"event\">{}</span></li>",
+            html_escape(&event.at),
+            html_escape(&event.family),
+            html_escape(&event.status),
+            html_escape(&event.summary)
+        ));
+    }
+    html.push_str("</ul></div>");
+    html.push_str("<div class=\"panel\"><div class=\"panel-header\"><h2>What To Open</h2><span class=\"muted\">for humans and agents</span></div><ul class=\"fact-list\">");
+    for (label, value) in [
+        ("cockpit", "/ops/ui"),
+        ("aliases", "/cockpit, /ops/cockpit"),
+        ("machine snapshot", "/ops"),
+        ("wiki API", "/wiki?q=..."),
+        ("memory API", "/memory"),
+    ] {
+        html.push_str(&format!(
+            "<li><span>{}</span><b><code>{}</code></b></li>",
+            html_escape(label),
+            html_escape(value)
+        ));
+    }
+    html.push_str("</ul></div></section>");
+    html
+}
+
+fn render_cockpit_panel<I>(id: &str, title: &str, kpi: String, subtitle: &str, facts: I) -> String
+where
+    I: IntoIterator<Item = (&'static str, String)>,
+{
+    let mut html = format!(
+        "<section id=\"{}\" class=\"panel\"><div class=\"panel-header\"><h2>{}</h2><span class=\"muted\">{}</span></div><div class=\"panel-kpi\">{}</div><ul class=\"fact-list\">",
+        html_escape(id),
+        html_escape(title),
+        html_escape(subtitle),
+        html_escape(&kpi)
+    );
+    for (label, value) in facts {
+        html.push_str(&format!(
+            "<li><span>{}</span><b>{}</b></li>",
+            html_escape(label),
+            html_escape(&value)
+        ));
+    }
+    html.push_str("</ul></section>");
+    html
+}
+
+#[derive(Debug, Clone)]
+struct CockpitEventRow {
+    at: String,
+    family: String,
+    status: String,
+    summary: String,
+}
+
+fn recent_cockpit_events(snapshot: &OpsSnapshot) -> Vec<CockpitEventRow> {
+    let mut rows = Vec::new();
+    for event in &snapshot.memory_lifecycle_events {
+        rows.push(CockpitEventRow {
+            at: event.created_at.clone(),
+            family: "memory".to_string(),
+            status: event.status.clone(),
+            summary: format!(
+                "{} {}",
+                event.event_type.as_str(),
+                truncate_cockpit_text(event.input.as_deref().unwrap_or_default(), 120)
+            ),
+        });
+    }
+    for event in &snapshot.health.latest_worker_heartbeat_events {
+        rows.push(CockpitEventRow {
+            at: event.seen_at.clone(),
+            family: "worker".to_string(),
+            status: if event.last_error.is_some() {
+                "error".to_string()
+            } else {
+                "seen".to_string()
+            },
+            summary: format!(
+                "{} processed {}{}",
+                event.worker_id.as_str(),
+                event.processed_jobs,
+                event
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!(" error: {}", truncate_cockpit_text(error, 100)))
+                    .unwrap_or_default()
+            ),
+        });
+    }
+    for job in snapshot.jobs.iter().take(100) {
+        rows.push(CockpitEventRow {
+            at: job.updated_at.clone(),
+            family: "job".to_string(),
+            status: job.status.clone(),
+            summary: format!(
+                "{} {}{}",
+                short_id(&job.id),
+                job.kind.as_str(),
+                job.error
+                    .as_ref()
+                    .map(|error| format!(" error: {}", truncate_cockpit_text(error, 100)))
+                    .unwrap_or_default()
+            ),
+        });
+    }
+    for event in &snapshot.controller_events {
+        rows.push(CockpitEventRow {
+            at: event.created_at.clone(),
+            family: "controller".to_string(),
+            status: event.event_type.clone(),
+            summary: truncate_cockpit_text(&event.summary, 140),
+        });
+    }
+    for observation in &snapshot.channel_delivery_observations {
+        rows.push(CockpitEventRow {
+            at: observation.created_at.clone(),
+            family: "delivery observation".to_string(),
+            status: observation.observation_status.clone(),
+            summary: format!(
+                "{} {} via {}",
+                observation.channel.as_str(),
+                observation.destination.as_str(),
+                observation.observation_source.as_str()
+            ),
+        });
+    }
+    for attempt in snapshot
+        .channel_delivery_attempts
+        .iter()
+        .filter(|attempt| !attempt.ok)
+    {
+        rows.push(CockpitEventRow {
+            at: attempt.created_at.clone(),
+            family: "delivery".to_string(),
+            status: attempt.provider_status.to_string(),
+            summary: format!(
+                "{} {}{}",
+                attempt.channel.as_str(),
+                attempt.destination.as_str(),
+                attempt
+                    .error
+                    .as_ref()
+                    .map(|error| format!(" error: {}", truncate_cockpit_text(error, 100)))
+                    .unwrap_or_default()
+            ),
+        });
+    }
+    for decision in &snapshot.policy_decisions {
+        rows.push(CockpitEventRow {
+            at: decision.created_at.clone(),
+            family: "policy".to_string(),
+            status: if decision.allowed {
+                "allowed".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            summary: format!(
+                "{} {}",
+                decision.action.as_str(),
+                truncate_cockpit_text(&decision.reason, 120)
+            ),
+        });
+    }
+    for decision in &snapshot.cost_decisions {
+        rows.push(CockpitEventRow {
+            at: decision.created_at.clone(),
+            family: "cost".to_string(),
+            status: if decision.allowed {
+                "allowed".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            summary: format!(
+                "{} {} ${:.4}",
+                decision.provider.as_str(),
+                decision.model.as_str(),
+                decision.projected_usd
+            ),
+        });
+    }
+    rows.sort_by(|left, right| {
+        right
+            .at
+            .cmp(&left.at)
+            .then_with(|| right.family.cmp(&left.family))
+            .then_with(|| right.summary.cmp(&left.summary))
+    });
+    rows
+}
+
+fn filtered_cockpit_events(snapshot: &OpsSnapshot, options: &OpsUiOptions) -> Vec<CockpitEventRow> {
+    recent_cockpit_events(snapshot)
+        .into_iter()
+        .filter(|event| {
+            matches_status(&event.status, options)
+                && matches_query(
+                    options,
+                    [
+                        event.at.as_str(),
+                        event.family.as_str(),
+                        event.status.as_str(),
+                        event.summary.as_str(),
+                    ],
+                )
+        })
+        .collect()
+}
+
+fn render_event_log_table(snapshot: &OpsSnapshot, options: &OpsUiOptions) -> String {
+    ops_table(
+        "Event Log",
+        &["time", "family", "status", "summary"],
+        filtered_cockpit_events(snapshot, options)
+            .into_iter()
+            .take(100)
+            .map(|event| vec![event.at, event.family, event.status, event.summary]),
+    )
+}
+
+fn truncate_cockpit_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut value = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        value.push_str("...");
+    }
+    value
 }
 
 fn render_backlog_age_table(snapshot: &OpsSnapshot) -> String {
@@ -1492,11 +2129,11 @@ pub(crate) fn render_x_ops_control_panel(
     let mut html = String::new();
     html.push_str("<section class=\"section\"><h2>X Controls</h2>");
     let Some(csrf_token) = csrf_token else {
-        html.push_str("<p class=\"muted\">Open /ops/ui from the authenticated HTTP server to use X controls.</p></section>");
+        html.push_str("<p class=\"muted\">Open /ops/ui from the service-hosted cockpit to use X controls.</p></section>");
         return html;
     };
     if !controls_enabled {
-        html.push_str("<p class=\"muted\">Disabled: start server with ARCWELL_HTTP_AUTH_TOKEN to enable mutations.</p></section>");
+        html.push_str("<p class=\"muted\">Disabled: start the service with --http-addr to enable local browser controls.</p></section>");
         return html;
     }
     html.push_str("<div class=\"control-grid\">");
@@ -1531,6 +2168,32 @@ pub(crate) fn render_x_ops_control_panel(
         html_escape(&ops_control_idempotency_key("x-bookmarks-enqueue")),
     ));
     html.push_str(&format!(
+        r#"<form method="post" action="/ops/actions/x/watch-curation/run">
+<input type="hidden" name="csrf_token" value="{}">
+<input type="hidden" name="idempotency_key" value="{}">
+<div><b>Run watch curation</b><p class="muted">Record a reversible curation ledger; dry-run is non-destructive.</p></div>
+<div class="fields">
+<label>Mode<select name="mode"><option value="dry-run">dry-run</option><option value="pause-only">pause-only</option></select></label>
+</div>
+<button type="submit">Run curation</button>
+</form>"#,
+        html_escape(csrf_token),
+        html_escape(&ops_control_idempotency_key("x-watch-curation-run")),
+    ));
+    html.push_str(&format!(
+        r#"<form method="post" action="/ops/actions/x/watch-curation/restore">
+<input type="hidden" name="csrf_token" value="{}">
+<input type="hidden" name="idempotency_key" value="{}">
+<div><b>Restore curation run</b><p class="muted">Restore watch-source status, label, cadence, and metadata from snapshots.</p></div>
+<div class="fields">
+<label>Run id<input name="run_id" maxlength="120" placeholder="xwcur-..."></label>
+</div>
+<button type="submit">Restore</button>
+</form>"#,
+        html_escape(csrf_token),
+        html_escape(&ops_control_idempotency_key("x-watch-curation-restore")),
+    ));
+    html.push_str(&format!(
         r#"<form method="post" action="/ops/actions/worker/run-once">
 <input type="hidden" name="csrf_token" value="{}">
 <input type="hidden" name="idempotency_key" value="{}">
@@ -1554,11 +2217,11 @@ pub(crate) fn render_knowledge_ops_control_panel(
     let mut html = String::new();
     html.push_str("<section class=\"section\"><h2>Knowledge Controls</h2>");
     let Some(csrf_token) = csrf_token else {
-        html.push_str("<p class=\"muted\">Open /ops/ui from the authenticated HTTP server to use knowledge controls.</p></section>");
+        html.push_str("<p class=\"muted\">Open /ops/ui from the service-hosted cockpit to use knowledge controls.</p></section>");
         return html;
     };
     if !controls_enabled {
-        html.push_str("<p class=\"muted\">Disabled: start server with ARCWELL_HTTP_AUTH_TOKEN to enable mutations.</p></section>");
+        html.push_str("<p class=\"muted\">Disabled: start the service with --http-addr to enable local browser controls.</p></section>");
         return html;
     }
     html.push_str("<div class=\"control-grid\">");

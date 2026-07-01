@@ -347,6 +347,98 @@ fn severe_secret_health_warns_when_gmail_mailbox_gaps_lack_oauth_material() {
 }
 
 #[test]
+fn severe_secret_health_warns_when_gmail_issue_schedule_lacks_oauth_material() {
+    // CLAIM: an active Gmail-recipient issue schedule creates a future mailbox
+    // verification dependency even when no delivery gap is currently open.
+    // ORACLE: secret health and health warnings name the missing Gmail OAuth
+    // material with zero mailbox gaps, so "nothing pending now" cannot be
+    // mistaken for daemon-owned Gmail verifier readiness.
+    // SEVERITY: Severe because the daily briefing can send successfully and
+    // only later need mailbox proof; readiness should be visible before that
+    // failure surface appears.
+    let store = test_store("secret-health-gmail-scheduled-issue");
+    store
+        .upsert_issue_schedule(IssueScheduleInput {
+            name: "Gmail daily issue".to_string(),
+            kind: "knowledge_daily_briefing".to_string(),
+            channel: "email".to_string(),
+            recipient_ref: "email:user@gmail.com".to_string(),
+            time_zone: "utc".to_string(),
+            hour: 7,
+            minute: 0,
+            catch_up_hours: 72,
+            metadata: json!({}),
+            status: Some("active".to_string()),
+        })
+        .unwrap();
+
+    assert!(
+        store
+            .list_email_delivery_verification_gaps()
+            .unwrap()
+            .is_empty(),
+        "test precondition: schedule dependency should warn before gaps exist"
+    );
+
+    let secret_health = store.secret_health().unwrap();
+    for required in [
+        "GMAIL_ACCESS_TOKEN",
+        "GMAIL_REFRESH_TOKEN",
+        "GMAIL_CLIENT_ID",
+    ] {
+        let item = secret_health
+            .iter()
+            .find(|item| item.name == required)
+            .unwrap_or_else(|| panic!("{required} warning missing"));
+        assert_eq!(item.status, "missing", "{item:#?}");
+        assert!(
+            item.warnings.iter().any(|warning| {
+                warning.contains("0 unverified gap(s)")
+                    && warning.contains("1 active Gmail-recipient email issue schedule")
+                    && warning.contains("gmail.readonly")
+                    && warning.contains("gmail.modify")
+            }),
+            "{item:#?}"
+        );
+    }
+
+    let health = store.health().unwrap();
+    assert!(!health.ok);
+    assert!(
+        health
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("active Gmail-recipient email issue schedule")),
+        "{:?}",
+        health.warnings
+    );
+
+    let paused = test_store("secret-health-gmail-paused-issue");
+    paused
+        .upsert_issue_schedule(IssueScheduleInput {
+            name: "Paused Gmail issue".to_string(),
+            kind: "knowledge_daily_briefing".to_string(),
+            channel: "email".to_string(),
+            recipient_ref: "email:user@gmail.com".to_string(),
+            time_zone: "utc".to_string(),
+            hour: 7,
+            minute: 0,
+            catch_up_hours: 72,
+            metadata: json!({}),
+            status: Some("paused".to_string()),
+        })
+        .unwrap();
+    assert!(
+        paused
+            .secret_health()
+            .unwrap()
+            .iter()
+            .all(|item| !item.name.starts_with("GMAIL_")),
+        "paused schedules should not create Gmail OAuth readiness warnings"
+    );
+}
+
+#[test]
 fn severe_secret_health_warns_when_x_refresh_material_is_provider_rejected() {
     // CLAIM: Arcwell must not describe X credentials as refreshable after the
     // provider has rejected the stored refresh token.

@@ -26,6 +26,16 @@ provider = "x"
 source = "x_profile_enrichment"
 reason = "allow local X profile enrichment fixture"
 priority = 20
+
+[[rules]]
+id = "allow-x-profile-enrichment-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-x"
+provider = "x"
+source = "x_profile_enrichment"
+reason = "allow local X profile enrichment worker fixture"
+priority = 20
 "#,
     );
 }
@@ -248,4 +258,105 @@ fn severe_x_profile_enrichment_treats_hostile_profile_text_as_untrusted_data() {
     assert!(description.contains("Ignore previous instructions"));
     let curation = store.x_curate_watch_sources("dry-run").unwrap();
     assert_ne!(curation.decisions[0].recommendation, "paused_excluded");
+}
+
+#[test]
+fn severe_worker_enqueues_due_active_x_profile_enrichment() {
+    // CLAIM: the resident worker can refresh stale profile-enrichment evidence
+    // for active X watch sources without resurrecting inactive/orphan handles.
+    // ORACLE: worker pass enqueues and completes one x_profile_enrichment job,
+    // the provider request contains only the active due handle, and source
+    // health advances from the stale next_run_at.
+    // SEVERITY: Severe because profile-enrichment source-health rows with
+    // next_run_at in the past otherwise look scheduled while never running.
+    let store = test_store("x-profile-enrichment-worker");
+    allow_x_profile_enrichment(&store);
+    store
+        .set_secret_value("X_BEARER_TOKEN", "profile-test-token", "x")
+        .unwrap();
+    x_handle_source(&store, "ActiveDue");
+    store
+        .upsert_watch_source(WatchSourceInput {
+            source_kind: "x_handle".to_string(),
+            locator: "InactiveDue".to_string(),
+            label: "@InactiveDue".to_string(),
+            cadence: "warm".to_string(),
+            status: "paused".to_string(),
+            metadata: json!({ "origin": "test" }),
+        })
+        .unwrap();
+    let monitor_next_run_at = now_plus_seconds(3600);
+    store
+        .record_source_success(SourceHealthUpdate {
+            key: "x:watch:activedue",
+            provider: "x",
+            source_kind: "x_monitor",
+            locator: "ActiveDue",
+            last_item_id: Some("recent-tweet"),
+            last_item_date: None,
+            cursor_key: None,
+            cursor_value: None,
+            next_run_at: Some(&monitor_next_run_at),
+        })
+        .unwrap();
+    let stale_next_run_at = "2026-01-01T00:00:00+00:00";
+    for handle in ["ActiveDue", "InactiveDue"] {
+        store
+            .record_source_success(SourceHealthUpdate {
+                key: &format!("x:profile-enrichment:{}", handle.to_ascii_lowercase()),
+                provider: "x",
+                source_kind: "x_profile_enrichment",
+                locator: handle,
+                last_item_id: Some("old-profile"),
+                last_item_date: None,
+                cursor_key: None,
+                cursor_value: None,
+                next_run_at: Some(stale_next_run_at),
+            })
+            .unwrap();
+    }
+    let body = r#"{
+      "data": [{
+        "id": "u-active",
+        "username": "ActiveDue",
+        "name": "Active Due",
+        "description": "Builds AI developer tools."
+      }]
+    }"#;
+    let (base, requests) =
+        mock_recording_sequence_server(vec![("200 OK", "", body, "application/json")]);
+
+    let report = with_x_api_base(&base, || store.run_worker_once(3)).unwrap();
+
+    let enrichment = report
+        .x_profile_enrichment
+        .as_ref()
+        .expect("worker should inspect due profile enrichment");
+    assert_eq!(enrichment.inspected, 1);
+    assert_eq!(enrichment.enqueued, 1);
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.completed, 1);
+    assert_eq!(report.jobs[0].kind, "x_profile_enrichment");
+    assert_eq!(report.jobs[0].status, "completed");
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].contains("usernames=activedue"),
+        "{}",
+        captured[0]
+    );
+    assert!(!captured[0].contains("inactivedue"), "{}", captured[0]);
+    let active = store
+        .get_source_health("x:profile-enrichment:activedue")
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.status, "healthy");
+    assert_eq!(active.last_item_id.as_deref(), Some("u-active"));
+    assert_ne!(active.next_run_at.as_deref(), Some(stale_next_run_at));
+    let inactive = store
+        .get_source_health("x:profile-enrichment:inactivedue")
+        .unwrap()
+        .unwrap();
+    assert_eq!(inactive.last_item_id.as_deref(), Some("old-profile"));
+    assert_eq!(inactive.next_run_at.as_deref(), Some(stale_next_run_at));
 }

@@ -1,6 +1,6 @@
 # Arcwell Remaining Work
 
-Last updated: 2026-06-30
+Last updated: 2026-07-01
 
 This file is intentionally only unfinished work. Completed historical checklist
 items were removed. Existing unchecked items from the prior `TODO.md` have been
@@ -53,17 +53,26 @@ where relevant, docs, `STATUS.md`, and this file agree.
       failed, blocked, partial, retrying, and unknown states are distinguishable.
 - [ ] Do not call a slash command/MCP feature complete unless CLI, MCP schema,
       slash prompt, skill docs, package README, and verifier coverage agree.
-- [ ] Complete the generic proof-ledger M0 hardening. Schema v22 now provides
-      `proof_packets`, `proof_claims`, `proof_artifacts`, and `proof_checks`;
-      `arcwell proof record/read/list/promote/latest/verify-packet` exists;
+- [ ] Complete the generic proof-ledger M0 hardening. Schema v24 now provides
+      `proof_packets`, `proof_claims`, `proof_artifacts`, `proof_checks`,
+      `adversarial_review_runs`, and `adversarial_review_findings`;
+      `arcwell proof record/read/list/promote/latest/verify-packet` plus
+      `review-record/review-read/review-list` exist;
       severe tests block passed/promoted packets without checks, unresolved
       claims, duplicate claim keys, malformed artifact hashes, hostile claim
       text promotion, missing/tampered artifacts, artifact path escapes,
       token/email-like proof leakage, and broad operational/freshness/model
       proof claims without required evidence markers. Latest local proof:
       `.arcwell-dev/proofs/proof-ledger-hardening-20260629T130621Z-93998/artifacts/proof-packet.json`,
-      durable packet `proof-7064d398e84a37b3c6b3d40d`. Remaining M0 work:
-      baseline all-capability snapshot, MCP/slash/docs parity, ops UI access,
+      durable packet `proof-7064d398e84a37b3c6b3d40d`. Latest real-home M0
+      baseline snapshot proof:
+      `.arcwell-dev/proofs/autonomous-knowledge-baseline-proof-20260701T075525Z-75005/artifacts/proof-packet.json`,
+      durable packet `proof-9c0cc9d46407d0d41e536d80`, held review
+      `arev-f9e8eb04aba15399a7c7a5fe`. Latest docs/tooling claim audit:
+      `.arcwell-dev/proofs/autonomous-knowledge-claim-audit-20260701T080951Z-99888/artifacts/proof-packet.json`,
+      durable packet `proof-04f6aefb36e55995281bad93`, promoted review
+      `arev-f1f1a2d6cbd656f6b76d48e4`. Remaining proof-ledger work:
+      MCP/slash runtime parity, ops UI proof access, source freshness proof,
       and future source-heavy proof bundle sanitization where clean
       verification is required.
 
@@ -154,15 +163,26 @@ PR, implementation note, or final report:
 
 ## 4. Ops, Monitoring, And Human Control Surface
 
-- [ ] Decide whether to keep server-rendered HTML or split out a small frontend
-      package before adding richer controls.
+- [x] Keep the current cockpit server-rendered in the Arcwell Rust service
+      surface for this source-owned ops slice. `/ops/ui`, `/cockpit`, and
+      `/ops/cockpit` render the same dashboard over `ops_snapshot`; `worker run
+      --http-addr` lets the resident worker host it without a separate daemon;
+      `service install --http-addr` writes that into the existing
+      `com.arcwell.worker` LaunchAgent, creates/reuses a private service-owned
+      HTTP token file, lets `/ops/ui` mint the browser cookie automatically, and
+      seeds narrow local ops-control policy for cockpit buttons while leaving
+      provider/cost/source-write/promotion gates in place; and Codex-facing docs
+      now tell agents to report `cockpit_url` or the exact served URL when
+      browser-visible Arcwell state is relevant. Revisit a split frontend only
+      if richer interaction needs outgrow server-rendered HTML.
 - [ ] Add manual job requeue/cancel controls only after safe public core APIs
       exist; do not fake unsupported remediation.
 - [ ] Add safe controls for retry delivery, apply/reject candidate, run doctor,
       create/verify backup, drain once, and inspect policy denial reasons.
-- [ ] Add charts and stale-state summaries for queue age, failed deliveries,
-      backup freshness, source health, credential health, costs, work runs, and
-      pending reviews.
+- [ ] Add richer historical charts and stale-state summaries for queue age,
+      failed deliveries, backup freshness, source health, credential health,
+      costs, work runs, and pending reviews. The current cockpit has domain
+      panels and a unified event log; it is not yet a charting/watchdog layer.
 - [ ] Add live-provider probe summaries to ops only where probes are cheap,
       safe, redacted, and policy/cost aware. Core probe substrate now exists:
       `arcwell provider probe` and MCP `provider_credential_probe` check
@@ -227,9 +247,9 @@ PR, implementation note, or final report:
       requests both `gmail.readonly` for mailbox verification and
       `gmail.modify` for placement repair, stored refresh/client material can
       refresh expired `GMAIL_ACCESS_TOKEN` values before daemon-owned verifier
-      or repair work, and active mailbox gaps now create secret-health /
-      credential-reminder warnings when Gmail OAuth material is missing or
-      policy-blocked. Host-Gmail connector proof
+      or repair work. Active mailbox gaps and active Gmail-recipient issue
+      schedules now create secret-health / credential-reminder warnings when
+      Gmail OAuth material is missing or policy-blocked. Host-Gmail connector proof
       `.arcwell-dev/proofs/gmail-host-mailbox-verification-20260630T1745Z/artifacts/proof-packet.json`
       reconciled 25 historical provider-accepted sends and showed why
       `found in Gmail` is not sufficient delivery proof when placement is
@@ -240,11 +260,13 @@ PR, implementation note, or final report:
       repair moved the 25 historical Trash-placed Arcwell messages back to
       Inbox by adding `INBOX` and removing `TRASH`, then recorded 25
       `gmail_host_connector_repair` Inbox observations; `email
-      verification-gaps` is now empty, the active 7am scheduled tick is
-      `mailbox_observed_inbox`, and Gmail OAuth secret-health warnings are gone
-      because no active mailbox gaps remain. Missing Gmail verifier credentials
-      for future ready gaps now write `email:gmail-mailbox-verifier` source health
-      instead of requiring a manual verifier run to expose the blocker.
+      verification-gaps` is now empty and the active 7am scheduled tick is
+      `mailbox_observed_inbox`. After active-schedule readiness hardening,
+      Gmail OAuth secret-health warnings still appear while the active Gmail
+      recipient schedule lacks Arcwell-owned OAuth material, even with no
+      current mailbox gaps. Missing Gmail verifier credentials for future ready
+      gaps now write `email:gmail-mailbox-verifier` source health instead of
+      requiring a manual verifier run to expose the blocker.
       `arcwell email recovery-plan` and MCP `email_delivery_recovery_plan`
       classify current delivery gaps without side effects: unverified sends map
       to mailbox verification, Trash/Spam maps to placement repair, and
@@ -378,6 +400,84 @@ PR, implementation note, or final report:
       observe the native 7am issue tick after it is actually due and keep
       proving recurrence over multiple days; this was not a July 1 7am delivery
       proof because the schedule was still in the future during the shakeout.
+      Copied-home controlled-provider catch-up proof now passes at
+      `.arcwell-dev/proofs/daily-briefing-catchup-proof-20260701T043605Z-67397/artifacts/proof-packet.json`:
+      a simulated missed native daily briefing slot was visible as due in ops,
+      `worker run-once` enqueued and completed exactly one
+      `knowledge_daily_briefing` job, sent one controlled-provider email
+      request, linked the scheduled tick to candidate and delivery rows, and a
+      second worker pass suppressed duplicates. This proof also fixed the
+      delivery-policy context bug where daily briefing candidates containing X
+      evidence could be misclassified as `arcwell-x/x_digest_delivery` before
+      the generated daily briefing source card was scanned.
+      Live resident-worker proof now passes at
+      `.arcwell-dev/proofs/daily-briefing-live-observation-proof-20260701T060935Z-2764/artifacts/proof-packet.json`:
+      the 2026-07-01 7am London scheduled tick was materialized by the resident
+      worker, completed as `sent`, linked to delivery
+      `a6fa3839-7f0c-4cea-9cf9-0578efc6d8f7`, advanced the schedule to
+      2026-07-02 7am London, and has Gmail connector-backed
+      `mailbox_observed_inbox` proof for message `19f1c4401b22dd8d`.
+      Remaining gap: Arcwell's built-in Gmail mailbox verifier still reports
+      `GMAIL_ACCESS_TOKEN is not configured`, so mailbox observation currently
+      depends on a host verifier/connector recording the observation rather than
+      an autonomous local Gmail verifier.
+      Follow-up Gmail connector reconciliation recorded Inbox observations for
+      the two remaining July 1 AI/devrel delivery attempts
+      `e66461e4-8f0f-4699-bcdf-7a7c6b50914f` and
+      `b7e80d51-539c-419a-b946-ff27082e2282`, clearing
+      `email verification-gaps` and `email recovery-plan` back to 0. The
+      read-only Gmail proof packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T061657Z-20813/artifacts/proof-packet.json`
+      shows 0 current mailbox gaps and, before active-schedule readiness
+      hardening, 0 Gmail secret-health warning rows.
+      The guarded live Arcwell-owned verifier packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T061554Z-19262/artifacts/proof-packet.json`
+      correctly reports `blocked_missing_gmail_oauth` when ready gaps exist but
+      local Gmail OAuth material is absent. After the host connector cleared the
+      current gaps, the follow-up guarded live packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T062111Z-30576/artifacts/proof-packet.json`
+      reports `incomplete_missing_gmail_oauth_no_current_gaps`, making clear
+      that "0 gaps" is current readiness, not proof that Arcwell-owned Gmail API
+      access works. `scripts/gmail-mailbox-proof --live` now exits nonzero for
+      blocked or incomplete packets unless `--allow-incomplete` is passed, so
+      live OAuth proof cannot be flattened into a passing artifact by accident.
+      The latest read-only packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T062357Z-36489/artifacts/proof-packet.json`
+      also records `gmail_oauth_readiness.can_attempt_live_gmail_api=false`
+      even while current gaps were 0, so status mode no longer lets "nothing
+      pending right now" masquerade as configured daemon-owned Gmail API
+      readiness. `scripts/gmail-mailbox-proof --status
+      --require-gmail-oauth` now turns that readiness field into a hard gate:
+      the current real home exits 2 with `missing_gmail_oauth`, while a
+      token-presence sanity check flips the same packet to `status_only`
+      without leaking token text. The disposable self-test packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T062917Z-47600/artifacts/proof-packet.json`
+      now includes both strict-status regression artifacts: missing OAuth must
+      produce `missing_gmail_oauth`, and a disposable configured token must
+      produce `status_only` without leaking the token into status artifacts.
+      2026-07-01 follow-up: normal `health`/secret-health now treats active
+      Gmail-recipient issue schedules as a Gmail OAuth readiness dependency even
+      when current mailbox gaps are 0. A rebuilt real-home
+      `target/debug/arcwell health` reports missing `GMAIL_ACCESS_TOKEN`,
+      `GMAIL_REFRESH_TOKEN`, and `GMAIL_CLIENT_ID` for 0 unverified gaps, 0
+      Trash/Spam repairable gaps, and 1 active Gmail-recipient email issue
+      schedule. The strict read-only proof packet
+      `.arcwell-dev/proofs/gmail-mailbox-proof-20260701T063853Z-74387/artifacts/proof-packet.json`
+      exits 2 with `missing_gmail_oauth`, so "the host connector found today's
+      message in Inbox" stays separate from "Arcwell-owned Gmail API
+      verification is configured."
+      2026-07-01 blog source-health follow-up: resident `ingest_url` jobs now
+      credit scheduled blog watch sources by requested URL before
+      final/canonical URL, so redirected official blogs no longer complete as
+      wiki pages while staying immediately due with `source_health_key: null`.
+      Severe coverage
+      `severe_blog_watch_source_redirect_ingest_records_original_source_health`
+      proves redirected/canonicalized blog ingestion updates the original
+      source-health row. Rebuilt real-home proof reran the three stuck blog
+      sources (`blog.google/technology/ai`, `deepmind.google/discover/blog`,
+      and `karpathy.github.io`), each completed with non-null
+      `source_health_key`, each advanced to `2026-07-01T12:58:40Z`, and a
+      follow-up `worker run-once --max-jobs 3` processed 0 jobs.
       replace the remaining Codex-side six-hour catch-up wrapper with native
       fixed-time scan scheduling or prove watch-source cadence is sufficient,
       record multi-day sleep/shutdown/restart catch-up proof, work down
@@ -727,9 +827,10 @@ PR, implementation note, or final report:
       Remaining work is broad live fresh primary-source acquisition,
       production-data semantic/model clustering over real corpora, broad X
       quota/tier/live coverage beyond the capped smoke, multi-day scheduled
-      source recurrence, live external delivery recurrence, production
-      monitoring, broad production-corpus model-backed writer/editor synthesis,
-      broad automatic model-writing sweeps, and broader ops UI repair controls.
+      source/profile-enrichment recurrence, live external delivery recurrence,
+      production monitoring, broad production-corpus model-backed writer/editor
+      synthesis, broad automatic model-writing sweeps, and broader ops UI repair
+      controls.
 - [ ] Complete the Arcwell X anti-mirage plan in
       `docs/arcwell-x-architecture-implementation-plan.md` before marking X
       beyond `Partial`.
@@ -1936,7 +2037,17 @@ PR, implementation note, or final report:
       handle terms, and seed-allowlisted sparse tech accounts; tests prove
       platform/tooling profiles and seed accounts are kept. A live real-home
       enrichment pass fetched/updated 500 additional X profiles with zero
-      failed batches. `scripts/x-watch-curation-generate-reviewed-candidates`
+      failed batches. Resident worker profile-enrichment scheduling now has a
+      bounded live-provider slice: on 2026-07-01 it found 5 due active
+      `x_profile_enrichment` source-health rows, completed job
+      `14fe7b28-6a0c-480d-998c-669b00933a20`, fetched/updated 5/5 profiles
+      with 0 failed batches, recorded sync run
+      `55c18973-967a-4ace-827d-b773e0459301`, advanced the five rows to the
+      next day, and a follow-up worker pass processed 0 profile-enrichment
+      jobs. Severe coverage proves due active handles are refreshed while
+      inactive/orphan stale profile rows are ignored. This closes the first
+      scheduled-enrichment queue slice, not multi-day recurrence or broad
+      curation operational readiness. `scripts/x-watch-curation-generate-reviewed-candidates`
       generated a conservative candidate ruleset from curation/profile evidence:
       289 rules total, 244 manual keeps, 45 manual excludes, and zero protected
       seed excludes after adversarial review. Copied-home pause/restore proof
@@ -1964,10 +2075,79 @@ PR, implementation note, or final report:
       polled 5/5 sources with 0 failures, 0 rejects, 10 imports, 10 duplicate
       skips, and 1 digest candidate; `0xbeepit` and `0xblacklight` are healthy
       with advanced cursors. Spot-checked protected seed accounts
-      `AsahiLinux`, `Dialogflow`, and `benedictevans` remain active. Remaining
-      work before this can close: scheduled enrichment queue, optional CSV
-      converter, ops UI controls, MCP/slash/docs parity, expanded seed/gold-set
-      quality measurement, and worker/source-health pressure reduction proof.
+      `AsahiLinux`, `Dialogflow`, and `benedictevans` remain active. Schema
+      v25 now prevents future X curation audit loss when definitive watch-source
+      rebuilds replace `watch_sources`: `scripts/x-watch-curation-audit-retention-proof`
+      recorded packet `proof-a7169f33289b34a369d04fb3` and promoted review
+      `arev-93c9c7c2641245b9058a449a`, proving the real schema no longer
+      cascades curation audit rows from `watch_sources` and that a copied-home
+      sentinel retained its decision/evidence/snapshot rows after deleting the
+      sentinel watch source. `scripts/x-watch-curation-restore-audit-from-proof`
+      then restored the historical 2026-06-29 pause-only run
+      `xwcur-a4d1e80fc10956eeef8ed859` from the reviewed proof artifact into
+      the live DB: 1,553 decisions and 1,596 evidence rows now match exact
+      artifact hashes, watch-source counts were unchanged, `foreign_key_check`
+      was clean, durable packet `proof-5b6b16bfdc55fc33941efe2d` was recorded,
+      and review `arev-7e188523188cfe354023f315` promoted the narrow recovery.
+      Exact historical restore snapshots remain unreconstructed because the
+      available artifact does not contain full previous `metadata_json`.
+      `scripts/x-watch-curation-worker-pressure-proof` recorded packet
+      `proof-05680c91a60f86a02172e36e` and promoted review
+      `arev-827771bf1572d76dc23510e7`: current active `x_handle` workload is
+      170 handles, down 1,383 from the original 1,553-handle import; all 170
+      current `x_monitor` source-health rows are healthy; no active handle is
+      missing monitor health; no inactive handle has a stray monitor-health row;
+      no `x_monitor_watch_source` jobs are pending/failed/running; and the
+      same-day durable worker sweep completed 170 distinct watch-monitor handles
+      with 89 imports, 0 failures, and 0 rejects. Focused severe tests prove
+      scheduled `x_handle` worker jobs use `x_monitor_watch_source` and
+      `x:watch:<handle>` cursor/source-health artifacts, not recent-search.
+      `scripts/x-watch-curation-current-quality-proof` recorded packet
+      `proof-a2ec54b3bb4c0f1abf7758bd` and promoted review
+      `arev-014f54a1828202d1d1d39f8f`: the retained current run
+      `xwcur-231181159a698cb7d373b80d` covers 170 active handles with 116 keep,
+      24 review-keep, and 30 review-drop decisions; conservative
+      reviewed-candidate generation produced 123 keeps and one copied-home-only
+      exclude (`ArtButSports`), left 29 review-drop rows unresolved, protected
+      risky false positives such as `patrickc`, `stripe`, `NoamShazeer`,
+      `BrainsAndTennis`, `jerhadf`, and `zendadddy`, and found no paused
+      seed-keep handles in the current DB snapshot. Nested copied-home packet
+      `proof-30a304839f0350ab3623f9c8` proved pause-only applied exactly that
+      one copied-home exclude, restored to 170 active handles, and left the
+      real home unchanged at 170 active handles. Follow-up
+      `scripts/x-watch-curation-current-real-home-apply-proof` recorded packet
+      `proof-8613f3ce5d971a195fe0a8a9` and promoted review
+      `arev-e2e67c11c7eed0ffb70a82ab`: it verified the source quality packet,
+      created a private SQLite backup, imported one reviewed manual exclude,
+      and pause-only applied exactly `ArtButSports`, moving the current real
+      home from 170 active handles to 169 active / 1 paused while preserving
+      the 170-row `x_handle` set and changing no other handle status.
+      `scripts/x-watch-curation-current-manual-review-proof` then recorded
+      packet `proof-79a8c1a2990068f9861e46a9` and promoted review
+      `arev-99e7391b73181fb1805e3b12`: it verified that source packet, created
+      a private SQLite backup, imported 28 reviewed manual rules from the
+      current 29-row review-drop evidence set, preserved all 18 reviewed keeps
+      as active, and pause-only applied exactly the 10 reviewed excludes,
+	      moving the current real home from 169 active / 1 paused to 159 active /
+	      11 paused while preserving the 170-row `x_handle` set. Follow-up
+	      `scripts/x-watch-curation-zero-evidence-deferral-proof` recorded
+	      packet `proof-c0bf7318775dfd0959470882` and promoted review
+	      `arev-002c6129474afbc0ed5c0725`: `Earendil` now has a reviewed
+	      `manual_needs_evidence` rule, curation emits `needs_evidence`, it
+	      remains active, no restore snapshot is written for it, and real-home
+	      counts remain 159 active / 11 paused / 170 total. This is not a keep or
+	      exclude decision; it is a deliberate deferral because there is no local
+	      profile, tweet, bookmark, or technical evidence either way. A targeted live
+	      `x recent-search 'from:Earendil'` attempt was policy-deferred by decision
+	      `345038b3-220a-49f8-b350-f4fd3f62f646`; stronger future evidence can
+	      replace the deferral later. Follow-up MCP/slash/docs parity now exposes
+	      curation dry-run/apply, report, restore, manual-rule import, and profile
+	      enrichment through MCP tools and slash prompts; `cargo test -p arcwell
+	      mcp_x -- --nocapture` and `scripts/verify-codex-plugin-docs` passed.
+	      Remaining work before this can close: optional CSV converter, ops UI
+	      controls, fresh-thread Codex app command smoke, expanded seed/gold-set
+	      quality measurement, and multi-day recurrence/provider proof where
+	      operational claims depend on it.
 - [x] Add scheduled credential rotation reminders and stale-scope warnings.
       `secret_health`, `health`, `doctor`, and `ops_snapshot` warn when
       local/ref credentials expire within 72 hours, and active scheduled X

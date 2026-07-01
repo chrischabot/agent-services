@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_DAILY_BRIEFING_LIVE_PROOF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_DAILY_BRIEFING_LIVE_PROOF_DIR:-$REPO_ROOT/.arcwell-dev/proofs/daily-briefing-live-observation-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+SCHEDULE_ID="${ARCWELL_DAILY_BRIEFING_SCHEDULE_ID:-isch-093a064e3b5ecba50704d090}"
+WAIT=0
+GRACE_SECONDS=240
+ALLOW_INCOMPLETE=0
+EXPECTED_DUE_AT_OVERRIDE=""
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/daily-briefing-live-observation-proof [options]
+
+Non-mutating live proof for the native daily briefing issue schedule. It records
+service status and ops before/after the next scheduled slot and validates
+whether the resident worker, without a manual drain, materialized and delivered
+that scheduled tick.
+
+Options:
+  --schedule-id id       Issue schedule id. Default: real-home daily briefing id.
+  --wait                 Wait until next_scheduled_at plus grace before after-capture.
+  --expected-due-at ts   Validate a specific scheduled slot instead of the next future due slot.
+  --grace-seconds n      Seconds after the due slot to wait. Default: 240.
+  --proof-root path      Override proof output directory.
+  --allow-incomplete     Exit 0 while writing an incomplete proof packet.
+  -h, --help             Show this help.
+
+Boundary:
+  This script observes the live home. It does not enqueue jobs, run workers
+  manually, send messages itself, or repair mailbox placement. A pass requires
+  the resident worker path to create a sent scheduled tick for the observed
+  due time, and mailbox proof is reported separately.
+USAGE
+}
+
+log() {
+  printf '[daily-briefing-live-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[daily-briefing-live-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --schedule-id)
+      [[ $# -ge 2 ]] || fail "--schedule-id requires an id"
+      SCHEDULE_ID="$2"
+      shift
+      ;;
+    --wait)
+      WAIT=1
+      ;;
+    --expected-due-at)
+      [[ $# -ge 2 ]] || fail "--expected-due-at requires an RFC3339 timestamp"
+      EXPECTED_DUE_AT_OVERRIDE="$2"
+      shift
+      ;;
+    --grace-seconds)
+      [[ $# -ge 2 ]] || fail "--grace-seconds requires a value"
+      GRACE_SECONDS="$2"
+      shift
+      ;;
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      shift
+      ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+for required in node; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+
+if [ ! -x "$ARCWELL_BIN" ]; then
+  log "building target/debug/arcwell"
+  (cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+fi
+[ -x "$ARCWELL_BIN" ] || fail "arcwell binary not found: $ARCWELL_BIN"
+
+mkdir -p "$ARTIFACT_DIR"
+
+capture() {
+  local prefix="$1"
+  log "capturing $prefix service status and ops"
+  "$ARCWELL_BIN" service status --compact >"$ARTIFACT_DIR/$prefix-service-status.json"
+  "$ARCWELL_BIN" ops --compact >"$ARTIFACT_DIR/$prefix-ops.json"
+  node - "$ARTIFACT_DIR/$prefix-ops.json" "$SCHEDULE_ID" >"$ARTIFACT_DIR/$prefix-schedule-summary.json" <<'NODE'
+const fs = require("fs");
+const [opsFile, scheduleId] = process.argv.slice(2);
+const ops = JSON.parse(fs.readFileSync(opsFile, "utf8"));
+const summary = (ops.issue_schedule_summary || []).find((item) => item.schedule_id === scheduleId);
+if (!summary) {
+  console.error(`schedule not found in ops summary: ${scheduleId}`);
+  process.exit(3);
+}
+console.log(JSON.stringify(summary, null, 2));
+NODE
+}
+
+capture before
+
+if [[ -n "$EXPECTED_DUE_AT_OVERRIDE" ]]; then
+  EXPECTED_DUE_AT="$EXPECTED_DUE_AT_OVERRIDE"
+else
+  EXPECTED_DUE_AT="$(node - "$ARTIFACT_DIR/before-schedule-summary.json" <<'NODE'
+const fs = require("fs");
+const summary = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(summary.next_due_at || summary.next_scheduled_at || "");
+NODE
+)"
+fi
+[ -n "$EXPECTED_DUE_AT" ] || fail "before snapshot did not expose next_due_at or next_scheduled_at"
+
+if [[ "$WAIT" == "1" ]]; then
+  log "waiting for expected due slot: $EXPECTED_DUE_AT plus ${GRACE_SECONDS}s"
+  node - "$EXPECTED_DUE_AT" "$GRACE_SECONDS" <<'NODE'
+const [dueAt, graceRaw] = process.argv.slice(2);
+const target = new Date(dueAt).getTime() + Number(graceRaw) * 1000;
+if (!Number.isFinite(target)) {
+  console.error(`invalid due time: ${dueAt}`);
+  process.exit(2);
+}
+const wait = () => {
+  const remaining = target - Date.now();
+  if (remaining <= 0) return process.exit(0);
+  console.log(`waiting_for_live_daily_briefing_due remaining_seconds=${Math.ceil(remaining / 1000)}`);
+  setTimeout(wait, Math.min(60_000, Math.max(1000, remaining)));
+};
+wait();
+NODE
+fi
+
+capture after
+
+log "validating live observation proof"
+node - "$ARTIFACT_DIR" "$PROOF_ROOT" "$SCHEDULE_ID" "$EXPECTED_DUE_AT" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [artifactDir, proofRoot, scheduleId, expectedDueAt] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const beforeService = read("before-service-status.json");
+const afterService = read("after-service-status.json");
+const before = read("before-schedule-summary.json");
+const after = read("after-schedule-summary.json");
+const failures = [];
+const notes = [];
+const expectedMs = new Date(expectedDueAt).getTime();
+const latestScheduledMs = after.latest_scheduled_tick_due_at
+  ? new Date(after.latest_scheduled_tick_due_at).getTime()
+  : NaN;
+const latestTickMs = after.latest_tick_due_at ? new Date(after.latest_tick_due_at).getTime() : NaN;
+
+function check(condition, message) {
+  if (!condition) failures.push(message);
+}
+
+check(beforeService.ok === true, "before service status was not ok");
+check(afterService.ok === true, "after service status was not ok");
+check(afterService.heartbeat_fresh === true, "after worker heartbeat was not fresh");
+check(before.schedule_id === scheduleId && after.schedule_id === scheduleId, "schedule id mismatch");
+check(Number.isFinite(expectedMs), `invalid expected due time ${expectedDueAt}`);
+check(Number.isFinite(latestScheduledMs), "after snapshot has no scheduled tick due_at");
+check(latestScheduledMs >= expectedMs, "latest scheduled tick did not reach expected due slot");
+check(after.latest_scheduled_tick_status === "sent", "latest scheduled tick is not sent");
+check(Boolean(after.latest_scheduled_tick_delivery_id), "latest scheduled tick has no delivery id");
+check(after.catch_up_status === "not_due", "schedule still reports due after observation");
+check(after.has_active_job === false, "schedule still has active job after observation");
+
+if (after.latest_scheduled_tick_delivery_proof !== "mailbox_observed_inbox") {
+  notes.push(
+    `mailbox proof is ${after.latest_scheduled_tick_delivery_proof || "missing"}; provider delivery and mailbox observation are separate gates`
+  );
+}
+if (Number.isFinite(latestTickMs) && latestTickMs > latestScheduledMs) {
+  notes.push("latest tick is newer than latest scheduled tick; inspect manual/rerun rows separately");
+}
+
+const packet = {
+  proof_name: "daily-briefing-live-observation-proof",
+  proof_level: "Live resident-worker observation",
+  generated_at: new Date().toISOString(),
+  status: failures.length === 0 ? "passed" : "incomplete",
+  proof_root: proofRoot,
+  arcwell_home: process.env.ARCWELL_HOME || `${process.env.HOME}/.arcwell`,
+  schedule_id: scheduleId,
+  expected_due_at: expectedDueAt,
+  before: {
+    service_status: beforeService.status,
+    heartbeat_fresh: beforeService.heartbeat_fresh,
+    catch_up_status: before.catch_up_status,
+    next_due_at: before.next_due_at,
+    next_scheduled_at: before.next_scheduled_at,
+    latest_scheduled_tick_due_at: before.latest_scheduled_tick_due_at,
+    latest_scheduled_tick_status: before.latest_scheduled_tick_status,
+  },
+  after: {
+    service_status: afterService.status,
+    heartbeat_fresh: afterService.heartbeat_fresh,
+    catch_up_status: after.catch_up_status,
+    has_active_job: after.has_active_job,
+    latest_scheduled_tick_due_at: after.latest_scheduled_tick_due_at,
+    latest_scheduled_tick_status: after.latest_scheduled_tick_status,
+    latest_scheduled_tick_delivery_id: after.latest_scheduled_tick_delivery_id,
+    latest_scheduled_tick_delivery_proof: after.latest_scheduled_tick_delivery_proof,
+    latest_scheduled_tick_error: after.latest_scheduled_tick_error,
+    latest_inbox_confirmed_due_at: after.latest_inbox_confirmed_due_at,
+    latest_inbox_confirmed_delivery_proof: after.latest_inbox_confirmed_delivery_proof,
+    tick_status_counts: after.tick_status_counts,
+    tick_type_counts: after.tick_type_counts,
+  },
+  failures,
+  notes,
+  artifacts: {
+    before_service_status: path.join(artifactDir, "before-service-status.json"),
+    before_ops: path.join(artifactDir, "before-ops.json"),
+    before_schedule_summary: path.join(artifactDir, "before-schedule-summary.json"),
+    after_service_status: path.join(artifactDir, "after-service-status.json"),
+    after_ops: path.join(artifactDir, "after-ops.json"),
+    after_schedule_summary: path.join(artifactDir, "after-schedule-summary.json"),
+  },
+  anti_mirage_boundary:
+    "This proof observes the live resident worker path only. It does not manually enqueue or drain jobs, and it treats mailbox observation as a stronger separate delivery proof than provider acceptance.",
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+console.log(JSON.stringify(packet, null, 2));
+NODE
+
+PACKET_STATUS="$(node -e "const p=require(process.argv[1]); console.log(p.status)" "$ARTIFACT_DIR/proof-packet.json")"
+log "wrote $ARTIFACT_DIR/proof-packet.json"
+if [[ "$PACKET_STATUS" != "passed" && "$ALLOW_INCOMPLETE" != "1" ]]; then
+  fail "daily briefing live observation proof is $PACKET_STATUS; rerun with --allow-incomplete to retain artifacts without passing"
+fi

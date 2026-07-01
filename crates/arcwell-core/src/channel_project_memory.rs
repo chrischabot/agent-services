@@ -1274,6 +1274,7 @@ pub(crate) fn validate_job_kind(kind: &str) -> Result<()> {
         | "reddit_fetch"
         | "x_recent_search"
         | "x_import_bookmarks"
+        | "x_profile_enrichment"
         | "x_monitor_watch_source"
         | "radar_run"
         | "radar_scheduled_delivery"

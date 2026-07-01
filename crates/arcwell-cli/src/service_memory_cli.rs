@@ -1,6 +1,8 @@
 use crate::*;
 use arcwell_core::{WorkerHeartbeat, WorkerRecurrenceAudit};
 use chrono::{DateTime, Utc};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 pub(crate) fn provider(store: Store, args: ProviderCommand) -> Result<()> {
     match args.command {
@@ -45,6 +47,9 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
         ServiceSubcommand::Install {
             max_jobs_per_tick,
             idle_sleep_ms,
+            http_addr,
+            http_max_uri_bytes,
+            http_max_body_bytes,
             no_load,
         } => {
             let paths = store.paths().clone();
@@ -52,6 +57,16 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
             let log_dir = paths.home.join("logs");
             fs::create_dir_all(&log_dir)
                 .with_context(|| format!("creating {}", log_dir.display()))?;
+            let http_auth_token_file = if http_addr.is_some() {
+                Some(ensure_service_http_token_file(&paths)?)
+            } else {
+                None
+            };
+            let seeded_policy_rules = if http_addr.is_some() {
+                store.ensure_local_ops_ui_policy_rules()?
+            } else {
+                Vec::new()
+            };
             if let Some(parent) = plist_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
@@ -63,6 +78,10 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
                 &log_dir,
                 max_jobs_per_tick,
                 idle_sleep_ms,
+                http_addr,
+                http_auth_token_file.as_deref(),
+                http_max_uri_bytes,
+                http_max_body_bytes,
             );
             fs::write(&plist_path, plist)
                 .with_context(|| format!("writing {}", plist_path.display()))?;
@@ -99,7 +118,8 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
                 "plist": plist_path,
                 "log_dir": log_dir,
                 "enable": enable,
-                "load": load
+                "load": load,
+                "seeded_policy_rules": seeded_policy_rules
             }))?;
             if !ok {
                 bail!("launchctl bootstrap failed for {SERVICE_LABEL}");
@@ -158,21 +178,32 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
         }
         ServiceSubcommand::Restart => {
             let plist_path = service_plist_path()?;
-            let restart = run_launchctl(&[
-                "kickstart",
-                "-k",
-                &format!("gui/{}/{}", current_uid()?, SERVICE_LABEL),
-            ]);
-            let (enable, bootstrap) = if json_bool(&restart, "ok") {
-                (json!({ "attempted": false }), json!({ "attempted": false }))
-            } else if plist_path.exists() {
+            let uid = current_uid()?;
+            let bootout = run_launchctl(&["bootout", &format!("gui/{uid}/{SERVICE_LABEL}")]);
+            let (enable, bootstrap) = if plist_path.exists() {
                 let enable = enable_service_label()?;
                 let bootstrap = if json_bool(&enable, "ok") {
-                    run_launchctl(&[
+                    let first = run_launchctl(&[
                         "bootstrap",
-                        &format!("gui/{}", current_uid()?),
+                        &format!("gui/{uid}"),
                         &plist_path.to_string_lossy(),
-                    ])
+                    ]);
+                    if json_bool(&first, "ok") {
+                        first
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let retry = run_launchctl(&[
+                            "bootstrap",
+                            &format!("gui/{uid}"),
+                            &plist_path.to_string_lossy(),
+                        ]);
+                        json!({
+                            "attempted": true,
+                            "ok": json_bool(&retry, "ok"),
+                            "first": first,
+                            "retry": retry,
+                        })
+                    }
                 } else {
                     json!({ "attempted": false })
                 };
@@ -180,17 +211,17 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
             } else {
                 (json!({ "attempted": false }), json!({ "attempted": false }))
             };
-            let ok = json_bool(&restart, "ok") || json_bool(&bootstrap, "ok");
+            let ok = json_bool(&bootstrap, "ok");
             print_json(&json!({
                 "ok": ok,
                 "label": SERVICE_LABEL,
                 "plist": plist_path,
-                "restart": restart,
+                "bootout": bootout,
                 "enable": enable,
                 "bootstrap": bootstrap
             }))?;
             if !ok {
-                bail!("launchctl restart/bootstrap failed for {SERVICE_LABEL}");
+                bail!("launchctl bootout/bootstrap failed for {SERVICE_LABEL}");
             }
             Ok(())
         }
@@ -307,6 +338,7 @@ pub(crate) fn compact_service_status_json(
         "ok": installed && launchctl_running && heartbeat_fresh,
         "status": status,
         "label": label,
+        "cockpit_url": service_plist_cockpit_url(plist_path),
         "installed": installed,
         "plist": plist_path,
         "launchctl_ok": launchctl_ok,
@@ -323,6 +355,45 @@ pub(crate) fn compact_service_status_json(
     })
 }
 
+pub(crate) fn service_plist_cockpit_url(path: &std::path::Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let args = plist_array_strings_after_key(&contents, "ProgramArguments");
+    let addr = args
+        .windows(2)
+        .find_map(|window| (window[0] == "--http-addr").then(|| window[1].trim()))?;
+    if addr.is_empty() {
+        return None;
+    }
+    Some(format!("http://{addr}/ops/ui"))
+}
+
+pub(crate) fn service_http_token_file(paths: &AppPaths) -> PathBuf {
+    paths.home.join("http").join("ops-token")
+}
+
+pub(crate) fn ensure_service_http_token_file(paths: &AppPaths) -> Result<PathBuf> {
+    let path = service_http_token_file(paths);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("setting private permissions on {}", parent.display()))?;
+    }
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.len() >= 16 && !value.chars().any(char::is_control));
+    if existing.is_none() {
+        let token = format!("arcwell-ops-{}-{}", Uuid::new_v4(), Uuid::new_v4());
+        fs::write(&path, format!("{token}\n"))
+            .with_context(|| format!("writing HTTP auth token file {}", path.display()))?;
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting private permissions on {}", path.display()))?;
+    Ok(path)
+}
+
 pub(crate) fn service_plist_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home)
@@ -337,7 +408,29 @@ pub(crate) fn launch_agent_plist(
     log_dir: &std::path::Path,
     max_jobs_per_tick: usize,
     idle_sleep_ms: u64,
+    http_addr: Option<SocketAddr>,
+    http_auth_token_file: Option<&std::path::Path>,
+    http_max_uri_bytes: usize,
+    http_max_body_bytes: u64,
 ) -> String {
+    let mut http_args = String::new();
+    if let Some(addr) = http_addr {
+        http_args.push_str(&format!(
+            "    <string>--http-addr</string>\n    <string>{}</string>\n",
+            xml_escape(&addr.to_string())
+        ));
+        http_args.push_str(&format!(
+            "    <string>--http-max-uri-bytes</string>\n    <string>{}</string>\n    <string>--http-max-body-bytes</string>\n    <string>{}</string>\n",
+            http_max_uri_bytes.clamp(1024, 1024 * 1024),
+            http_max_body_bytes.clamp(1024, 16 * 1024 * 1024)
+        ));
+        if let Some(path) = http_auth_token_file {
+            http_args.push_str(&format!(
+                "    <string>--http-auth-token-file</string>\n    <string>{}</string>\n",
+                xml_escape(&path.to_string_lossy())
+            ));
+        }
+    }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -356,7 +449,7 @@ pub(crate) fn launch_agent_plist(
     <string>{max_jobs_per_tick}</string>
     <string>--idle-sleep-ms</string>
     <string>{idle_sleep_ms}</string>
-  </array>
+{http_args}  </array>
   <key>KeepAlive</key>
   <true/>
   <key>RunAtLoad</key>
@@ -373,6 +466,7 @@ pub(crate) fn launch_agent_plist(
         home = xml_escape(&home.to_string_lossy()),
         max_jobs_per_tick = max_jobs_per_tick.clamp(1, 100),
         idle_sleep_ms = idle_sleep_ms.max(250),
+        http_args = http_args,
         stdout = xml_escape(&log_dir.join("worker.out.log").to_string_lossy()),
         stderr = xml_escape(&log_dir.join("worker.err.log").to_string_lossy())
     )
@@ -556,7 +650,23 @@ pub(crate) fn worker(store: Store, args: WorkerCommand) -> Result<()> {
             max_jobs_per_tick,
             idle_sleep_ms,
             max_ticks,
+            http_addr,
+            http_auth_token,
+            http_auth_token_file,
+            http_max_uri_bytes,
+            http_max_body_bytes,
         } => {
+            let _http_server = match http_addr {
+                Some(addr) => Some(spawn_worker_http_server(
+                    store.paths().clone(),
+                    addr,
+                    http_auth_token,
+                    http_auth_token_file.as_deref(),
+                    http_max_uri_bytes,
+                    http_max_body_bytes,
+                )?),
+                None => None,
+            };
             let mut ticks = 0usize;
             let mut processed = 0usize;
             let mut completed = 0usize;
@@ -600,6 +710,44 @@ pub(crate) fn worker(store: Store, args: WorkerCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn spawn_worker_http_server(
+    paths: AppPaths,
+    addr: SocketAddr,
+    auth_token: Option<String>,
+    auth_token_file: Option<&Path>,
+    max_uri_bytes: usize,
+    max_body_bytes: u64,
+) -> Result<std::thread::JoinHandle<()>> {
+    let resolved_auth_token = resolve_http_auth_token(auth_token, auth_token_file)?;
+    if !addr.ip().is_loopback() && resolved_auth_token.is_none() {
+        bail!("HTTP auth token is required when binding worker HTTP to a non-loopback address");
+    }
+    let listener = std::net::TcpListener::bind(addr)
+        .with_context(|| format!("binding worker HTTP listener on {addr}"))?;
+    let args = ServeArgs {
+        addr,
+        auth_token: resolved_auth_token,
+        auth_token_file: None,
+        max_uri_bytes: max_uri_bytes.clamp(1024, 1024 * 1024),
+        max_body_bytes: max_body_bytes.clamp(1024, 16 * 1024 * 1024),
+    };
+    std::thread::Builder::new()
+        .name("arcwell-worker-http".to_string())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building worker HTTP runtime")
+                .and_then(|runtime| {
+                    runtime.block_on(async move { serve_std_listener(paths, args, listener).await })
+                });
+            if let Err(error) = result {
+                eprintln!("arcwell worker HTTP server exited: {error:#}");
+            }
+        })
+        .context("spawning worker HTTP server")
 }
 
 pub(crate) fn profile(store: Store, args: ProfileCommand) -> Result<()> {

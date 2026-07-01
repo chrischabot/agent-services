@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCWELL_BIN="${ARCWELL_BIN:-$REPO_ROOT/target/debug/arcwell}"
+RUN_STAMP="${ARCWELL_AUTONOMOUS_KNOWLEDGE_BASELINE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROOF_ROOT="${ARCWELL_AUTONOMOUS_KNOWLEDGE_BASELINE_DIR:-$REPO_ROOT/.arcwell-dev/proofs/autonomous-knowledge-baseline-proof-$RUN_STAMP}"
+ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+ARCWELL_HOME_USED="${ARCWELL_HOME:-$HOME/.arcwell}"
+DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+RECORD=1
+ALLOW_INCOMPLETE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/autonomous-knowledge-baseline-proof [options]
+
+Captures the M0 autonomous knowledge baseline from the current real Arcwell
+home, writes a verifiable proof packet, records a durable proof packet row, and
+records a held adversarial review naming the strongest fake-done path.
+
+Options:
+  --proof-root path      Output directory for proof artifacts.
+  --home path            Arcwell home to inspect. Default: ARCWELL_HOME or ~/.arcwell.
+  --no-record            Write artifacts only; do not write proof/review ledger rows.
+  --allow-incomplete     Exit 0 after writing artifacts even if record/review fails.
+  -h, --help             Show this help.
+
+Boundary:
+  This is a read-only production-data snapshot. It proves current counts and
+  latest rows exist as captured artifacts. It does not prove source freshness,
+  schedule recurrence, live provider access, or that every important wiki page
+  is up to date.
+USAGE
+}
+
+log() {
+  printf '[autonomous-knowledge-baseline-proof] %s\n' "$*"
+}
+
+fail() {
+  printf '[autonomous-knowledge-baseline-proof] BLOCKED: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proof-root)
+      [[ $# -ge 2 ]] || fail "--proof-root requires a path"
+      PROOF_ROOT="$2"
+      ARTIFACT_DIR="$PROOF_ROOT/artifacts"
+      shift
+      ;;
+    --home)
+      [[ $# -ge 2 ]] || fail "--home requires a path"
+      ARCWELL_HOME_USED="$2"
+      DB="$ARCWELL_HOME_USED/arcwell.sqlite3"
+      ;;
+    --no-record)
+      RECORD=0
+      ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+for required in node sqlite3 shasum; do
+  command -v "$required" >/dev/null 2>&1 || fail "$required is required"
+done
+if [ ! -x "$ARCWELL_BIN" ]; then
+  log "building target/debug/arcwell"
+  (cd "$REPO_ROOT" && cargo build -p arcwell >/dev/null)
+fi
+[ -x "$ARCWELL_BIN" ] || fail "arcwell binary not found: $ARCWELL_BIN"
+[ -f "$DB" ] || fail "Arcwell database not found: $DB"
+
+mkdir -p "$ARTIFACT_DIR"
+export ARCWELL_HOME="$ARCWELL_HOME_USED"
+
+sql_json() {
+  local output="$1"
+  local query="$2"
+  sqlite3 -json "$DB" "$query" >"$ARTIFACT_DIR/$output"
+  if [ ! -s "$ARTIFACT_DIR/$output" ]; then
+    printf '[]\n' >"$ARTIFACT_DIR/$output"
+  fi
+}
+
+log "capturing health and sanitized ops snapshot"
+"$ARCWELL_BIN" health >"$ARTIFACT_DIR/health.json"
+"$ARCWELL_BIN" ops --compact >"$ARTIFACT_DIR/ops-compact.raw.json"
+node - "$ARTIFACT_DIR/ops-compact.raw.json" "$ARTIFACT_DIR/ops-compact.sanitized.json" <<'NODE'
+const fs = require("fs");
+const [inputPath, outputPath] = process.argv.slice(2);
+const email = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const redact = (value) => {
+  if (typeof value === "string") return value.replace(email, "<redacted-email>");
+  if (Array.isArray(value)) return value.map(redact);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)]));
+  }
+  return value;
+};
+const parsed = JSON.parse(fs.readFileSync(inputPath, "utf8"));
+fs.writeFileSync(outputPath, JSON.stringify(redact(parsed), null, 2) + "\n");
+fs.unlinkSync(inputPath);
+NODE
+
+log "capturing source, queue, wiki, delivery, and curation baselines"
+sql_json "source-inventory-by-family.json" \
+  "SELECT source_kind, status, COUNT(*) AS count FROM watch_sources GROUP BY source_kind, status ORDER BY source_kind, status;"
+sql_json "active-watch-source-counts.json" \
+  "SELECT source_kind, COUNT(*) AS active_count FROM watch_sources WHERE status = 'active' GROUP BY source_kind ORDER BY source_kind;"
+sql_json "source-health-by-status.json" \
+  "SELECT provider, source_kind, status, COUNT(*) AS count, MAX(last_success_at) AS latest_success_at, MAX(last_failure_at) AS latest_failure_at, MAX(updated_at) AS latest_updated_at FROM source_health GROUP BY provider, source_kind, status ORDER BY provider, source_kind, status;"
+sql_json "job-status-by-kind.json" \
+  "SELECT kind, status, COUNT(*) AS count, SUM(CASE WHEN dead_lettered_at IS NOT NULL THEN 1 ELSE 0 END) AS dead_lettered_count, MAX(updated_at) AS latest_updated_at FROM wiki_jobs GROUP BY kind, status ORDER BY kind, status;"
+sql_json "x-watch-curation-latest-run.json" \
+  "SELECT id, classifier_version, mode, status, input_count, keep_count, review_keep_leaning_count, review_drop_leaning_count, needs_profile_enrichment_count, pause_candidate_count, paused_count, restored_count, error, created_at, completed_at FROM x_watch_curation_runs ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1;"
+sql_json "x-watch-curation-decision-counts.json" \
+  "WITH latest AS (SELECT id FROM x_watch_curation_runs ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1) SELECT recommendation, category, proposed_status, COUNT(*) AS count FROM x_watch_curation_decisions WHERE run_id = (SELECT id FROM latest) GROUP BY recommendation, category, proposed_status ORDER BY recommendation, category, proposed_status;"
+sql_json "wiki-projection-coverage.json" \
+  "SELECT (SELECT COUNT(*) FROM source_cards) AS source_card_count, (SELECT COUNT(*) FROM source_cards WHERE wiki_page_id IS NOT NULL AND wiki_page_id != '') AS source_cards_with_wiki_page_id, (SELECT COUNT(*) FROM source_cards sc JOIN wiki_pages wp ON wp.id = sc.wiki_page_id) AS source_cards_with_matching_wiki_page, (SELECT COUNT(*) FROM wiki_pages) AS wiki_page_count, (SELECT COUNT(*) FROM wiki_pages WHERE source != 'unknown') AS wiki_pages_with_non_unknown_source, (SELECT COUNT(*) FROM wiki_pages_fts) AS wiki_fts_rows;"
+sql_json "top-level-counts.json" \
+  "SELECT (SELECT COUNT(*) FROM source_cards) AS source_cards, (SELECT COUNT(*) FROM wiki_pages) AS wiki_pages, (SELECT COUNT(*) FROM knowledge_clusters) AS knowledge_clusters, (SELECT COUNT(*) FROM knowledge_reports) AS knowledge_reports, (SELECT COUNT(*) FROM digest_candidates) AS digest_candidates, (SELECT COUNT(*) FROM digest_deliveries) AS digest_deliveries, (SELECT COUNT(*) FROM watch_sources) AS watch_sources, (SELECT COUNT(*) FROM source_health) AS source_health_rows;"
+sql_json "latest-external-alert.json" \
+  "SELECT id, schedule_id, due_at, status, json_array_length(candidate_ids_json) AS candidate_count, json_array_length(delivery_ids_json) AS delivery_count, error, created_at, updated_at FROM digest_alert_ticks ORDER BY created_at DESC LIMIT 1;"
+sql_json "latest-daily-briefing.json" \
+  "SELECT t.id, t.schedule_id, s.name AS schedule_name, t.due_at, t.status, t.candidate_id, t.delivery_id, t.error, t.created_at, t.updated_at FROM issue_schedule_ticks t JOIN issue_schedules s ON s.id = t.schedule_id WHERE s.kind = 'knowledge_daily_briefing' AND s.name = 'Arcwell AI daily briefing' ORDER BY t.due_at DESC, t.created_at DESC LIMIT 1;"
+sql_json "provider-credential-health.json" \
+  "SELECT json_extract(value, '$.scope') AS scope, COALESCE(json_extract(value, '$.provider'), 'none') AS provider, json_extract(value, '$.status') AS status, COUNT(*) AS count FROM json_each(readfile('$ARTIFACT_DIR/health.json'), '$.secret_health') GROUP BY scope, provider, status ORDER BY scope, provider, status;"
+
+log "building claim ledger inputs and verifiable proof packet"
+node - "$REPO_ROOT" "$PROOF_ROOT" "$ARTIFACT_DIR" "$ARCWELL_HOME_USED" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const [repoRoot, proofRoot, artifactDir, arcwellHome] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(path.join(artifactDir, name), "utf8"));
+const sha256 = (filePath) => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+const rel = (filePath) => path.relative(proofRoot, filePath);
+const artifactFiles = fs.readdirSync(artifactDir)
+  .filter((name) => name.endsWith(".json") && !name.startsWith("recorded-") && !name.startsWith("review-"))
+  .sort();
+const artifacts = artifactFiles.map((name) => {
+  const filePath = path.join(artifactDir, name);
+  return {
+    artifact_kind: "baseline_snapshot",
+    label: name.replace(/\.json$/, ""),
+    path: rel(filePath),
+    sha256: sha256(filePath),
+    metadata: { bytes: fs.statSync(filePath).size },
+  };
+});
+
+const health = read("health.json");
+const counts = read("top-level-counts.json")[0] || {};
+const wikiCoverage = read("wiki-projection-coverage.json")[0] || {};
+const latestDaily = read("latest-daily-briefing.json")[0] || null;
+const latestAlert = read("latest-external-alert.json")[0] || null;
+const providerHealth = read("provider-credential-health.json");
+const curationRun = read("x-watch-curation-latest-run.json")[0] || null;
+const jobStatus = read("job-status-by-kind.json");
+const deadLetters = jobStatus.reduce((sum, row) => sum + Number(row.dead_lettered_count || 0), 0);
+const planText = fs.readFileSync(path.join(repoRoot, "docs/autonomous-knowledge-system-completion-plan.md"), "utf8");
+const milestones = [...planText.matchAll(/^## (M\d+): (.+)$/gm)].map((match) => ({
+  id: match[1].toLowerCase(),
+  title: match[2].trim(),
+}));
+
+const requiredClaims = [
+  ["source_inventory_by_family", "Source inventory by family is captured from real watch_sources rows.", "proven", "production_data_snapshot", { artifact: "source-inventory-by-family.json" }],
+  ["active_watch_source_counts", "Active watch-source counts are captured by source family.", "proven", "production_data_snapshot", { artifact: "active-watch-source-counts.json" }],
+  ["x_watch_curation_counts", "Latest X watch curation run and decision counts are captured.", curationRun ? "proven" : "blocked", "production_data_snapshot", { latest_run_id: curationRun?.id || null, artifact: "x-watch-curation-latest-run.json" }],
+  ["source_health_by_status", "Source health status is captured by provider and source kind.", "proven", "production_data_snapshot", { artifact: "source-health-by-status.json" }],
+  ["dead_letter_count_by_job_kind", "Dead-letter counts by job kind are captured.", "proven", "production_data_snapshot", { dead_lettered_total: deadLetters, artifact: "job-status-by-kind.json" }],
+  ["source_card_count", "Source-card count is captured.", "proven", "production_data_snapshot", { source_cards: counts.source_cards ?? null }],
+  ["wiki_projection_coverage", "Wiki projection coverage is captured with source-card to wiki-page linkage and FTS rows.", "proven", "production_data_snapshot", wikiCoverage],
+  ["knowledge_cluster_count", "Knowledge cluster count is captured.", "proven", "production_data_snapshot", { knowledge_clusters: counts.knowledge_clusters ?? null }],
+  ["report_count", "Knowledge report count is captured.", "proven", "production_data_snapshot", { knowledge_reports: counts.knowledge_reports ?? null }],
+  ["digest_candidate_count", "Digest candidate count is captured.", "proven", "production_data_snapshot", { digest_candidates: counts.digest_candidates ?? null }],
+  ["delivery_count", "Digest delivery count is captured.", "proven", "production_data_snapshot", { digest_deliveries: counts.digest_deliveries ?? null }],
+  ["latest_external_alert", "Latest external alert tick is captured.", latestAlert ? "proven" : "blocked", "production_data_snapshot", latestAlert || { artifact: "latest-external-alert.json" }],
+  ["latest_daily_briefing", "Latest scheduled daily briefing tick is captured.", latestDaily ? "proven" : "blocked", "production_data_snapshot", latestDaily || { artifact: "latest-daily-briefing.json" }],
+  ["provider_credential_health", "Provider credential health is captured as grouped status counts, without secret values.", "proven", "production_data_snapshot", { rows: providerHealth.length, artifact: "provider-credential-health.json" }],
+];
+
+const milestoneClaims = milestones.map((milestone) => ({
+  claim_key: `milestone_${milestone.id}`,
+  claim: `${milestone.id.toUpperCase()} ${milestone.title} is represented in the autonomous knowledge claim ledger and remains bounded to Partial or Missing until later proof packets promote it.`,
+  status: milestone.id === "m0" ? "partial" : "not_claimed",
+  proof_level: milestone.id === "m0" ? "production_data_snapshot" : "missing",
+  evidence: {
+    plan_heading: `${milestone.id.toUpperCase()}: ${milestone.title}`,
+    baseline_packet_scope: "autonomous-knowledge-system",
+  },
+  refutation: {
+    would_be_refuted_by: "A milestone being promoted in user-visible docs without a corresponding proof packet and adversarial review.",
+  },
+  gates: {
+    allowed_statuses_at_m0: ["partial", "not_claimed"],
+    promotion_requires: ["targeted proof packet", "source-health/cursor evidence where relevant", "adversarial review"],
+  },
+}));
+
+const claims = [
+  ...requiredClaims.map(([claim_key, claim, status, proof_level, evidence]) => ({
+    claim_key,
+    claim,
+    status,
+    proof_level,
+    evidence,
+    refutation: {
+      would_be_refuted_by: "Missing artifact, checksum mismatch, stale or inaccessible real Arcwell database, or artifact content contradicting the recorded count.",
+    },
+    gates: {
+      m0_snapshot_item: true,
+      does_not_prove: ["source freshness", "all important wiki pages are current", "future scheduled recurrence"],
+    },
+  })),
+  ...milestoneClaims,
+  {
+    claim_key: "docs_claim_boundary",
+    claim: "This packet does not promote user-visible docs beyond a baseline snapshot and Partial/Missing milestone ledger.",
+    status: "partial",
+    proof_level: "documentation_boundary",
+    evidence: { plan_file: "docs/autonomous-knowledge-system-completion-plan.md" },
+    refutation: { would_be_refuted_by: "README, STATUS, TODO, skill, or MCP text claiming autonomous knowledge is complete/operational from this snapshot alone." },
+    gates: { next_required_action: "run a targeted docs claim audit before marking M0 complete" },
+  },
+];
+
+const checks = [
+  {
+    check_kind: "capture",
+    command: "scripts/autonomous-knowledge-baseline-proof",
+    status: "passed",
+    exit_code: 0,
+    duration_ms: null,
+    output_excerpt: "Captured read-only real-home baseline artifacts and generated proof packet inputs.",
+    metadata: { artifact_count: artifacts.length },
+  },
+  {
+    check_kind: "ops_snapshot",
+    command: "arcwell ops --compact > artifacts/ops-compact.sanitized.json",
+    status: "passed",
+    exit_code: 0,
+    duration_ms: null,
+    output_excerpt: "Captured ops snapshot and redacted unnecessary email addresses.",
+    metadata: { sanitized: true },
+  },
+  {
+    check_kind: "health",
+    command: "arcwell health > artifacts/health.json",
+    status: health.ok === true ? "passed" : "blocked",
+    exit_code: health.ok === true ? 0 : 1,
+    duration_ms: null,
+    output_excerpt: health.ok === true ? "Arcwell health ok." : `Arcwell health not ok; warnings=${Array.isArray(health.warnings) ? health.warnings.length : 0}.`,
+    metadata: { ok: health.ok, pending_jobs: health.pending_jobs, failed_jobs: health.failed_jobs, dead_lettered_jobs: health.dead_lettered_jobs },
+  },
+];
+
+const metadata = {
+  proof_name: "autonomous-knowledge-baseline-proof",
+  generated_at: new Date().toISOString(),
+  arcwell_home: arcwellHome,
+  db_path: path.join(arcwellHome, "arcwell.sqlite3"),
+  baseline_counts: counts,
+  latest_daily_briefing: latestDaily,
+  latest_external_alert: latestAlert,
+  known_blockers: Array.isArray(health.warnings) ? health.warnings : [],
+  anti_mirage_boundary: "This is a baseline snapshot and claim ledger. It does not prove source freshness, complete wiki currency, live provider access, future recurrence, or mailbox placement.",
+};
+
+fs.writeFileSync(path.join(artifactDir, "claims.json"), JSON.stringify(claims, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "artifacts.json"), JSON.stringify(artifacts, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "checks.json"), JSON.stringify(checks, null, 2) + "\n");
+fs.writeFileSync(path.join(artifactDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+
+const packet = {
+  proof_name: "autonomous-knowledge-baseline-proof",
+  proof_level: "production_data_snapshot",
+  status: "partial",
+  proof_root: proofRoot,
+  artifact_root: proofRoot,
+  generated_at: metadata.generated_at,
+  user_visible_claim: "Arcwell has a real-home autonomous knowledge baseline snapshot and a milestone claim ledger bounded to Partial or Missing.",
+  boundary: metadata.anti_mirage_boundary,
+  claims,
+  artifacts,
+  checks,
+  metadata,
+};
+fs.writeFileSync(path.join(artifactDir, "proof-packet.json"), JSON.stringify(packet, null, 2) + "\n");
+NODE
+
+PACKET_PATH="$ARTIFACT_DIR/proof-packet.json"
+log "verifying proof packet artifacts"
+set +e
+"$ARCWELL_BIN" proof verify-packet "$PACKET_PATH" >"$ARTIFACT_DIR/verify-packet.json"
+VERIFY_EXIT=$?
+set -e
+VERIFY_OK="$(node - "$ARTIFACT_DIR/verify-packet.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.ok === true ? "1" : "0");
+NODE
+)"
+if [[ "$VERIFY_EXIT" -ne 0 || "$VERIFY_OK" != "1" ]]; then
+  if [[ "$ALLOW_INCOMPLETE" != "1" ]]; then
+    fail "proof packet verification failed; see $ARTIFACT_DIR/verify-packet.json"
+  fi
+  log "proof packet verification incomplete; continuing because --allow-incomplete was set"
+fi
+
+if [[ "$RECORD" == "1" ]]; then
+  log "recording durable proof packet"
+  CLAIMS_JSON="$(cat "$ARTIFACT_DIR/claims.json")"
+  ARTIFACTS_JSON="$(cat "$ARTIFACT_DIR/artifacts.json")"
+  CHECKS_JSON="$(cat "$ARTIFACT_DIR/checks.json")"
+  METADATA_JSON="$(cat "$ARTIFACT_DIR/metadata.json")"
+  set +e
+  "$ARCWELL_BIN" proof record \
+    --scope autonomous-knowledge-system \
+    --title "M0 autonomous knowledge baseline snapshot" \
+    --proof-level production_data_snapshot \
+    --status partial \
+    --summary "Read-only real-home baseline snapshot and Partial/Missing milestone claim ledger. This does not prove source freshness or operational completion." \
+    --artifact-root "$PROOF_ROOT" \
+    --reviewer codex \
+    --claims-json "$CLAIMS_JSON" \
+    --artifacts-json "$ARTIFACTS_JSON" \
+    --checks-json "$CHECKS_JSON" \
+    --metadata-json "$METADATA_JSON" \
+    >"$ARTIFACT_DIR/recorded-proof.json"
+  RECORD_EXIT=$?
+  set -e
+  if [[ "$RECORD_EXIT" -ne 0 ]]; then
+    if [[ "$ALLOW_INCOMPLETE" != "1" ]]; then
+      fail "recording durable proof packet failed; see $ARTIFACT_DIR/recorded-proof.json"
+    fi
+    log "recording durable proof packet failed; continuing because --allow-incomplete was set"
+  else
+    PACKET_ID="$(node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(report.packet?.id || report.id || "");
+NODE
+)"
+    [ -n "$PACKET_ID" ] || fail "recorded proof output did not include a packet id"
+    log "recording held adversarial review for $PACKET_ID"
+    FINDINGS_JSON="$(node - "$ARTIFACT_DIR/health.json" <<'NODE'
+const fs = require("fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const warnings = Array.isArray(health.warnings) ? health.warnings : [];
+const findings = [
+  {
+    severity: 2,
+    status: "blocking",
+    title: "Baseline snapshot can be mistaken for wiki freshness",
+    body: "The packet proves current counts and latest rows exist, but it does not prove that every important wiki page is recent, source-backed, deduplicated, or accurate. Treating this as autonomous-knowledge readiness would be fake-done.",
+    evidence: {
+      artifact: "artifacts/proof-packet.json",
+      health_ok: health.ok,
+      warning_count: warnings.length,
+    },
+    recommendation: "Keep M0 held until a docs claim audit exists and later milestones add source freshness, cursor, source-health, report, and delivery proof packets."
+  }
+];
+process.stdout.write(JSON.stringify(findings));
+NODE
+)"
+    REFUTATIONS_JSON='["Artifact checksums and real-home DB counts refute a purely static scaffold, but they do not refute stale-source or incomplete-currency failures."]'
+    SKIPPED_JSON='["Live provider calls are intentionally skipped by this read-only baseline.", "Mailbox placement is handled by a separate Gmail proof gate.", "Future wall-clock recurrence is handled by daily briefing live observation proof."]'
+    REVIEW_METADATA="$(node - "$PACKET_ID" <<'NODE'
+const packetId = process.argv[2];
+process.stdout.write(JSON.stringify({
+  packet_id: packetId,
+  review_gate: "M0 baseline adversarial review",
+  disposition: "hold until docs claim audit and source freshness proof exist"
+}));
+NODE
+)"
+    "$ARCWELL_BIN" proof review-record \
+      --scope autonomous-knowledge-system \
+      --title "M0 autonomous knowledge baseline adversarial review" \
+      --reviewer codex \
+      --requested-proof-level production_data_snapshot \
+      --judgment hold \
+      --summary "Hold: the baseline snapshot is real evidence, but it is not proof of source freshness, complete wiki currency, or autonomous operational readiness." \
+      --strongest-fake-done-path "A reader sees complete-looking counts, health rows, latest briefing rows, and a milestone ledger, then concludes the autonomous knowledge system is current and operational without source-specific freshness and docs-claim proof." \
+      --packet-id "$PACKET_ID" \
+      --refutations-json "$REFUTATIONS_JSON" \
+      --skipped-categories-json "$SKIPPED_JSON" \
+      --findings-json "$FINDINGS_JSON" \
+      --metadata-json "$REVIEW_METADATA" \
+      >"$ARTIFACT_DIR/review-recorded.json"
+  fi
+fi
+
+log "wrote $PACKET_PATH"
+if [[ "$RECORD" == "1" && -f "$ARTIFACT_DIR/recorded-proof.json" ]]; then
+  node - "$ARTIFACT_DIR/recorded-proof.json" <<'NODE'
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+console.log(JSON.stringify({
+  packet_id: report.packet?.id || null,
+  status: report.packet?.status || null,
+  proof_level: report.packet?.proof_level || null,
+  claims: report.claims?.length ?? null,
+  artifacts: report.artifacts?.length ?? null,
+  blockers: report.judgment?.blockers || [],
+}, null, 2));
+NODE
+fi

@@ -401,7 +401,9 @@ arcwell backup create
 arcwell backup verify
 arcwell backup restore --from /path/to/backup --target-home /tmp/arcwell-restore-drill
 arcwell service install
+arcwell service install --http-addr 127.0.0.1:8790
 arcwell service status
+arcwell service status --compact
 arcwell service logs
 arcwell doctor --strict
 arcwell telegram drain
@@ -410,6 +412,18 @@ arcwell x recent-search "from:openai"
 arcwell worker run-once
 arcwell serve --addr 127.0.0.1:8787
 ```
+
+With either `arcwell serve` or worker-hosted service HTTP running, the browser
+cockpit is at `/ops/ui`. `/cockpit` and `/ops/cockpit` render the same local
+dashboard. `arcwell service install --http-addr ...` creates a private
+service-owned HTTP token file and the cockpit sets an HttpOnly same-origin
+browser cookie automatically. It also seeds narrow local ops-control policy
+rules, so local controls work without copying tokens or writing policy by hand.
+Provider, cost, promotion, source-write, CSRF, idempotency, and local-origin
+gates still apply. `arcwell service status --compact` reports `cockpit_url` when
+the resident worker LaunchAgent was installed with `--http-addr`. Codex agents
+should include the exact served URL when they start or refer to browser-visible
+Arcwell state.
 
 ## `$commands` / Skills
 

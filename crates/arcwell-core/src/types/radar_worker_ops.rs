@@ -649,6 +649,7 @@ pub struct WorkerRunReport {
     pub issue_schedule: Option<IssueScheduleEnqueueReport>,
     pub email_delivery_verification: Option<EmailDeliveryVerificationEnqueueReport>,
     pub email_mailbox_placement_repair: Option<EmailMailboxPlacementRepairEnqueueReport>,
+    pub x_profile_enrichment: Option<WatchSourcePollEnqueueReport>,
     pub knowledge_cluster_model_writer: Option<KnowledgeClusterModelWriterEnqueueReport>,
     pub knowledge_entity_resolution: Option<KnowledgeEntityResolutionEnqueueReport>,
     pub knowledge_cluster_editorial_decision:

@@ -3,6 +3,108 @@ use super::*;
 const X_PROFILE_ENRICHMENT_BATCH_SIZE: usize = 100;
 
 impl Store {
+    pub(crate) fn enqueue_x_profile_enrichment_job(
+        &self,
+        handles: &[String],
+        run_id: Option<&str>,
+        trigger: &str,
+    ) -> Result<WikiJob> {
+        if handles.is_empty() {
+            bail!("x_profile_enrichment job requires at least one handle");
+        }
+        let mut normalized_handles = BTreeSet::new();
+        for handle in handles {
+            let handle = handle.trim().trim_start_matches('@');
+            validate_x_handle(handle)?;
+            normalized_handles.insert(handle.to_ascii_lowercase());
+        }
+        let input = json!({
+            "handles": normalized_handles.into_iter().collect::<Vec<_>>(),
+            "limit": handles.len().clamp(1, 1_000),
+            "run_id": run_id,
+            "trigger": trigger,
+        });
+        self.enqueue_wiki_job("x_profile_enrichment", input)
+    }
+
+    pub(crate) fn due_x_profile_enrichment_handles(&self, limit: usize) -> Result<Vec<String>> {
+        let limit = limit.clamp(1, 1_000);
+        let mut handles = BTreeSet::new();
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT ws.locator
+            FROM watch_sources ws
+            WHERE ws.source_kind = 'x_handle'
+              AND ws.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM x_profiles p WHERE lower(p.handle) = lower(ws.locator)
+              )
+            ORDER BY ws.locator
+            LIMIT ?1
+            "#,
+        )?;
+        for handle in rows(stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?)? {
+            validate_x_handle(&handle)?;
+            handles.insert(handle.to_ascii_lowercase());
+        }
+        if handles.len() < limit {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT h.locator
+                FROM source_health h
+                JOIN watch_sources ws
+                  ON ws.source_kind = 'x_handle'
+                 AND ws.status = 'active'
+                 AND lower(ws.locator) = lower(h.locator)
+                WHERE h.source_kind = 'x_profile_enrichment'
+                  AND h.status = 'healthy'
+                  AND h.next_run_at IS NOT NULL
+                  AND h.next_run_at <= ?1
+                ORDER BY h.next_run_at ASC, h.locator ASC
+                LIMIT ?2
+                "#,
+            )?;
+            for handle in rows(
+                stmt.query_map(params![now(), (limit - handles.len()) as i64], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            )? {
+                validate_x_handle(&handle)?;
+                handles.insert(handle.to_ascii_lowercase());
+            }
+        }
+        Ok(handles.into_iter().take(limit).collect())
+    }
+
+    pub(crate) fn enqueue_due_x_profile_enrichment_jobs(
+        &self,
+        max_handles: usize,
+    ) -> Result<WatchSourcePollEnqueueReport> {
+        let max_handles = max_handles.clamp(1, 100);
+        let handles = self.due_x_profile_enrichment_handles(max_handles)?;
+        let mut report = WatchSourcePollEnqueueReport {
+            inspected: handles.len(),
+            enqueued: 0,
+            skipped: 0,
+            jobs: Vec::new(),
+            errors: Vec::new(),
+        };
+        if handles.is_empty() {
+            return Ok(report);
+        }
+        match self.enqueue_x_profile_enrichment_job(&handles, None, "source_health_due") {
+            Ok(job) => {
+                report.enqueued = 1;
+                report.jobs.push(job.id);
+            }
+            Err(error) => {
+                report.skipped = handles.len();
+                report.errors.push(error.to_string());
+            }
+        }
+        Ok(report)
+    }
+
     pub fn x_enrich_watch_profiles(
         &self,
         run_id: Option<&str>,

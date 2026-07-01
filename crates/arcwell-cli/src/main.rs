@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use arcwell_core::{
-    AppPaths, CommerceAvailabilityProofInput, CommerceCandidateInput, CommerceContextFactInput,
+    AdversarialReviewFindingInput, AdversarialReviewRunInput, AppPaths,
+    CommerceAvailabilityProofInput, CommerceCandidateInput, CommerceContextFactInput,
     CommerceRenderedPageCheckInput, CommerceReportJudgmentInput, CommerceRunConfigInput,
     CommerceVerificationAttemptInput, DigestAlertScheduleInput, DoctorOptions, ImportRunFinish,
     IssueScheduleInput, JobApplicationInput, JobApplicationPacketInput,
@@ -19,7 +20,7 @@ use arcwell_core::{
     ResearchConvergenceStepInput, ResearchDocumentInput, ResearchEditorialInvokeInput,
     ResearchEditorialRunInput, ResearchHostSearchInput, ResearchHostSearchResultInput,
     ResearchRoleRunStart, ResearchSourceInput, SourceCardInput, Store, WebSearchConfig,
-    XStatsReport, XWatchManualRuleInput, personal_memory_eval_corpus,
+    WatchSourceInput, XStatsReport, XWatchManualRuleInput, personal_memory_eval_corpus,
 };
 use axum::{
     Json, Router,

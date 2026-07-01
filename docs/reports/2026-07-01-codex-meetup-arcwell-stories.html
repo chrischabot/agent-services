@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.10" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Codex Meetup Notes: Fun Arcwell Stories</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      white-space: pre-wrap;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Codex Meetup Notes: Fun Arcwell Stories</h1>
+</header>
+<h1 id="codex-meetup-notes-fun-arcwell-stories">Codex Meetup Notes: Fun
+Arcwell Stories</h1>
+<p>Private speaker notes for July 1, 2026. Written for casual
+conversation, not as a product launch page. The honest version is more
+interesting anyway.</p>
+<h2 id="the-short-version">The short version</h2>
+<p>The fun thing about Arcwell is that it started from a very simple
+instinct: Codex is already the place where I want to do the work. I do
+not really want a separate mega-agent that asks me to move my life into
+another product shape. What I want is Codex with continuity. Codex with
+a memory that survives the thread. Codex with receipts. Codex with a way
+to notice that a scheduled job failed at 3am instead of producing a
+confident paragraph about a job that did not run.</p>
+<p>So Arcwell has become a local-first assistant layer around Codex,
+Claude, and other MCP-capable agents. It is SQLite and Markdown and CLI
+and MCP and skills and hooks and a little Cloudflare where the laptop
+cannot be awake all the time. It remembers things, keeps a source-backed
+wiki, ingests X, RSS, GitHub, arXiv and other signals, runs background
+jobs, tracks project state, sends and receives through channels like
+Telegram and email, and exposes an ops snapshot so the agent can ask,
+“What actually happened?”</p>
+<p>That last bit is the real theme. The exciting thing is not “I built a
+tool with many commands.” The exciting thing is that Codex gets better
+when the world around it has durable state, policy gates, cost records,
+proof packets, and a habit of saying “hold” when the evidence is not
+good enough.</p>
+<p>The slightly funny thing is that a lot of the best Arcwell stories
+are not victory laps. They are stories where the system refused to let
+me get away with the flattering version.</p>
+<h2 id="codex-as-the-shell-not-the-thing-being-replaced">Codex as the
+shell, not the thing being replaced</h2>
+<p>One design choice I keep coming back to is that I do not want to
+replace Codex. I want to give it a better local world to operate in.</p>
+<p>There are so many agent projects that, maybe accidentally, turn into
+a new agent runtime. Suddenly the interesting work is not “how do I help
+the person ship the thing?” It is “please admire this orchestration
+layer.” Arcwell tries to go the other direction. Codex stays the place
+where reasoning, editing, debugging, and live tool use happen. Arcwell
+owns the durable assistant services around that: memory, wiki, research
+runs, source cards, costs, secrets, workers, delivery ledgers, and
+ops.</p>
+<p>That boundary has been really productive. If Codex is doing research,
+Arcwell does not need to be a secret second researcher. It needs to keep
+the evidence straight. If Codex is remembering a preference, Arcwell
+does not need to turn a random sentence into unquestioned law. It needs
+to create a reviewable memory candidate, record why it exists, and make
+deletion real. If Codex is calling a live integration, Arcwell does not
+need a nicer prompt. It needs to know which provider was called, what it
+cost or might cost, what state was written, and what failure would look
+like.</p>
+<p>That is the vibe I would probably lead with at the meetup: Codex is
+much more interesting when you stop thinking of it as a stateless chat
+box and start thinking of it as the live operator of a small,
+inspectable local system.</p>
+<h2
+id="the-memory-story-useful-memory-is-mostly-a-governance-problem">The
+memory story: useful memory is mostly a governance problem</h2>
+<p>One of the first things people ask about is memory, because everyone
+has the same pain: every new thread starts with social amnesia. But the
+more I worked on memory, the less I trusted the cute version of it.</p>
+<p>The cute version is: “The agent remembers you.” The actual version
+is: “The agent proposes small durable facts and preferences, and there
+is an audit trail for why they were kept, changed, ignored, or
+deleted.”</p>
+<p>That distinction matters. Arcwell has personal memory, profile, and
+wiki as separate things. Profile is explicit operating preference.
+Memory is compact personal facts and learned preferences. Wiki is
+source-backed external knowledge. Mixing those together is how you get
+weird behavior: a half-remembered preference treated like a source, or a
+research claim treated like a personal instruction.</p>
+<p>The fun Codex part is the lifecycle. There are CLI and MCP tools for
+add, search, update, delete, history, forget, recall, capture, and
+lifecycle events. The Codex plugin has hook points for session start,
+prompt submit, pre-compact, and stop. The hooks can recall context and
+capture reviewable candidates. But the repo is very explicit about the
+current proof boundary: local hook contract proof exists; fresh-thread
+live Codex hook proof still needs to be recorded.</p>
+<p>I like that because it is exactly the right kind of annoying. A hook
+file existing is not the same as Codex actually running it in a fresh
+installed thread. A model extracting something plausible is not the same
+as a reviewed candidate oracle proving model-backed quality. Sensitive
+facts and updates stay pending for review. Forget deletes active-store
+memory and leaves tombstones that say what has and has not been erased,
+including the awkward truth that historical backup rewriting is still
+not claimed.</p>
+<p>That is the insight I would share: memory is less about vector search
+magic and more about making personal context behave like a tiny trust
+system. Recall is the fun bit. Forget, review, conflict handling, and
+“do not overclaim this” are what make it usable.</p>
+<h2 id="the-research-story-the-report-is-not-the-proof">The research
+story: the report is not the proof</h2>
+<p>Arcwell deep research has also been a good pressure test for
+Codex.</p>
+<p>The tempting bad version is: Codex searches the web, writes a report,
+and the report sounds serious. That is not enough. A report can sound
+serious while being made of stale snippets, generated summaries citing
+generated summaries, or a source set that never actually read the thing
+it claims to understand.</p>
+<p>The Arcwell version tries to make Codex-native research durable.
+Codex can own the live reasoning, tool use, and subagent work. Arcwell
+stores the run, source-card evidence, claims, clusters, skeptic and
+refutation passes, audit results, document/table anchors, host-search
+proof records, editorial/evaluator records, and closure blockers.</p>
+<p>What I like about this is that the interesting output is often not
+“here is a beautiful finished report.” Sometimes the interesting output
+is “this report failed closed because the evidence pack was not good
+enough.” There are local and provider-backed proof paths where Arcwell
+will preserve source cards, claims, host-search records, and active
+fact-checking results, then refuse to pretend that a bounded proof is a
+saturated publication-grade research result.</p>
+<p>That makes for a very good Codex story because Codex is strong at
+moving through messy evidence, but it needs a substrate that can
+remember the mess accurately. It needs to know which source family
+contributed what. It needs to know when a quote came from a generated
+page and should not support a factual claim. It needs to know whether
+host-native search actually happened in the Codex context or whether
+some daemon is pretending to have the same provenance.</p>
+<p>The insight here is that agentic research is not mostly about making
+the final answer longer. It is about making uncertainty durable enough
+that the next turn can improve it instead of laundering it into
+confidence.</p>
+<h2 id="the-newsletter-story-the-delivered-artifact-is-the-product">The
+newsletter story: the delivered artifact is the product</h2>
+<p>One of my favorite recent Arcwell stories is also one of the most
+mundane: the daily AI briefing got bad.</p>
+<p>It had the kind of failure that agent systems are very good at
+hiding. The pipeline had pieces. There were reports. There was
+scheduling. There were deliveries. But the thing in Gmail had drifted
+into operator language. It was talking like a system reporting on
+itself: “Knowledge Report,” “What Changed,” “this batch,” empty
+sections, repo-monitor noise posing as news. Technically nearby things
+existed, but the reader-facing artifact was not doing the job.</p>
+<p>The useful correction was not “write a nicer intro.” The useful
+correction was to treat the delivered Gmail message as the truth
+surface. If the email is bad, the system is bad in the way that matters.
+That led to renderer changes, freshness fixes, source-time parsing
+fixes, suppression of repo-only no-story noise, and a clearer split
+between raw source pages, knowledge clusters, knowledge reports, and
+actual wiki promotion.</p>
+<p>This is such a good Arcwell/Codex story because it captures the whole
+ethos. A model could have rewritten the body into something more
+pleasant. Codex can do that in one pass. But the root cause was partly
+in selection, freshness, rendering, and proof boundaries. So the fix had
+to move down into the system. The email needed to stop sounding like a
+log file because the renderer and selection path stopped feeding it
+log-file-shaped content.</p>
+<p>There was a similar job-scan story. Two emails went out, one with
+HTML and one without. Some roles were duplicated. Some were
+geographically impossible. The right answer was not “sorry, here is a
+better summary.” It was: validate the actual delivered format, render
+HTML on the durable delivery path, dedupe the visible roles, filter the
+roles a human in the UK can actually pursue, and make the score language
+simpler.</p>
+<p>That is a very shareable insight: for agent products, the product is
+not the internal run. The product is the thing the user receives, opens,
+and trusts or does not trust.</p>
+<h2
+id="the-outside-world-story-every-integration-eventually-teaches-humility">The
+outside-world story: every integration eventually teaches humility</h2>
+<p>The external integration work has produced a lot of funny little
+lessons.</p>
+<p>Cloudflare edge inbox is the “laptop is asleep but the world keeps
+happening” piece. It receives small events while the local machine is
+offline; the local Rust service later drains, leases, acks, nacks,
+expires, retries, or dead-letters them. It is a clean pattern: always-on
+collector, local durable brain.</p>
+<p>Telegram is a good example of why proof boundaries matter. There is
+code for incoming and outgoing messages, auth, routing, delivery
+records, token redaction, preserved smoke artifacts, and synthetic
+signed webhook proof. There has been live <code>getMe</code>, webhook
+setup, outgoing send, and deployed-edge webhook observation. But the
+strict “fresh real Telegram client message becomes exactly one local
+<code>channel_messages</code> row with the expected text” proof is still
+not complete. So Arcwell says that. It does not round up.</p>
+<p>I love this because it is deeply unglamorous and deeply necessary.
+The failure mode of agent systems is not only hallucination in prose. It
+is also the temptation to call an integration done because eight
+adjacent things passed. Arcwell keeps forcing the question: what exact
+boundary did we cross, and what exact boundary did we not cross?</p>
+<p>X OAuth was another very practical example. Short-lived bearer tokens
+are not a user-experience problem the user should be forced to solve
+every morning. The system should store refresh material correctly,
+self-refresh when policy allows it, redact failures, record source
+health, and distinguish “refreshable” from “please manually paste
+another token.” On July 1, the local browser reauthorization path
+repaired a broken X state without asking for raw token material, proved
+the endpoint scopes, restarted the resident worker on the rebuilt
+binary, and got strict health back to ok. That is not glamorous, but it
+is the difference between a demo and a thing you can live with.</p>
+<p>The pattern across all of this is that integrations become
+trustworthy when they are boring in the right way. They have ledgers.
+They have retries. They have source health. They have cost and policy
+gates. They can explain the difference between blocked, stale, failed,
+healthy, partial, and unproven.</p>
+<h2 id="the-claudemcp-compatibility-story">The Claude/MCP compatibility
+story</h2>
+<p>Another fun thread is making Arcwell useful outside Codex without
+pretending all hosts behave the same.</p>
+<p>Arcwell exposes services over MCP, and the README is explicit that
+Claude host behavior should be treated as unvalidated until tested in a
+real profile. That sounds fussy, but the fussy part paid off. In one
+pass, the issue was not that Claude Code lacked the MCP. It had the MCP.
+It did not show the skills. The fix was skill discovery and global skill
+paths, plus user-scoped MCP config.</p>
+<p>Then there was a protocol-shaped bug: Claude Code expected
+<code>structuredContent</code> to be an object. Bare arrays decoded
+badly. So results needed to be wrapped as objects. And
+<code>ops_snapshot</code> had to be made compact for tool clients
+because the full real-home payload was huge enough to drop the
+connection.</p>
+<p>The final proof there was very satisfying: rebuild and install the
+current CLI, configure the user-scoped MCP, run the smoke, and prove a
+set of read-only tools actually work: health, ops snapshot, profile
+list, memory search, wiki search, project list, cost summary, backup
+verify, X stats, channel list, secret health.</p>
+<p>The meetup version of that story is: MCP is a great boundary, but
+“MCP server exists” is not the same as “this host can use this
+capability comfortably.” Client behavior matters. Payload size matters.
+Schema shape matters. Skill discovery matters. If the goal is portable
+assistant services, the proof has to happen through the actual
+clients.</p>
+<h2 id="the-dev-loop-story-honesty-as-a-toolchain-feature">The dev-loop
+story: honesty as a toolchain feature</h2>
+<p>One of the most useful Arcwell investments is the boring developer
+loop. The Codex plugin has a stable mode and a generated dev mode. The
+stable plugin calls <code>arcwell</code> on <code>PATH</code>; the dev
+plugin calls the checkout’s debug binary through the generated wrapper.
+<code>scripts/arcwell-dev sync</code> rebuilds, regenerates, and syncs
+the plugin. <code>scripts/arcwell-dev smoke</code> proves the wrapper,
+memory capture, recall, dream, and lifecycle events in a disposable
+home.</p>
+<p>There is also <code>scripts/verify-codex-plugin-docs</code>, which is
+basically an anti-embarrassment machine. It compares slash prompts,
+skill directories, MCP tool registrations, CLI-only references,
+untrusted-source guards, and README status claims. It fails when the
+surface says a command exists and the owned component does not actually
+expose it.</p>
+<p>That kind of check is exactly what an agent-adjacent repo needs.
+Prompts are code-adjacent enough to break users, but vague enough that
+people forgive them too easily. Arcwell treats stale prompt/tool claims
+as real defects.</p>
+<p>The broader status docs are the same idea. The status matrix is
+intentionally blunt. A package directory, README, command prompt, or MCP
+tool does not mean a capability is finished. This is one of the cultural
+bits I would happily talk about for a while: once agents can produce
+plausible surfaces quickly, the engineering discipline has to move
+toward proving the surfaces are not hollow.</p>
+<h2 id="what-i-would-tell-people-over-drinks">What I would tell people
+over drinks</h2>
+<p>If someone asks “what is Arcwell?” I would say:</p>
+<p>It is my local-first assistant infrastructure around Codex. Codex
+stays the workbench. Arcwell gives it memory, evidence, background jobs,
+source ingestion, channel delivery, ops, cost and policy gates, and a
+way to say exactly what has or has not been proven.</p>
+<p>If someone asks “what is the most fun part?” I would say:</p>
+<p>The fun part is watching Codex become more capable when the
+environment has receipts. It stops being just a brilliant stateless
+collaborator and starts acting more like a resident engineer with a lab
+notebook, a todo list, a delivery ledger, and a habit of checking the
+logs.</p>
+<p>If someone asks “what did you learn?” I would probably say:</p>
+<p>The biggest lesson is that agent capability is a product of the whole
+boundary, not just the model. Memory without review becomes
+superstition. Research without source cards becomes prose. Integrations
+without delivery observation become vibes. MCP without client proof
+becomes wishful compatibility. A worker without recurrence proof becomes
+a foreground command with aspirations.</p>
+<p>And if someone asks “is it done?” the honest answer is:</p>
+<p>No, and that is part of why it is interesting. The local core is
+broad and has serious test coverage. Some live paths are proven in
+bounded ways. Some are still partial. Some need fresh host smokes,
+multi-day recurrence, richer UI, or live provider-quality proof. The
+point is not to pretend otherwise. The point is to make the boundary
+explicit enough that Codex can keep helping move it.</p>
+<p>That is the Arcwell story I am most excited to share: not “I made an
+agent that does everything,” but “I am building the local substrate that
+lets Codex do real work without losing its memory, its evidence, or its
+humility between threads.”</p>
+</body>
+</html>

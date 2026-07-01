@@ -23,6 +23,7 @@ const CLI_ONLY_REFERENCES = new Set([
   "arcwell ops",
   "arcwell profile delete",
   "arcwell profile get",
+  "arcwell service status --compact",
   "arcwell secrets list",
   "arcwell secrets set-ref",
   "arcwell worker run",

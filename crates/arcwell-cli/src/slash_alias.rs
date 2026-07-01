@@ -671,4 +671,24 @@ const SLASH_COMMAND_ALIASES: &[(&str, SlashAliasTarget)] = &[
         "x-watch-rebuild",
         SlashAliasTarget::Cli(&["x", "rebuild-definitive-watch-sources"]),
     ),
+    (
+        "x-watch-curate",
+        SlashAliasTarget::Mcp("x_curate_watch_sources"),
+    ),
+    (
+        "x-watch-curation-report",
+        SlashAliasTarget::Mcp("x_watch_curation_report"),
+    ),
+    (
+        "x-watch-curation-restore",
+        SlashAliasTarget::Mcp("x_restore_watch_curation"),
+    ),
+    (
+        "x-watch-manual-rules-import",
+        SlashAliasTarget::Mcp("x_import_watch_manual_rules"),
+    ),
+    (
+        "x-watch-profiles-enrich",
+        SlashAliasTarget::Mcp("x_enrich_watch_profiles"),
+    ),
 ];

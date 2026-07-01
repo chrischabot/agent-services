@@ -1,4 +1,5 @@
 use super::*;
+use arcwell_core::WatchSourceInput;
 
 #[test]
 fn severe_mcp_research_capabilities_reports_runtime_boundaries() {
@@ -1202,6 +1203,160 @@ fn mcp_x_import_json_file_round_trip() {
             .and_then(Value::as_str)
             .unwrap()
             .contains("Shipping Arcwell")
+    );
+}
+
+#[test]
+fn severe_mcp_x_watch_curation_manual_rules_pause_and_restore_round_trip() {
+    // ORACLE: agent-facing MCP tools expose the same reviewed curation path as
+    // the CLI: reviewed rules import, dry-run/report visibility, pause-only
+    // mutation, needs-evidence deferral, and exact restore.
+    let paths = test_paths("mcp-x-watch-curation");
+    let store = Store::open(paths.clone()).unwrap();
+    store
+        .upsert_watch_source(WatchSourceInput {
+            source_kind: "x_handle".to_string(),
+            locator: "NeedsEvidenceMcp".to_string(),
+            label: "@NeedsEvidenceMcp - NeedsEvidenceMcp".to_string(),
+            cadence: "warm".to_string(),
+            status: "active".to_string(),
+            metadata: json!({ "origin": "mcp-test" }),
+        })
+        .unwrap();
+    store
+        .upsert_watch_source(WatchSourceInput {
+            source_kind: "x_handle".to_string(),
+            locator: "ManualDropMcp".to_string(),
+            label: "@ManualDropMcp - ManualDropMcp".to_string(),
+            cadence: "warm".to_string(),
+            status: "active".to_string(),
+            metadata: json!({ "origin": "mcp-test" }),
+        })
+        .unwrap();
+    drop(store);
+
+    let import = call_mcp_tool(
+        &paths,
+        "x_import_watch_manual_rules",
+        json!({
+            "reviewed_by": "mcp-test",
+            "apply": true,
+            "rules": [
+                {
+                    "handle": "NeedsEvidenceMcp",
+                    "decision": "manual_needs_evidence",
+                    "category": "zero_evidence",
+                    "reason": "Reviewed sparse handle; keep active until actual evidence exists.",
+                    "metadata": { "fixture": "mcp-needs-evidence" }
+                },
+                {
+                    "handle": "ManualDropMcp",
+                    "decision": "manual_always_exclude",
+                    "category": "off_topic",
+                    "reason": "Reviewed local profile evidence is off-topic for the watch list.",
+                    "metadata": { "fixture": "mcp-drop" }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+    assert_eq!(import.get("dry_run").and_then(Value::as_bool), Some(false));
+    assert_eq!(import.get("imported").and_then(Value::as_u64), Some(2));
+
+    let dry_run = call_mcp_tool(
+        &paths,
+        "x_curate_watch_sources",
+        json!({ "mode": "dry-run" }),
+    )
+    .unwrap();
+    assert_eq!(
+        dry_run
+            .pointer("/counts/needs_evidence")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        dry_run
+            .pointer("/counts/paused_excluded")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+    let dry_run_id = dry_run.pointer("/run/id").and_then(Value::as_str).unwrap();
+    let selected_report = call_mcp_tool(
+        &paths,
+        "x_watch_curation_report",
+        json!({ "run_id": dry_run_id }),
+    )
+    .unwrap();
+    assert_eq!(
+        selected_report.pointer("/run/id").and_then(Value::as_str),
+        Some(dry_run_id)
+    );
+
+    let applied = call_mcp_tool(
+        &paths,
+        "x_curate_watch_sources",
+        json!({ "mode": "pause-only" }),
+    )
+    .unwrap();
+    let applied_run_id = applied.pointer("/run/id").and_then(Value::as_str).unwrap();
+    assert_eq!(
+        applied.pointer("/run/paused_count").and_then(Value::as_u64),
+        Some(1)
+    );
+    let decisions = applied.get("decisions").and_then(Value::as_array).unwrap();
+    let needs_evidence = decisions
+        .iter()
+        .find(|decision| decision.get("handle").and_then(Value::as_str) == Some("NeedsEvidenceMcp"))
+        .unwrap();
+    assert_eq!(
+        needs_evidence.get("recommendation").and_then(Value::as_str),
+        Some("needs_evidence")
+    );
+    assert_eq!(
+        needs_evidence
+            .get("proposed_status")
+            .and_then(Value::as_str),
+        Some("active")
+    );
+    assert!(needs_evidence.get("applied_at").unwrap().is_null());
+
+    let store = Store::open(paths.clone()).unwrap();
+    let sources = store.list_watch_sources().unwrap();
+    assert_eq!(
+        sources
+            .iter()
+            .find(|source| source.locator == "NeedsEvidenceMcp")
+            .map(|source| source.status.as_str()),
+        Some("active")
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .find(|source| source.locator == "ManualDropMcp")
+            .map(|source| source.status.as_str()),
+        Some("paused")
+    );
+    drop(store);
+
+    let restored = call_mcp_tool(
+        &paths,
+        "x_restore_watch_curation",
+        json!({ "run_id": applied_run_id }),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.get("restored_count").and_then(Value::as_u64),
+        Some(1)
+    );
+    let store = Store::open(paths).unwrap();
+    let sources = store.list_watch_sources().unwrap();
+    assert_eq!(
+        sources
+            .iter()
+            .find(|source| source.locator == "ManualDropMcp")
+            .map(|source| source.status.as_str()),
+        Some("active")
     );
 }
 

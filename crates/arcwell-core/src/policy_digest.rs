@@ -635,6 +635,53 @@ pub(crate) fn default_policy_rules() -> Vec<PolicyRule> {
     ]
 }
 
+pub(crate) fn local_ops_ui_policy_rules() -> Vec<PolicyRule> {
+    vec![
+        PolicyRule {
+            id: "allow-local-ops-ui-actions".to_string(),
+            effect: "allow".to_string(),
+            action: "ops.*".to_string(),
+            reason: "allow authenticated local Arcwell cockpit controls after service-owned HTTP auth, CSRF, idempotency, and local-origin checks".to_string(),
+            package: Some("arcwell-cli".to_string()),
+            provider: None,
+            source: Some("ops-ui".to_string()),
+            channel: Some("http".to_string()),
+            subject: Some("local-operator".to_string()),
+            target: None,
+            priority: 40,
+            expires_at: None,
+        },
+        PolicyRule {
+            id: "allow-local-ops-ui-x-bookmark-worker-enqueue".to_string(),
+            effect: "allow".to_string(),
+            action: "worker.enqueue".to_string(),
+            reason: "allow authenticated local cockpit X bookmark enqueue requests; provider and source-write gates still run when the worker executes the job".to_string(),
+            package: Some("arcwell-x".to_string()),
+            provider: Some("x".to_string()),
+            source: Some("x_import_bookmarks".to_string()),
+            channel: None,
+            subject: None,
+            target: None,
+            priority: 40,
+            expires_at: None,
+        },
+        PolicyRule {
+            id: "allow-local-ops-ui-knowledge-worker-enqueue".to_string(),
+            effect: "allow".to_string(),
+            action: "worker.enqueue".to_string(),
+            reason: "allow authenticated local cockpit knowledge job enqueue requests; provider, cost, promotion, and source-write gates still run at execution".to_string(),
+            package: Some("arcwell-knowledge".to_string()),
+            provider: None,
+            source: Some("*".to_string()),
+            channel: None,
+            subject: None,
+            target: None,
+            priority: 40,
+            expires_at: None,
+        },
+    ]
+}
+
 pub(crate) fn default_allow_rule(
     id: &str,
     action: &str,
@@ -1020,6 +1067,16 @@ pub(crate) fn wiki_job_policy_context(
                     .get("max_results")
                     .and_then(Value::as_u64)
                     .unwrap_or(10) as usize,
+            )),
+        ),
+        "x_profile_enrichment" => (
+            "arcwell-x",
+            Some("x"),
+            Some("https://api.x.com".to_string()),
+            Some(estimated_network_fetch_cost(
+                (input.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize)
+                    .clamp(1, 1_000)
+                    .div_ceil(100),
             )),
         ),
         "research_convergence_run" => (
@@ -1419,6 +1476,7 @@ pub(crate) fn provider_network_source_for_job(kind: &str) -> &str {
         "ingest_rendered_page" => "rendered_page_snapshot",
         "x_import_bookmarks" => "x_import_bookmarks",
         "x_monitor_watch_source" => "x_monitor",
+        "x_profile_enrichment" => "x_profile_enrichment",
         "knowledge_cluster_model_write" => "knowledge_cluster_writer",
         "knowledge_entity_resolution_model" => "knowledge_entity_resolution",
         "job_radar_refresh" => "job_source_refresh",
@@ -1519,7 +1577,10 @@ pub(crate) fn scheduled_job_cost_projection(
                 estimated_network_fetch_cost(1 + (limit.clamp(1, 30) * 2)),
             ))
         }
-        "x_recent_search" | "x_import_bookmarks" | "x_monitor_watch_source" => None,
+        "x_recent_search"
+        | "x_import_bookmarks"
+        | "x_monitor_watch_source"
+        | "x_profile_enrichment" => None,
         "job_radar_refresh" => {
             if job
                 .input_json

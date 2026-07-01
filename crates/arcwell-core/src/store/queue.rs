@@ -254,7 +254,29 @@ impl Store {
     }
 
     pub fn enqueue_x_recent_search_job(&self, query: &str, max_results: usize) -> Result<WikiJob> {
+        self.enqueue_x_recent_search_job_with_transport(query, max_results, None)
+    }
+
+    pub fn enqueue_x_recent_search_job_with_transport(
+        &self,
+        query: &str,
+        max_results: usize,
+        transport: Option<&str>,
+    ) -> Result<WikiJob> {
         validate_query(query)?;
+        if let Some(transport) = transport
+            && !transport.trim().is_empty()
+        {
+            let transport = XProviderTransport::parse(Some(transport))?;
+            return self.enqueue_wiki_job(
+                "x_recent_search",
+                json!({
+                    "query": query,
+                    "max_results": max_results.clamp(10, 100),
+                    "transport": transport.cli_value(),
+                }),
+            );
+        }
         self.enqueue_wiki_job(
             "x_recent_search",
             json!({ "query": query, "max_results": max_results.clamp(10, 100) }),
@@ -266,13 +288,44 @@ impl Store {
         bookmark_days: i64,
         max_bookmarks: usize,
     ) -> Result<WikiJob> {
-        self.enqueue_wiki_job(
-            "x_import_bookmarks",
-            json!({
-                "bookmark_days": bookmark_days.clamp(1, 36_500),
-                "max_bookmarks": max_bookmarks.clamp(1, 100_000)
-            }),
+        self.enqueue_x_import_bookmarks_job_with_transport(bookmark_days, max_bookmarks, None)
+    }
+
+    pub fn enqueue_x_import_bookmarks_job_with_transport(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        transport: Option<&str>,
+    ) -> Result<WikiJob> {
+        self.enqueue_x_import_bookmarks_job_with_transport_and_lineage(
+            bookmark_days,
+            max_bookmarks,
+            transport,
+            None,
         )
+    }
+
+    pub fn enqueue_x_import_bookmarks_job_with_transport_and_lineage(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        transport: Option<&str>,
+        lineage: Option<Value>,
+    ) -> Result<WikiJob> {
+        let mut input = json!({
+            "bookmark_days": bookmark_days.clamp(1, 36_500),
+            "max_bookmarks": max_bookmarks.clamp(1, 100_000)
+        });
+        if let Some(transport) = transport
+            && !transport.trim().is_empty()
+        {
+            let transport = XProviderTransport::parse(Some(transport))?;
+            input["transport"] = json!(transport.cli_value());
+        }
+        if let Some(lineage) = lineage {
+            input["lineage"] = lineage;
+        }
+        self.enqueue_wiki_job("x_import_bookmarks", input)
     }
 
     pub fn schedule_x_bookmark_import(
@@ -282,17 +335,41 @@ impl Store {
         cadence: &str,
         status: &str,
     ) -> Result<WatchSource> {
+        self.schedule_x_bookmark_import_with_transport(
+            bookmark_days,
+            max_bookmarks,
+            cadence,
+            status,
+            None,
+        )
+    }
+
+    pub fn schedule_x_bookmark_import_with_transport(
+        &self,
+        bookmark_days: i64,
+        max_bookmarks: usize,
+        cadence: &str,
+        status: &str,
+        transport: Option<&str>,
+    ) -> Result<WatchSource> {
+        let mut metadata = json!({
+            "bookmark_days": bookmark_days.clamp(1, 36_500),
+            "max_bookmarks": max_bookmarks.clamp(1, 100_000),
+            "origin": "x_schedule_bookmarks",
+        });
+        if let Some(transport) = transport
+            && !transport.trim().is_empty()
+        {
+            let transport = XProviderTransport::parse(Some(transport))?;
+            metadata["transport"] = json!(transport.cli_value());
+        }
         self.upsert_watch_source(WatchSourceInput {
             source_kind: "x_bookmarks".to_string(),
             locator: "bookmarks".to_string(),
             label: "X bookmarks".to_string(),
             cadence: cadence.to_string(),
             status: status.to_string(),
-            metadata: json!({
-                "bookmark_days": bookmark_days.clamp(1, 36_500),
-                "max_bookmarks": max_bookmarks.clamp(1, 100_000),
-                "origin": "x_schedule_bookmarks",
-            }),
+            metadata,
         })
     }
 
@@ -2197,7 +2274,21 @@ impl Store {
                         .get("max_bookmarks")
                         .and_then(Value::as_u64)
                         .unwrap_or(100) as usize;
-                    self.enqueue_x_import_bookmarks_job(bookmark_days, max_bookmarks)
+                    let transport = source.metadata.get("transport").and_then(Value::as_str);
+                    self.enqueue_x_import_bookmarks_job_with_transport_and_lineage(
+                        bookmark_days,
+                        max_bookmarks,
+                        transport,
+                        Some(json!({
+                            "trigger": "watch_source_due",
+                            "watch_source_id": source.id,
+                            "watch_source_key": source_key,
+                            "source_kind": source.source_kind,
+                            "locator": source.locator,
+                            "cadence": source.cadence,
+                            "metadata": source.metadata,
+                        })),
+                    )
                 }
                 "x_handle" => self.enqueue_x_monitor_watch_source_job(&source.locator, 20),
                 "knowledge_backlog" => {

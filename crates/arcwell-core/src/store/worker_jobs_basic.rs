@@ -284,6 +284,24 @@ impl Store {
                         &deferred_until,
                     );
                 }
+                if job.kind == "x_import_bookmarks" {
+                    let classification = classify_provider_failure(&error);
+                    if matches!(classification.status, "auth_failed" | "rate_limited") {
+                        let deferred_until = now_plus_seconds(classification.backoff_seconds);
+                        return self.defer_wiki_job(
+                            &job.id,
+                            json!({
+                                "status": "deferred",
+                                "deferred_until": deferred_until,
+                                "source_health_key": "x:bookmarks",
+                                "provider_health_status": classification.status,
+                                "reason": excerpt(&error, 1000),
+                                "boundary": "X bookmark import provider auth/rate failure was recorded in source health and deferred instead of burning worker retry attempts."
+                            }),
+                            &deferred_until,
+                        );
+                    }
+                }
                 let failed = self.fail_wiki_job(&job.id, &error)?;
                 if job.kind == "knowledge_entity_resolution_model" {
                     let _ = self.record_knowledge_entity_resolution_job_failure_health(

@@ -1,4 +1,5 @@
 use super::*;
+use chrono::{Duration as ChronoDuration, Utc};
 
 #[test]
 fn severe_x_oauth_callback_parser_verifies_state_path_and_decoding() {
@@ -71,11 +72,11 @@ fn severe_x_oauth_loopback_redirect_rejects_non_loopback_or_implicit_ports() {
 #[test]
 fn severe_x_oauth_timeout_context_preserves_recovery_evidence_without_pkce_verifier() {
     // CLAIM: browser OAuth timeout errors are actionable and do not leak the
-    // PKCE verifier used for token exchange.
+    // PKCE verifier, state, or challenge material used for token exchange.
     // PRECONDITIONS: the browser open succeeded locally, but no loopback
     // callback arrived.
-    // POSTCONDITIONS: the error preserves the authorization URL and redirect
-    // URI needed for diagnosis while excluding code_verifier material.
+    // POSTCONDITIONS: the error preserves the authorization endpoint and
+    // redirect URI needed for diagnosis while excluding the full URL query.
     // ORACLE: formatted timeout context.
     // SEVERITY: Severe because silent callback timeouts recreate the
     // credential-babysitting failure mode this path is meant to remove.
@@ -83,10 +84,41 @@ fn severe_x_oauth_timeout_context_preserves_recovery_evidence_without_pkce_verif
         "https://x.com/i/oauth2/authorize?client_id=client&state=state&code_challenge=challenge",
         "http://127.0.0.1:8765/callback",
     );
-    assert!(context.contains("authorization_url=https://x.com/i/oauth2/authorize"));
+    assert!(context.contains("authorization_endpoint=https://x.com/i/oauth2/authorize"));
     assert!(context.contains("redirect_uri=http://127.0.0.1:8765/callback"));
     assert!(context.contains("Chrome may still be on the login page"));
+    assert!(!context.contains("authorization_url="));
+    assert!(!context.contains("client_id=client"));
+    assert!(!context.contains("state=state"));
+    assert!(!context.contains("code_challenge=challenge"));
     assert!(!context.contains("code_verifier"));
+    assert!(!context.contains("secret"));
+}
+
+#[test]
+fn severe_gmail_oauth_timeout_context_preserves_recovery_evidence_without_pkce_query() {
+    // CLAIM: Gmail browser OAuth timeout errors are actionable without logging
+    // the full authorization URL query.
+    // PRECONDITIONS: the browser open succeeded locally, but no loopback
+    // callback arrived.
+    // POSTCONDITIONS: the error preserves the authorization endpoint and
+    // redirect URI while excluding state and code_challenge material.
+    // ORACLE: formatted timeout context.
+    // SEVERITY: Severe because Gmail mailbox verification credentials are
+    // daemon-owned recovery material and timeout logs should not carry OAuth
+    // one-shot parameters.
+    let context = gmail_oauth_callback_timeout_context(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id=client&state=state&code_challenge=challenge",
+        "http://127.0.0.1:8766/callback",
+    );
+    assert!(
+        context.contains("authorization_endpoint=https://accounts.google.com/o/oauth2/v2/auth")
+    );
+    assert!(context.contains("http://127.0.0.1:8766/callback"));
+    assert!(!context.contains("client_id=client"));
+    assert!(!context.contains("state=state"));
+    assert!(!context.contains("code_challenge=challenge"));
+    assert!(!context.contains("authorization_url="));
     assert!(!context.contains("secret"));
 }
 
@@ -388,6 +420,116 @@ fn severe_service_plist_contract_accepts_generated_worker_plist_with_hostile_pat
 
     let failures = service_plist_contract_failures(&plist_path);
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn severe_compact_recurrence_audit_keeps_readiness_without_large_event_payloads() {
+    // CLAIM: `service recurrence-audit --compact` keeps the evidence operators
+    // need after sleep/reboot without dumping every worker id or sample event.
+    // PRECONDITIONS: multi-day recurrence proof is not yet established, but a
+    // current worker heartbeat is fresh.
+    // POSTCONDITIONS: compact output says current worker is fresh while span
+    // proof is unproven, includes failures, and omits bulky event payloads.
+    // ORACLE: compact JSON helper output.
+    // SEVERITY: Severe because noisy recurrence proof output makes the
+    // briefing catch-up question hard to answer from live ops.
+    let audit = arcwell_core::WorkerRecurrenceAudit {
+        ok: false,
+        worker_id: Some("worker-old".to_string()),
+        latest_worker_id: Some("worker-current".to_string()),
+        worker_ids: vec![
+            "worker-old".to_string(),
+            "worker-current".to_string(),
+            "worker-another".to_string(),
+        ],
+        event_count: 10,
+        retained_event_count: 3000,
+        first_seen_at: Some("2026-06-29T02:57:55Z".to_string()),
+        last_seen_at: Some("2026-06-29T18:48:12Z".to_string()),
+        latest_seen_at: Some("2026-07-01T02:14:42Z".to_string()),
+        latest_age_seconds: Some(54),
+        latest_is_fresh: true,
+        observed_span_seconds: 57_016,
+        max_gap_seconds: Some(647),
+        current_segment_event_count: 61,
+        current_segment_first_seen_at: Some("2026-07-01T01:10:17Z".to_string()),
+        current_segment_last_seen_at: Some("2026-07-01T02:14:42Z".to_string()),
+        current_segment_span_seconds: 3_865,
+        min_required_span_seconds: 172_800,
+        max_allowed_gap_seconds: 900,
+        failures: vec!["best contiguous worker heartbeat event span is too short".to_string()],
+        sample_events: vec![arcwell_core::WorkerHeartbeatEvent {
+            id: "event-id".to_string(),
+            worker_id: "worker-old".to_string(),
+            seen_at: "2026-06-29T02:57:55Z".to_string(),
+            processed_jobs: 10,
+            last_error: None,
+        }],
+    };
+
+    let compact = compact_worker_recurrence_audit_json(&audit);
+
+    assert_eq!(
+        compact["proof_status"],
+        "current_worker_fresh_span_unproven"
+    );
+    assert_eq!(compact["latest_worker_id"], "worker-current");
+    assert_eq!(compact["latest_is_fresh"], true);
+    assert_eq!(compact["failure_count"], 1);
+    assert_eq!(compact["retained_event_count"], 3000);
+    assert!(compact.get("worker_ids").is_none(), "{compact:#?}");
+    assert!(compact.get("sample_events").is_none(), "{compact:#?}");
+    let serialized = serde_json::to_string(&compact).unwrap();
+    assert!(!serialized.contains("worker-another"), "{serialized}");
+    assert!(!serialized.contains("event-id"), "{serialized}");
+}
+
+#[test]
+fn severe_compact_service_status_reports_running_fresh_without_raw_launchctl_dump() {
+    // CLAIM: `service status --compact` gives the operator readiness answer
+    // for resident catch-up without requiring raw launchctl parsing.
+    // PRECONDITIONS: the service plist exists, launchctl reports running, and
+    // the latest heartbeat is within the freshness threshold.
+    // POSTCONDITIONS: compact output reports running_fresh and omits raw
+    // launchctl stdout/heartbeat event dumps.
+    // ORACLE: compact JSON helper output.
+    // SEVERITY: Severe because laptop wake-up recovery depends on knowing
+    // whether the resident worker is actually alive now.
+    let heartbeat = arcwell_core::WorkerHeartbeat {
+        worker_id: "arcwell-worker-current".to_string(),
+        started_at: (Utc::now() - ChronoDuration::hours(1)).to_rfc3339(),
+        last_seen_at: (Utc::now() - ChronoDuration::seconds(30)).to_rfc3339(),
+        processed_jobs: 12,
+        last_error: None,
+    };
+    let launchctl = json!({
+        "attempted": true,
+        "ok": true,
+        "status": 0,
+        "stdout": "gui/501/com.arcwell.worker = {\n\tstate = running\n\tpid = 123\n\tjob state = running\n}",
+        "stderr": ""
+    });
+
+    let compact = compact_service_status_json(
+        "com.arcwell.worker",
+        true,
+        Path::new("/Users/example/Library/LaunchAgents/com.arcwell.worker.plist"),
+        Some(&heartbeat),
+        &launchctl,
+        300,
+    );
+
+    assert_eq!(compact["ok"], true, "{compact:#?}");
+    assert_eq!(compact["status"], "running_fresh", "{compact:#?}");
+    assert_eq!(compact["launchctl_running"], true, "{compact:#?}");
+    assert_eq!(compact["heartbeat_fresh"], true, "{compact:#?}");
+    assert_eq!(compact["worker_id"], "arcwell-worker-current");
+    assert!(compact["heartbeat_age_seconds"].as_i64().unwrap() <= 300);
+    assert!(compact.get("heartbeat_events").is_none(), "{compact:#?}");
+    assert!(compact.get("stdout").is_none(), "{compact:#?}");
+    assert!(compact.get("launchctl").is_none(), "{compact:#?}");
+    let serialized = serde_json::to_string(&compact).unwrap();
+    assert!(!serialized.contains("pid = 123"), "{serialized}");
 }
 
 #[test]

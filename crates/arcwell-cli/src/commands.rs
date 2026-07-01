@@ -190,12 +190,19 @@ pub(crate) enum ServiceSubcommand {
         #[arg(long)]
         no_load: bool,
     },
-    Status,
+    Status {
+        #[arg(long)]
+        compact: bool,
+        #[arg(long, default_value_t = 5 * 60)]
+        max_heartbeat_age_seconds: i64,
+    },
     RecurrenceAudit {
         #[arg(long, default_value_t = 48)]
         min_span_hours: i64,
         #[arg(long, default_value_t = 15 * 60)]
         max_gap_seconds: i64,
+        #[arg(long)]
+        compact: bool,
     },
     Restart,
     Logs,
@@ -2872,6 +2879,14 @@ pub(crate) enum EmailSubcommand {
         #[arg(long)]
         destination: Option<String>,
     },
+    RecoveryPlan {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+    },
     VerifyMailbox {
         #[arg(long, default_value_t = 25)]
         limit: usize,
@@ -2915,6 +2930,8 @@ pub(crate) enum EmailSubcommand {
         code_verifier: String,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
     },
     OauthReauthorize {
         #[arg(long)]
@@ -2923,6 +2940,8 @@ pub(crate) enum EmailSubcommand {
         redirect_uri: Option<String>,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
         #[arg(long, value_delimiter = ',')]
         scopes: Vec<String>,
         #[arg(long, default_value_t = 180)]
@@ -2937,6 +2956,8 @@ pub(crate) enum EmailSubcommand {
         client_id: Option<String>,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
     },
     ObserveDeliveryBatch {
         #[arg(long, default_value = "gmail")]
@@ -2997,6 +3018,8 @@ pub(crate) enum XSubcommand {
         query: String,
         #[arg(long, default_value_t = 10)]
         max_results: usize,
+        #[arg(long)]
+        transport: Option<String>,
     },
     ImportBookmarks {
         #[arg(long, default_value_t = 92)]
@@ -3015,6 +3038,8 @@ pub(crate) enum XSubcommand {
         cadence: String,
         #[arg(long, default_value = "active")]
         status: String,
+        #[arg(long)]
+        transport: Option<String>,
     },
     ClusterRadarRun {
         run_id: String,
@@ -3111,6 +3136,8 @@ pub(crate) enum XSubcommand {
         code_verifier: String,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
     },
     OauthReauthorize {
         #[arg(long)]
@@ -3119,6 +3146,8 @@ pub(crate) enum XSubcommand {
         redirect_uri: Option<String>,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
         #[arg(long, value_delimiter = ',')]
         scopes: Vec<String>,
         #[arg(long, default_value_t = 180)]
@@ -3133,6 +3162,8 @@ pub(crate) enum XSubcommand {
         client_id: Option<String>,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
     },
     OauthRevoke {
         #[arg(long, default_value = "X_BEARER_TOKEN")]
@@ -3141,6 +3172,8 @@ pub(crate) enum XSubcommand {
         client_id: Option<String>,
         #[arg(long)]
         client_secret: Option<String>,
+        #[arg(long)]
+        public_client: bool,
         #[arg(long)]
         token_type_hint: Option<String>,
         #[arg(long)]

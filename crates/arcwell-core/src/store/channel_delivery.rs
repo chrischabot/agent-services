@@ -757,6 +757,108 @@ impl Store {
         self.enqueue_wiki_job("email_delivery_mailbox_repair", input)
     }
 
+    pub fn email_delivery_recovery_plan(
+        &self,
+        limit: usize,
+        verification_state: Option<&str>,
+        destination: Option<&str>,
+    ) -> Result<EmailDeliveryRecoveryPlan> {
+        if let Some(verification_state) = verification_state {
+            validate_key(verification_state)?;
+        }
+        if let Some(destination) = destination {
+            validate_query(destination)?;
+        }
+        let limit = limit.clamp(1, 100);
+        let mut items = Vec::new();
+        let mut counts_by_state = BTreeMap::new();
+        let mut automatic_verification_candidates = 0;
+        let mut automatic_repair_candidates = 0;
+        let mut explicit_resend_review_candidates = 0;
+        let mut manual_review_candidates = 0;
+
+        for gap in self.list_email_delivery_verification_gaps()? {
+            if verification_state.is_some_and(|state| gap.verification_state != state) {
+                continue;
+            }
+            if destination.is_some_and(|target| gap.destination != target) {
+                continue;
+            }
+            *counts_by_state
+                .entry(gap.verification_state.clone())
+                .or_insert(0) += 1;
+            let (
+                recommended_action,
+                automatic_worker_action,
+                requires_explicit_resend_approval,
+                reason,
+            ) = match gap.verification_state.as_str() {
+                "mailbox_unverified" => {
+                    automatic_verification_candidates += 1;
+                    (
+                        "verify_mailbox",
+                        Some("email_delivery_verification_request"),
+                        false,
+                        "Provider accepted the send, but no mailbox observation exists yet; verify with Gmail or a host mailbox connector before considering resend.",
+                    )
+                }
+                "mailbox_bad_placement_trash" | "mailbox_bad_placement_spam" => {
+                    automatic_repair_candidates += 1;
+                    (
+                        "repair_mailbox_placement",
+                        Some("email_delivery_mailbox_repair"),
+                        false,
+                        "Mailbox proof found the message in a bad placement; repair labels with Gmail modify scope instead of resending a duplicate.",
+                    )
+                }
+                "mailbox_not_observed" | "mailbox_unknown" => {
+                    explicit_resend_review_candidates += 1;
+                    (
+                        "explicit_resend_review",
+                        None,
+                        true,
+                        "Mailbox verification did not prove user-visible receipt; resend is a new user-visible delivery and requires explicit approval after checking content, idempotency, and policy.",
+                    )
+                }
+                _ => {
+                    manual_review_candidates += 1;
+                    (
+                        "manual_review",
+                        None,
+                        true,
+                        "Arcwell does not have an automatic recovery action for this mailbox state; inspect the latest observation and choose an explicit operator action.",
+                    )
+                }
+            };
+            items.push(EmailDeliveryRecoveryPlanItem {
+                delivery_attempt_id: gap.delivery_attempt_id,
+                message_id: gap.message_id,
+                destination: gap.destination,
+                provider_message_id: gap.provider_message_id,
+                outbound_message_id: gap.outbound_message_id,
+                verification_state: gap.verification_state,
+                recommended_action: recommended_action.to_string(),
+                automatic_worker_action: automatic_worker_action.map(str::to_string),
+                requires_explicit_resend_approval,
+                reason: reason.to_string(),
+            });
+            if items.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(EmailDeliveryRecoveryPlan {
+            inspected: items.len(),
+            counts_by_state,
+            automatic_verification_candidates,
+            automatic_repair_candidates,
+            explicit_resend_review_candidates,
+            manual_review_candidates,
+            items,
+            boundary: "Read-only recovery plan. This does not send, resend, repair labels, read message bodies, or mark mailbox observations. It classifies current delivery verification gaps so an operator or worker can choose the least surprising next action.".to_string(),
+        })
+    }
+
     pub fn enqueue_due_email_delivery_mailbox_repair_jobs(
         &self,
         limit: usize,

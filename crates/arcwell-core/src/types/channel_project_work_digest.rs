@@ -176,6 +176,32 @@ pub struct EmailDeliveryVerificationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailDeliveryRecoveryPlanItem {
+    pub delivery_attempt_id: String,
+    pub message_id: String,
+    pub destination: String,
+    pub provider_message_id: Option<String>,
+    pub outbound_message_id: Option<String>,
+    pub verification_state: String,
+    pub recommended_action: String,
+    pub automatic_worker_action: Option<String>,
+    pub requires_explicit_resend_approval: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailDeliveryRecoveryPlan {
+    pub inspected: usize,
+    pub counts_by_state: BTreeMap<String, usize>,
+    pub automatic_verification_candidates: usize,
+    pub automatic_repair_candidates: usize,
+    pub explicit_resend_review_candidates: usize,
+    pub manual_review_candidates: usize,
+    pub items: Vec<EmailDeliveryRecoveryPlanItem>,
+    pub boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailMailboxVerificationReport {
     pub inspected: usize,
     pub ready: usize,
@@ -851,6 +877,12 @@ pub struct IssueScheduleOpsSummary {
     pub hour: i64,
     pub minute: i64,
     pub catch_up_hours: i64,
+    pub has_active_job: bool,
+    pub due_slot_count: usize,
+    pub next_due_at: Option<String>,
+    pub next_scheduled_at: Option<String>,
+    pub catch_up_status: String,
+    pub due_slots: Vec<String>,
     pub tick_status_counts: BTreeMap<String, i64>,
     pub tick_type_counts: BTreeMap<String, i64>,
     pub latest_tick_due_at: Option<String>,

@@ -347,6 +347,217 @@ fn severe_secret_health_warns_when_gmail_mailbox_gaps_lack_oauth_material() {
 }
 
 #[test]
+fn severe_secret_health_warns_when_x_refresh_material_is_provider_rejected() {
+    // CLAIM: Arcwell must not describe X credentials as refreshable after the
+    // provider has rejected the stored refresh token.
+    // PRECONDITIONS: X bearer is expiring soon, refresh/client material and
+    // provider.oauth policy exist, but the last OAuth refresh attempt failed
+    // with an auth-class provider rejection.
+    // POSTCONDITIONS: secret health keeps the bearer non-refreshable, warns on
+    // both X_REFRESH_TOKEN and X_BEARER_TOKEN, and omits raw token material.
+    // ORACLE: SecretHealth plus serialized health/ops surfaces.
+    // SEVERITY: Severe because otherwise ops can claim scheduled X ingestion
+    // will self-heal when reauthorization is actually required.
+    let store = test_store("x-refresh-provider-rejected-health");
+    let bearer = format!("bearer-rejected-{}", "b".repeat(48));
+    let refresh = format!("refresh-rejected-{}", "r".repeat(48));
+    let expires_soon = (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339();
+    store
+        .set_secret_value_with_metadata(
+            "X_BEARER_TOKEN",
+            &bearer,
+            "x",
+            Some("x"),
+            Some(&expires_soon),
+        )
+        .unwrap();
+    store
+        .set_secret_value_with_metadata("X_REFRESH_TOKEN", &refresh, "x", Some("x"), None)
+        .unwrap();
+    store
+        .set_secret_value_with_metadata("X_CLIENT_ID", "client-id", "x", Some("x"), None)
+        .unwrap();
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-x-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow Arcwell-managed X refresh"
+priority = 20
+"#,
+    );
+    store
+        .record_source_failure(
+            "x:oauth-refresh",
+            "x",
+            "x_oauth",
+            "oauth_refresh",
+            &format!(
+                "X OAuth token endpoint failed: invalid_grant refresh_token={refresh} expired"
+            ),
+        )
+        .unwrap();
+
+    let secret_health = store.secret_health().unwrap();
+    let bearer_health = secret_health
+        .iter()
+        .find(|item| item.name == "X_BEARER_TOKEN")
+        .expect("bearer health");
+    assert_ne!(bearer_health.status, "refreshable");
+    assert!(bearer_health.warnings.iter().any(|warning| {
+        warning.contains("Stored X_REFRESH_TOKEN was rejected during X OAuth refresh")
+            && warning.contains("reauthorize X OAuth")
+    }));
+    let refresh_health = secret_health
+        .iter()
+        .find(|item| item.name == "X_REFRESH_TOKEN")
+        .expect("refresh health");
+    assert!(refresh_health.warnings.iter().any(|warning| {
+        warning.contains("Stored X_REFRESH_TOKEN was rejected during X OAuth refresh")
+            && warning.contains("reauthorize X OAuth")
+    }));
+    let health = store.health().unwrap();
+    assert_eq!(
+        health
+            .warnings
+            .iter()
+            .filter(|warning| warning
+                .contains("Stored X_REFRESH_TOKEN was rejected during X OAuth refresh"))
+            .count(),
+        1,
+        "{:?}",
+        health.warnings
+    );
+    let serialized = serde_json::to_string(&json!({
+        "secret_health": secret_health,
+        "health": health,
+        "ops": store.ops_snapshot().unwrap(),
+    }))
+    .unwrap();
+    assert!(serialized.contains("x:oauth-refresh"));
+    assert!(serialized.contains("auth_failed"));
+    assert!(!serialized.contains(&bearer), "{serialized}");
+    assert!(!serialized.contains(&refresh), "{serialized}");
+}
+
+#[test]
+fn severe_secret_health_clears_rejected_x_refresh_warning_after_success() {
+    // CLAIM: A later successful managed X OAuth refresh clears the prior
+    // provider-rejected refresh warning.
+    // PRECONDITIONS: Stored X refresh material exists, policy allows refresh,
+    // and source health currently records an auth_failed refresh attempt.
+    // POSTCONDITIONS: refresh stores fresh token material, x:oauth-refresh is
+    // healthy, and secret health no longer asks for reauthorization.
+    // ORACLE: token store report, source health status, and secret-health
+    // warnings without raw token material.
+    // SEVERITY: Severe because stale auth_failed health makes recovered X
+    // credentials look broken and can trigger unnecessary human credential work.
+    let store = test_store("x-refresh-provider-recovered-health");
+    let bearer = format!("bearer-stale-{}", "b".repeat(48));
+    let refresh = format!("refresh-stale-{}", "r".repeat(48));
+    let fresh_access = format!("fresh-access-{}", "a".repeat(48));
+    let fresh_refresh = format!("fresh-refresh-{}", "f".repeat(48));
+    let expires_soon = (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339();
+    store
+        .set_secret_value_with_metadata(
+            "X_BEARER_TOKEN",
+            &bearer,
+            "x",
+            Some("x"),
+            Some(&expires_soon),
+        )
+        .unwrap();
+    store
+        .set_secret_value_with_metadata("X_REFRESH_TOKEN", &refresh, "x", Some("x"), None)
+        .unwrap();
+    store
+        .set_secret_value_with_metadata("X_CLIENT_ID", "client-id", "x", Some("x"), None)
+        .unwrap();
+    write_policy(
+        &store,
+        r#"
+[[rules]]
+id = "allow-x-oauth-refresh"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow Arcwell-managed X refresh"
+priority = 20
+"#,
+    );
+    store
+        .record_source_failure(
+            "x:oauth-refresh",
+            "x",
+            "x_oauth",
+            "oauth_refresh",
+            "X OAuth token endpoint failed: invalid_grant",
+        )
+        .unwrap();
+    assert!(
+        store
+            .secret_health()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item.warnings.iter())
+            .any(|warning| warning.contains("Stored X_REFRESH_TOKEN was rejected")),
+        "precondition must expose the rejected-refresh warning"
+    );
+
+    let body = Box::leak(
+        json!({
+            "token_type": "bearer",
+            "expires_in": 7200,
+            "access_token": fresh_access,
+            "refresh_token": fresh_refresh,
+        })
+        .to_string()
+        .into_boxed_str(),
+    );
+    let base = mock_base_server(body, "application/json");
+    let report = store
+        .x_oauth_refresh_with_base("client-id", None, true, &base)
+        .unwrap();
+    assert_eq!(
+        report.stored,
+        vec!["X_BEARER_TOKEN".to_string(), "X_REFRESH_TOKEN".to_string()]
+    );
+    let refresh_health = store
+        .get_source_health("x:oauth-refresh")
+        .unwrap()
+        .expect("successful refresh should retain source-health evidence");
+    assert_eq!(refresh_health.status, "healthy");
+    assert_eq!(refresh_health.last_error, None);
+    let secret_health = store.secret_health().unwrap();
+    assert!(
+        secret_health
+            .iter()
+            .flat_map(|item| item.warnings.iter())
+            .all(|warning| !warning.contains("Stored X_REFRESH_TOKEN was rejected")),
+        "{secret_health:?}"
+    );
+    let bearer_health = secret_health
+        .iter()
+        .find(|item| item.name == "X_BEARER_TOKEN")
+        .expect("bearer health");
+    assert_eq!(bearer_health.status, "refreshable");
+    let serialized = serde_json::to_string(&json!({
+        "secret_health": secret_health,
+        "source_health": refresh_health,
+    }))
+    .unwrap();
+    assert!(!serialized.contains(&bearer), "{serialized}");
+    assert!(!serialized.contains(&refresh), "{serialized}");
+}
+
+#[test]
 fn severe_secret_health_suppresses_refreshable_x_bearer_without_schedule() {
     // CLAIM: X access-token expiry is not a user-action credential problem
     // when Arcwell has refresh material and policy to refresh it.
@@ -549,7 +760,7 @@ fn severe_x_monitor_expired_token_is_visible_redacted_and_does_not_burn_budget()
         .unwrap()
         .expect("monitor token failure should be operator-visible");
     let serialized = serde_json::to_string(&health).unwrap();
-    assert_eq!(health.status, "failed");
+    assert_eq!(health.status, "auth_failed");
     assert!(serialized.contains("expired"));
     assert!(!serialized.contains(&token));
     assert_eq!(store.cost_summary().unwrap().2, 0);
@@ -820,6 +1031,95 @@ fn severe_x_monitor_rate_limit_abort_defers_unattempted_sources() {
                 .is_none(),
             "{handle} was not attempted and must not be marked failed"
         );
+        assert_eq!(
+            store
+                .get_cursor(&format!("x:watch:{handle}"))
+                .unwrap()
+                .unwrap()
+                .value,
+            format!("cursor-{handle}")
+        );
+    }
+    let serialized = serde_json::to_string(&json!({
+        "report": report,
+        "stats": store.x_stats().unwrap(),
+        "health": store.list_source_health().unwrap()
+    }))
+    .unwrap();
+    assert!(!serialized.contains("SHOULD_NOT_LEAK"), "{serialized}");
+}
+
+#[test]
+fn severe_x_monitor_auth_failure_defers_active_handles_without_retry_storm() {
+    // CLAIM: A provider-rejected X bearer token stops a watch-monitor batch and
+    // defers active X handles instead of making one doomed request per source.
+    // PRECONDITIONS: Five active X handle watch sources share the same bearer
+    // token and the provider rejects the first request as unauthorized.
+    // POSTCONDITIONS: only one provider request is attempted, all active X
+    // handle health rows are marked auth_failed with future retry times, and
+    // existing cursors are preserved.
+    // ORACLE: monitor report counts, captured request count, source_health
+    // statuses, cursor values, and redacted serialized output.
+    // SEVERITY: Severe because one stale/revoked OAuth credential can otherwise
+    // fan out into hundreds of dead-lettered watch-source jobs.
+    let store = test_store("x-monitor-auth-failure-abort");
+    store
+        .set_secret_value("X_BEARER_TOKEN", "test-token", "x")
+        .unwrap();
+    for handle in ["openai", "anthropic", "googledeepmind", "nvidia", "vercel"] {
+        store
+            .upsert_watch_source(WatchSourceInput {
+                source_kind: "x_handle".to_string(),
+                locator: handle.to_string(),
+                label: format!("@{handle}"),
+                cadence: "warm".to_string(),
+                status: "active".to_string(),
+                metadata: json!({ "origin": "test" }),
+            })
+            .unwrap();
+        store
+            .set_cursor(&format!("x:watch:{handle}"), &format!("cursor-{handle}"))
+            .unwrap();
+    }
+    let (base, requests) = mock_recording_sequence_server(vec![(
+        "401 Unauthorized",
+        "",
+        r#"{"detail":"Unauthorized token=SHOULD_NOT_LEAK"}"#,
+        "application/json",
+    )]);
+
+    let report = store
+        .x_monitor_watch_sources_with_base(10, 10, &base)
+        .unwrap();
+
+    assert_eq!(report.watched_sources, 5);
+    assert_eq!(report.attempted_sources, 1);
+    assert_eq!(report.polled_sources, 1);
+    assert_eq!(report.failed_sources, 1);
+    assert_eq!(report.deferred_sources, 4);
+    assert_eq!(
+        report.stopped_reason.as_deref(),
+        Some("auth_failure_abort_after_1_failure")
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    let auth_failed_health: i64 = store
+        .conn
+        .query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM source_health
+            WHERE provider = 'x'
+              AND source_kind = 'x_monitor'
+              AND status = 'auth_failed'
+              AND next_run_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+            "#,
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(auth_failed_health, 5);
+    for handle in ["openai", "anthropic", "googledeepmind", "nvidia", "vercel"] {
         assert_eq!(
             store
                 .get_cursor(&format!("x:watch:{handle}"))

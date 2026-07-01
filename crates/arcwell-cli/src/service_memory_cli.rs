@@ -1,4 +1,6 @@
 use crate::*;
+use arcwell_core::{WorkerHeartbeat, WorkerRecurrenceAudit};
+use chrono::{DateTime, Utc};
 
 pub(crate) fn provider(store: Store, args: ProviderCommand) -> Result<()> {
     match args.command {
@@ -104,7 +106,10 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
             }
             Ok(())
         }
-        ServiceSubcommand::Status => {
+        ServiceSubcommand::Status {
+            compact,
+            max_heartbeat_age_seconds,
+        } => {
             let plist_path = service_plist_path()?;
             let heartbeat = store.latest_worker_heartbeat()?;
             let heartbeat_events = store.list_worker_heartbeat_events(50)?;
@@ -112,24 +117,40 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
                 "print",
                 &format!("gui/{}/{}", current_uid()?, SERVICE_LABEL),
             ]);
-            print_json(&json!({
-                "label": SERVICE_LABEL,
-                "installed": plist_path.exists(),
-                "plist": plist_path,
-                "heartbeat": heartbeat,
-                "heartbeat_events": heartbeat_events,
-                "launchctl": launchctl
-            }))
+            if compact {
+                print_json(&compact_service_status_json(
+                    SERVICE_LABEL,
+                    plist_path.exists(),
+                    &plist_path,
+                    heartbeat.as_ref(),
+                    &launchctl,
+                    max_heartbeat_age_seconds,
+                ))
+            } else {
+                print_json(&json!({
+                    "label": SERVICE_LABEL,
+                    "installed": plist_path.exists(),
+                    "plist": plist_path,
+                    "heartbeat": heartbeat,
+                    "heartbeat_events": heartbeat_events,
+                    "launchctl": launchctl
+                }))
+            }
         }
         ServiceSubcommand::RecurrenceAudit {
             min_span_hours,
             max_gap_seconds,
+            compact,
         } => {
             let min_span_seconds = min_span_hours
                 .checked_mul(60 * 60)
                 .context("min-span-hours is too large")?;
             let audit = store.audit_worker_recurrence(min_span_seconds, max_gap_seconds)?;
-            print_json(&audit)?;
+            if compact {
+                print_json(&compact_worker_recurrence_audit_json(&audit))?;
+            } else {
+                print_json(&audit)?;
+            }
             if !audit.ok {
                 bail!("worker recurrence audit failed");
             }
@@ -210,6 +231,96 @@ pub(crate) fn service(store: Store, args: ServiceCommand) -> Result<()> {
             }))
         }
     }
+}
+
+pub(crate) fn compact_worker_recurrence_audit_json(audit: &WorkerRecurrenceAudit) -> Value {
+    let proof_status = if audit.ok {
+        "recurrence_proven"
+    } else if audit.latest_is_fresh {
+        "current_worker_fresh_span_unproven"
+    } else {
+        "current_worker_stale_or_missing"
+    };
+    json!({
+        "ok": audit.ok,
+        "proof_status": proof_status,
+        "worker_id": audit.worker_id.clone(),
+        "latest_worker_id": audit.latest_worker_id.clone(),
+        "latest_seen_at": audit.latest_seen_at.clone(),
+        "latest_age_seconds": audit.latest_age_seconds,
+        "latest_is_fresh": audit.latest_is_fresh,
+        "observed_span_seconds": audit.observed_span_seconds,
+        "min_required_span_seconds": audit.min_required_span_seconds,
+        "max_gap_seconds": audit.max_gap_seconds,
+        "max_allowed_gap_seconds": audit.max_allowed_gap_seconds,
+        "current_segment_event_count": audit.current_segment_event_count,
+        "current_segment_first_seen_at": audit.current_segment_first_seen_at.clone(),
+        "current_segment_last_seen_at": audit.current_segment_last_seen_at.clone(),
+        "current_segment_span_seconds": audit.current_segment_span_seconds,
+        "retained_event_count": audit.retained_event_count,
+        "failure_count": audit.failures.len(),
+        "failures": audit.failures.clone(),
+    })
+}
+
+pub(crate) fn compact_service_status_json(
+    label: &str,
+    installed: bool,
+    plist_path: &Path,
+    heartbeat: Option<&WorkerHeartbeat>,
+    launchctl: &Value,
+    max_heartbeat_age_seconds: i64,
+) -> Value {
+    let max_heartbeat_age_seconds = max_heartbeat_age_seconds.max(1);
+    let launchctl_ok = json_bool(launchctl, "ok");
+    let launchctl_stdout = launchctl
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let launchctl_running = launchctl_ok
+        && (launchctl_stdout.contains("state = running")
+            || launchctl_stdout.contains("job state = running"));
+    let heartbeat_age_seconds = heartbeat
+        .map(|heartbeat| {
+            DateTime::parse_from_rfc3339(&heartbeat.last_seen_at).map(|seen_at| {
+                (Utc::now() - seen_at.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0)
+            })
+        })
+        .transpose()
+        .ok()
+        .flatten();
+    let heartbeat_fresh = heartbeat_age_seconds
+        .map(|age| age <= max_heartbeat_age_seconds)
+        .unwrap_or(false);
+    let status = if installed && launchctl_running && heartbeat_fresh {
+        "running_fresh"
+    } else if installed && launchctl_running {
+        "running_stale_or_unproven"
+    } else if installed {
+        "installed_not_running"
+    } else {
+        "not_installed"
+    };
+    json!({
+        "ok": installed && launchctl_running && heartbeat_fresh,
+        "status": status,
+        "label": label,
+        "installed": installed,
+        "plist": plist_path,
+        "launchctl_ok": launchctl_ok,
+        "launchctl_running": launchctl_running,
+        "launchctl_status": launchctl.get("status").cloned(),
+        "heartbeat_fresh": heartbeat_fresh,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "max_heartbeat_age_seconds": max_heartbeat_age_seconds,
+        "worker_id": heartbeat.map(|heartbeat| heartbeat.worker_id.clone()),
+        "worker_started_at": heartbeat.map(|heartbeat| heartbeat.started_at.clone()),
+        "worker_last_seen_at": heartbeat.map(|heartbeat| heartbeat.last_seen_at.clone()),
+        "processed_jobs": heartbeat.map(|heartbeat| heartbeat.processed_jobs),
+        "last_error": heartbeat.and_then(|heartbeat| heartbeat.last_error.clone()),
+    })
 }
 
 pub(crate) fn service_plist_path() -> Result<PathBuf> {

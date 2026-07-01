@@ -1292,6 +1292,27 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
             ],
         ),
         tool(
+            "email_delivery_recovery_plan",
+            "Return a read-only recovery plan for email delivery verification gaps without sending, repairing, or marking observations.",
+            [
+                (
+                    "limit",
+                    "number",
+                    "Maximum delivery gaps to classify, default 25.",
+                ),
+                (
+                    "verification_state",
+                    "string",
+                    "Optional mailbox verification state filter.",
+                ),
+                (
+                    "destination",
+                    "string",
+                    "Optional email destination filter.",
+                ),
+            ],
+        ),
+        tool(
             "email_delivery_mailbox_repair",
             "Use configured Gmail API credentials with modify scope to move bad-placement Arcwell deliveries back to Inbox and record post-repair observations.",
             [
@@ -1892,7 +1913,7 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_recent_search",
-            "Run live X recent search through Arcwell's owned X provider transport. Default transport is direct-api; xurl-token-api delegates token acquisition to xurl; x-api-mcp calls hosted X MCP post search with an app-only bearer alias such as TWITTER_BEARER_TOKEN and maps X API-shaped tool output into Arcwell source cards, cursors, health, and sync runs.",
+            "Run live X recent search through Arcwell's owned X provider transport. With no explicit transport, Arcwell uses hosted x-api-mcp when an app-only bearer alias such as TWITTER_BEARER_TOKEN is configured, otherwise direct-api. Explicit transports are direct-api, xurl-token-api, or x-api-mcp. Results map into Arcwell source cards, cursors, health, and sync runs.",
             [
                 ("query", "string", "X search query."),
                 (
@@ -1904,8 +1925,15 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
         ),
         tool(
             "x_enqueue_recent_search",
-            "Enqueue a live X recent search job.",
-            [("query", "string", "X search query.")],
+            "Enqueue a live X recent search job. With no explicit transport, worker execution uses hosted x-api-mcp when an app-only bearer alias such as TWITTER_BEARER_TOKEN is configured, otherwise direct-api.",
+            [
+                ("query", "string", "X search query."),
+                (
+                    "transport",
+                    "string",
+                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp.",
+                ),
+            ],
         ),
         tool(
             "x_import_bookmarks",
@@ -1920,13 +1948,13 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                 (
                     "transport",
                     "string",
-                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp. The hosted MCP bookmark path imports one tool-call page and preserves returned next_token as an unverified continuation.",
+                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp. The hosted MCP bookmark path follows returned next_token pagination until provider exhaustion or the requested limit.",
                 ),
             ],
         ),
         tool(
             "x_schedule_bookmarks",
-            "Create or update the resident worker watch source that periodically imports authenticated X bookmarks.",
+            "Create or update the resident worker watch source that periodically imports authenticated X bookmarks. Set transport=x-api-mcp to make the scheduled worker use hosted MCP bookmark tools; omitted transport keeps the broad direct-api default.",
             [
                 (
                     "bookmark_days",
@@ -1936,6 +1964,11 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                 ("max_bookmarks", "integer", "Maximum bookmarks to scan."),
                 ("cadence", "string", "Watch cadence: hot, warm, or cold."),
                 ("status", "string", "Watch status: active or paused."),
+                (
+                    "transport",
+                    "string",
+                    "Optional transport: direct-api, xurl-token-api, or x-api-mcp.",
+                ),
             ],
         ),
         tool(
@@ -2013,42 +2046,41 @@ pub(crate) fn mcp_tools() -> Vec<Value> {
                 ("redirect_uri", "string", "Optional OAuth redirect URI."),
             ],
         ),
-        tool(
+        tool_with_schema(
             "x_oauth_exchange_code",
-            "Exchange an X OAuth 2.0 authorization code and store returned tokens in local SQLite secrets, resolving stored X client metadata when omitted.",
-            [
-                ("client_id", "string", "Optional X OAuth client id."),
-                ("redirect_uri", "string", "Optional OAuth redirect URI."),
-                ("code", "string", "Authorization code."),
-                ("code_verifier", "string", "PKCE code verifier."),
-            ],
+            "Exchange an X OAuth 2.0 authorization code and store returned tokens in local SQLite secrets, resolving stored X client metadata when omitted. Set public_client=true to force PKCE public-client form auth even when stored client-secret aliases exist.",
+            json!({
+                "client_id": string_schema("Optional X OAuth client id."),
+                "redirect_uri": string_schema("Optional OAuth redirect URI."),
+                "code": string_schema("Authorization code."),
+                "code_verifier": string_schema("PKCE code verifier."),
+                "client_secret": string_schema("Optional X OAuth client secret for confidential-client Basic auth."),
+                "public_client": boolean_schema("Force public-client form auth and ignore stored client-secret aliases."),
+            }),
+            &["code", "code_verifier"],
         ),
-        tool(
+        tool_with_schema(
             "x_oauth_refresh",
-            "Refresh an X OAuth token from the stored X_REFRESH_TOKEN and store the new token response; resolves stored X_CLIENT_ID when omitted.",
-            [("client_id", "string", "Optional X OAuth client id.")],
+            "Refresh an X OAuth token from the stored X_REFRESH_TOKEN and store the new token response; resolves stored X_CLIENT_ID when omitted. Set public_client=true to force PKCE public-client form auth even when stored client-secret aliases exist.",
+            json!({
+                "client_id": string_schema("Optional X OAuth client id."),
+                "client_secret": string_schema("Optional X OAuth client secret for confidential-client Basic auth."),
+                "public_client": boolean_schema("Force public-client form auth and ignore stored client-secret aliases."),
+            }),
+            &[],
         ),
-        tool(
+        tool_with_schema(
             "x_oauth_revoke",
-            "Revoke a stored X OAuth token through the X revoke endpoint; optionally delete the local secret only after provider success.",
-            [
-                (
-                    "name",
-                    "string",
-                    "Stored secret name, either X_BEARER_TOKEN or X_REFRESH_TOKEN.",
-                ),
-                ("client_id", "string", "Optional X OAuth client id."),
-                (
-                    "token_type_hint",
-                    "string",
-                    "Optional token hint: access_token or refresh_token.",
-                ),
-                (
-                    "delete_local",
-                    "boolean",
-                    "Delete the local secret after provider revocation succeeds.",
-                ),
-            ],
+            "Revoke a stored X OAuth token through the X revoke endpoint; optionally delete the local secret only after provider success. Set public_client=true to force PKCE public-client form auth even when stored client-secret aliases exist.",
+            json!({
+                "name": string_schema("Stored secret name, either X_BEARER_TOKEN or X_REFRESH_TOKEN. Defaults to X_BEARER_TOKEN."),
+                "client_id": string_schema("Optional X OAuth client id."),
+                "client_secret": string_schema("Optional X OAuth client secret for confidential-client Basic auth."),
+                "public_client": boolean_schema("Force public-client form auth and ignore stored client-secret aliases."),
+                "token_type_hint": string_schema("Optional token hint: access_token or refresh_token."),
+                "delete_local": boolean_schema("Delete the local secret after provider revocation succeeds."),
+            }),
+            &[],
         ),
         tool(
             "x_list",

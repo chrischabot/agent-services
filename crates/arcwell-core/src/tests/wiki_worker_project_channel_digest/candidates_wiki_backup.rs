@@ -808,6 +808,60 @@ fn severe_worker_recurrence_audit_requires_retained_multi_event_span() {
 }
 
 #[test]
+fn severe_worker_recurrence_audit_surfaces_current_worker_even_when_best_span_is_old() {
+    // CLAIM: recurrence audit separates long-span proof from current liveness
+    // so an old best heartbeat segment cannot hide a freshly running worker.
+    // ORACLE: the best segment remains historical, but latest/current segment
+    // fields identify the fresh worker and mark it fresh.
+    // SEVERITY: Severe because after reboot or sleep, operators need to know
+    // whether catch-up can run now even if multi-day recurrence proof is not
+    // yet re-established.
+    let store = test_store("worker-recurrence-audit-current-liveness");
+    for (id, seen_at) in [
+        (
+            "historical-worker-event-1",
+            (Utc::now() - ChronoDuration::hours(51)).to_rfc3339(),
+        ),
+        (
+            "historical-worker-event-2",
+            (Utc::now() - ChronoDuration::hours(50)).to_rfc3339(),
+        ),
+        (
+            "historical-worker-event-3",
+            (Utc::now() - ChronoDuration::hours(49)).to_rfc3339(),
+        ),
+    ] {
+        store
+            .conn
+            .execute(
+                r#"
+                    INSERT INTO worker_heartbeat_events
+                      (id, worker_id, seen_at, processed_jobs, last_error, created_at)
+                    VALUES (?1, 'worker-old', ?2, 1, NULL, ?2)
+                    "#,
+                params![id, seen_at],
+            )
+            .unwrap();
+    }
+    store
+        .record_worker_heartbeat("worker-current", 0, None)
+        .unwrap();
+
+    let audit = store.audit_worker_recurrence(2 * 60 * 60, 90 * 60).unwrap();
+
+    assert!(audit.ok, "{audit:#?}");
+    assert_eq!(audit.worker_id.as_deref(), Some("worker-old"));
+    assert_eq!(audit.latest_worker_id.as_deref(), Some("worker-current"));
+    assert!(audit.latest_is_fresh, "{audit:#?}");
+    assert!(audit.latest_age_seconds.unwrap_or(i64::MAX) <= 90 * 60);
+    assert_eq!(audit.current_segment_event_count, 1);
+    assert_eq!(
+        audit.current_segment_first_seen_at,
+        audit.current_segment_last_seen_at
+    );
+}
+
+#[test]
 fn severe_strict_doctor_rejects_stale_backup_schema_drift_and_missing_dirs() {
     let store = test_store("strict-doctor-drift");
     let options = DoctorOptions {

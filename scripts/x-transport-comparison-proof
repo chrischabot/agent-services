@@ -246,8 +246,8 @@ def main() -> int:
         "runs": runs,
         "winner": winner,
         "non_claims": [
-            "This compares recent-search only; bookmark MCP has local mock coverage but is not part of this live scorecard.",
-            "This does not prove trends, Articles, DMs, media, streams, hosted MCP pagination, or scheduled recurrence.",
+            "This compares recent-search only; run scripts/x-api-mcp-recurrence-proof for hosted MCP bookmark pagination and worker recurrence.",
+            "This does not prove trends, Articles, DMs, media, streams, or multi-day scheduled recurrence.",
             "Copied homes are used to avoid mutating real cursors; this is not operational recurrence proof.",
             "Failures are valid evidence and should not be rephrased as live capability.",
         ],

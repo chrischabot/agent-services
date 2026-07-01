@@ -1706,6 +1706,19 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 api_base,
             )?))
         }
+        "email_delivery_recovery_plan" => {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let verification_state = arguments
+                .get("verification_state")
+                .or_else(|| arguments.get("state"))
+                .and_then(Value::as_str);
+            let destination = arguments.get("destination").and_then(Value::as_str);
+            Ok(json!(store.email_delivery_recovery_plan(
+                limit,
+                verification_state,
+                destination,
+            )?))
+        }
         "email_delivery_mailbox_repair" => {
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
             let verification_state = arguments
@@ -2472,9 +2485,12 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 .get("max_results")
                 .and_then(Value::as_u64)
                 .unwrap_or(10) as usize;
-            Ok(json!(
-                store.enqueue_x_recent_search_job(&query, max_results)?
-            ))
+            let transport = arguments.get("transport").and_then(Value::as_str);
+            Ok(json!(store.enqueue_x_recent_search_job_with_transport(
+                &query,
+                max_results,
+                transport
+            )?))
         }
         "x_import_bookmarks" => {
             let bookmark_days = arguments
@@ -2509,11 +2525,13 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 .get("status")
                 .and_then(Value::as_str)
                 .unwrap_or("active");
-            Ok(json!(store.schedule_x_bookmark_import(
+            let transport = arguments.get("transport").and_then(Value::as_str);
+            Ok(json!(store.schedule_x_bookmark_import_with_transport(
                 bookmark_days,
                 max_bookmarks,
                 cadence,
                 status,
+                transport,
             )?))
         }
         "x_import_following_watch_sources" => {
@@ -2605,19 +2623,32 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
             let code = required_string(&arguments, "code")?;
             let code_verifier = required_string(&arguments, "code_verifier")?;
             let client_secret = arguments.get("client_secret").and_then(Value::as_str);
+            let public_client = arguments
+                .get("public_client")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Ok(json!(store.x_oauth_exchange_code(
                 &client_id,
                 &redirect_uri,
                 &code,
                 &code_verifier,
-                client_secret
+                client_secret,
+                public_client
             )?))
         }
         "x_oauth_refresh" => {
             let client_id = store
                 .resolve_x_oauth_client_id(arguments.get("client_id").and_then(Value::as_str))?;
             let client_secret = arguments.get("client_secret").and_then(Value::as_str);
-            Ok(json!(store.x_oauth_refresh(&client_id, client_secret)?))
+            let public_client = arguments
+                .get("public_client")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(json!(store.x_oauth_refresh(
+                &client_id,
+                client_secret,
+                public_client
+            )?))
         }
         "x_oauth_revoke" => {
             let name = arguments
@@ -2627,6 +2658,10 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
             let client_id = store
                 .resolve_x_oauth_client_id(arguments.get("client_id").and_then(Value::as_str))?;
             let client_secret = arguments.get("client_secret").and_then(Value::as_str);
+            let public_client = arguments
+                .get("public_client")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let token_type_hint = arguments.get("token_type_hint").and_then(Value::as_str);
             let delete_local = arguments
                 .get("delete_local")
@@ -2636,6 +2671,7 @@ pub(crate) fn call_mcp_tool(paths: &AppPaths, name: &str, arguments: Value) -> R
                 name,
                 &client_id,
                 client_secret,
+                public_client,
                 token_type_hint,
                 delete_local,
             )?))

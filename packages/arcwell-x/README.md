@@ -27,6 +27,7 @@ arcwell x recent-search "from:openai" --max-results 25 --transport xurl-token-ap
 arcwell x recent-search "from:openai" --max-results 25 --transport x-api-mcp
 arcwell x import-bookmarks --max-bookmarks 100 --transport x-api-mcp
 arcwell x enqueue-recent-search "from:openai" --max-results 25
+arcwell x schedule-bookmarks --max-bookmarks 150 --transport x-api-mcp
 arcwell x monitor-watch-sources --max-sources 25 --max-results-per-source 10
 arcwell x repair-health --defer-rate-limited-hours 24 --limit 10000
 arcwell x search-tweets eve --limit 20
@@ -155,42 +156,57 @@ Boundary:
   counts, cursor fields where relevant, account id where known, and redacted
   failure text.
 - Recent search and bookmark import accept an optional provider transport:
-  `direct-api` (default) uses Arcwell's stored/env OAuth bearer and canonical X
-  API fetch path; `xurl-token-api` delegates only token acquisition to
+  `direct-api` uses Arcwell's stored/env OAuth bearer and canonical X API fetch
+  path; `xurl-token-api` delegates only token acquisition to
   `xurl token`, then keeps Arcwell-owned policy, cost, source-card/wiki
   projection, cursor, source-health, and sync-run writes. `x-api-mcp` calls the
   hosted X MCP server at `https://api.x.com/mcp` by default, discovers tools
   with `tools/list`, and imports only X API-shaped JSON responses through the
-  same canonical Arcwell import path. MCP recent search uses the hosted
-  `search_posts_all` tool and prefers app-only bearer aliases
+  same canonical Arcwell import path. Transportless recent search now uses
+  hosted `x-api-mcp` when an app-only bearer alias is configured, otherwise it
+  falls back to the broad `direct-api` default. MCP recent search uses the
+  hosted `search_posts_all` tool and prefers app-only bearer aliases
   `ARCWELL_X_MCP_APP_BEARER_TOKEN`, `X_APP_BEARER_TOKEN`, or
   `TWITTER_BEARER_TOKEN`; MCP bookmarks use user-context `X_BEARER_TOKEN` /
   refresh material through hosted `get_users_me` and `get_users_bookmarks`.
   Prose-only or non-X-shaped MCP tool output fails without advancing cursors.
-  Bookmark MCP import is deliberately one tool-call page until hosted pagination
-  arguments are proven; if a `next_token` is returned, the report preserves it
-  and marks `mcp_single_page_next_token_unverified` rather than claiming
-  exhaustion. `scripts/x-mcp-xurl-proof` records a redacted xurl/MCP discovery
-  packet, and `scripts/x-transport-comparison-proof` compares direct API,
-  xurl-token, and x-api-mcp recent-search transports in copied homes.
+  Bookmark MCP import follows returned `next_token` pagination until provider
+  exhaustion or the requested limit, and scheduled bookmark watch sources can
+  persist `transport=x-api-mcp` into worker jobs. `scripts/x-mcp-xurl-proof`
+  records a redacted xurl/MCP discovery packet,
+  `scripts/x-transport-comparison-proof` compares direct API, xurl-token, and
+  x-api-mcp recent-search transports in copied homes, and
+  `scripts/x-api-mcp-recurrence-proof` records a copied-home worker recurrence
+  plus hosted-pagination proof packet. That recurrence proof writes back
+  rotated `X_BEARER_TOKEN` / `X_REFRESH_TOKEN` rows only after a successful
+  copied-home bookmark worker completion, and records only names/counts in the
+  packet.
 - Current xurl proof status: local severe tests prove `xurl-token-api` for
   recent search and bookmark import with a fake `xurl` token command while
   preserving Arcwell writes. The fresh live probe
-  `.arcwell-dev/proofs/x-mcp-xurl-proof-20260630T182334Z-9284/artifacts/proof-packet.json`
+  `.arcwell-dev/proofs/x-mcp-xurl-proof-20260701T040008Z-28334/artifacts/proof-packet.json`
   found `xurl 1.0.3` via `npx:@xdevplatform/xurl`, but stopped at
-  `blocked_auth` because no official X MCP bridge `CLIENT_ID`/`CLIENT_SECRET`
-  env or cached xurl OAuth token was available. Current hosted-MCP proof status:
+  `blocked_auth` because no registered xurl app or cached xurl OAuth token was
+  available. Official X docs require a developer app plus `xurl auth oauth2` /
+  `xurl mcp` setup for that full bridge. Current hosted-MCP proof status:
   local severe tests prove recent-search success, prose failure without cursor
   advance, bookmark `get_users_me`/`get_users_bookmarks` chaining, canonical
-  edge/source metadata, and selector resistance to misleading `search_news` and
-  username tools. Copied-home live comparison
-  `.arcwell-dev/proofs/x-transport-comparison-20260630T190356Z-72790/artifacts/proof-packet.json`
+  edge/source metadata, bookmark pagination, scheduled worker transport
+  preservation, provider-rejected MCP bearer refresh retry, and selector
+  resistance to misleading `search_news` and username tools. Copied-home live
+  comparison
+  `.arcwell-dev/proofs/x-transport-comparison-20260630T212343Z-31970/artifacts/proof-packet.json`
   rates `x-api-mcp` 8.0, `direct-api` 7.4, and `xurl-token-api` 2.6 for recent
   search. Copied-home live bookmark proof
-  `.arcwell-dev/proofs/x-api-mcp-bookmarks-live-20260630T190104Z-62057/artifacts/proof-packet.json`
-  passed one hosted MCP bookmark page with 5 seen/5 duplicate local rows and a
-  preserved `next_token`; it does not prove hosted bookmark pagination
-  exhaustion.
+  `.arcwell-dev/proofs/x-api-mcp-recurrence-20260701T040030Z-32222/artifacts/proof-packet.json`
+  is `partial_no_pagination`: it proves two copied-home resident worker ticks
+  using `transport=x-api-mcp`, two completed hosted MCP bookmark sync runs, and
+  no token write-back was needed. Current X OAuth refresh is live again and
+  secret health is warning-free, but hosted MCP returned 99 duplicate
+  API-visible bookmarks with `provider_exhausted` and no `next_token` on both
+  worker runs, so live pagination beyond one page was not observable in that
+  provider slice. Local severe tests still prove pagination-token handling and
+  refresh retry behavior.
 - OAuth tokens are stored in local SQLite secret values. Normal list/report surfaces return secret names and metadata only, not token values.
 - `X_BEARER_TOKEN` can also be supplied as an environment variable; environment wins over SQLite for live search.
 - `X_CLIENT_SECRET` can be supplied as an environment variable, SQLite secret value, or explicit CLI/MCP argument for confidential clients.
@@ -241,7 +257,12 @@ Boundary:
   later successful sync proves the failure is obsolete. Stale `rate_limited`
   rows are deferred to a future `next_run_at` without marking them healthy, so
   operators can see quota pressure without strict health treating deferred
-  quota as local corruption.
+  quota as local corruption. The same repair pass supersedes historical
+  `x_import_bookmarks` dead letters caused by the old provider-network policy
+  gap only after a current deferred replacement job exists, preserving the live
+  auth/rate blocker instead of hiding it.
+- `health`, `doctor --strict`, and ops snapshots surface `X OAuth
+  reauthorization required` when X source health contains `auth_failed` rows.
 - Watch rebuild gathers bookmark/follow candidates before replacing existing `x_handle` rows, then swaps the list in one SQLite transaction.
 - Cursors advance only after accepted X items/source cards and source-health are durable. Partial X API errors, blocked/protected/deleted items, malformed tweet objects, quota/rate-limit responses, and duplicate newest-id pages do not corrupt cursors.
 - Imported items are treated as untrusted external source text.

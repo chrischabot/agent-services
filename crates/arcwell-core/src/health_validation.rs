@@ -3605,6 +3605,8 @@ struct JobReportRoleEventGroup<'a> {
     location_labels: BTreeSet<String>,
 }
 
+const JOB_REPORT_EMAIL_SCORE_FLOOR_PERCENT: f64 = 50.0;
+
 fn job_report_open_role_groups<'a>(
     entries: &'a [JobShortlistEntry],
     latest_role_statuses: &BTreeMap<String, String>,
@@ -3621,6 +3623,7 @@ fn job_report_open_role_groups<'a>(
                 .map(|score| !matches!(score.tier.as_str(), "pass" | "blocked"))
                 .unwrap_or(true)
             && job_report_role_is_uk_plausible(&entry.role)
+            && job_report_entry_meets_email_score_floor(entry)
     }))
 }
 
@@ -3683,6 +3686,9 @@ pub(crate) fn render_job_opening_events(
         }
         if let Some(entry) = role_entries.get(&event.role_id) {
             if !job_report_role_is_uk_plausible(&entry.role) {
+                continue;
+            }
+            if !job_report_entry_meets_email_score_floor(entry) {
                 continue;
             }
             let key = job_report_role_family_key(&entry.role);
@@ -3977,6 +3983,10 @@ fn job_report_entry_score(entry: &JobShortlistEntry) -> f64 {
         .as_ref()
         .map(|score| score.weighted_score)
         .unwrap_or_else(|| job_report_role_heuristic_score(&entry.role))
+}
+
+fn job_report_entry_meets_email_score_floor(entry: &JobShortlistEntry) -> bool {
+    job_report_entry_score(entry) >= JOB_REPORT_EMAIL_SCORE_FLOOR_PERCENT
 }
 
 fn job_report_group_order(

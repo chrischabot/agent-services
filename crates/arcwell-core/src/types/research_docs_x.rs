@@ -964,6 +964,7 @@ pub struct XHealthRepairReport {
     pub repaired_watch_health: usize,
     pub retired_legacy_x_handle_health: usize,
     pub retired_orphan_x_monitor_health: usize,
+    pub superseded_stale_bookmark_dead_letters: usize,
     pub rate_limited_scanned: usize,
     pub rate_limited_deferred: usize,
     pub defer_until: String,

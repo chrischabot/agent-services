@@ -690,6 +690,79 @@ pub(crate) fn issue_schedule_due_slots(
     Ok(slots.into_iter().map(|slot| slot.to_rfc3339()).collect())
 }
 
+pub(crate) fn issue_schedule_next_scheduled_slot(
+    created_at: &str,
+    hour: i64,
+    minute: i64,
+    time_zone: &str,
+    now_utc: DateTime<Utc>,
+) -> Result<String> {
+    validate_timestamp(created_at)?;
+    let created_at = DateTime::parse_from_rfc3339(created_at)?.with_timezone(&Utc);
+    let hour = hour.clamp(0, 23) as u32;
+    let minute = minute.clamp(0, 59) as u32;
+    match normalize_issue_schedule_time_zone(time_zone)?.as_str() {
+        "utc" => issue_schedule_next_scheduled_slot_utc(created_at, now_utc, hour, minute),
+        "local" => issue_schedule_next_scheduled_slot_local(created_at, now_utc, hour, minute),
+        _ => unreachable!("time zone normalized above"),
+    }
+}
+
+fn issue_schedule_next_scheduled_slot_utc(
+    created_at: DateTime<Utc>,
+    now_utc: DateTime<Utc>,
+    hour: u32,
+    minute: u32,
+) -> Result<String> {
+    let start = created_at.max(now_utc);
+    let mut date = start.date_naive();
+    for _ in 0..=370 {
+        let Some(candidate) = Utc
+            .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0)
+            .single()
+        else {
+            bail!("constructing UTC issue schedule slot failed");
+        };
+        if candidate > now_utc && candidate >= created_at {
+            return Ok(candidate.to_rfc3339());
+        }
+        let Some(next) = date.succ_opt() else {
+            break;
+        };
+        date = next;
+    }
+    bail!("no future UTC issue schedule slot found within 370 days")
+}
+
+fn issue_schedule_next_scheduled_slot_local(
+    created_at: DateTime<Utc>,
+    now_utc: DateTime<Utc>,
+    hour: u32,
+    minute: u32,
+) -> Result<String> {
+    let start_local = created_at.max(now_utc).with_timezone(&Local);
+    let mut date = start_local.date_naive();
+    for _ in 0..=370 {
+        let local_slot =
+            match Local.with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0) {
+                chrono::LocalResult::Single(value) => Some(value),
+                chrono::LocalResult::Ambiguous(earliest, _) => Some(earliest),
+                chrono::LocalResult::None => None,
+            };
+        if let Some(local_slot) = local_slot {
+            let candidate = local_slot.with_timezone(&Utc);
+            if candidate > now_utc && candidate >= created_at {
+                return Ok(candidate.to_rfc3339());
+            }
+        }
+        let Some(next) = date.succ_opt() else {
+            break;
+        };
+        date = next;
+    }
+    bail!("no future local issue schedule slot found within 370 days")
+}
+
 pub(crate) fn issue_schedule_due_slots_utc(
     start: DateTime<Utc>,
     now_utc: DateTime<Utc>,

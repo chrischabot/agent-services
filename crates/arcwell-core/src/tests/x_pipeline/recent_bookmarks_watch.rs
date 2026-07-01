@@ -737,6 +737,107 @@ priority = 20
 }
 
 #[test]
+fn severe_x_recent_search_defaults_to_x_api_mcp_when_app_bearer_alias_exists() {
+    // CLAIM: Arcwell has adopted hosted x-api-mcp for recent-search reads when
+    // an app-only bearer alias is configured, without requiring callers to pass
+    // --transport x-api-mcp.
+    // ORACLE: transportless foreground search sends only hosted MCP JSON-RPC
+    // requests, uses the app bearer alias, and records x_api_mcp in sync state.
+    // SEVERITY: Severe because a README-only adoption would leave the old
+    // direct endpoint as the unobserved default.
+    without_x_transport_env(|| {
+        without_x_mcp_env(|| {
+            clear_x_bearer_env();
+            let store = test_store("x-recent-defaults-to-x-api-mcp");
+            store
+                .set_secret_value("TWITTER_BEARER_TOKEN", "default-mcp-app-token", "x")
+                .unwrap();
+            write_policy(
+                &store,
+                r#"
+[[rules]]
+id = "allow-x-mcp-default-recent-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_recent_search"
+reason = "allow hosted MCP default recent-search test"
+priority = 20
+
+[[rules]]
+id = "allow-x-mcp-default-recent-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in hosted MCP default recent-search test"
+priority = 20
+"#,
+            );
+            let api_response = json!({
+                "data": [
+                    {
+                        "id": "261",
+                        "author_id": "u1",
+                        "text": "Default recent search through hosted X MCP.",
+                        "created_at": "2026-06-30T00:00:00Z"
+                    }
+                ],
+                "includes": {
+                    "users": [
+                        { "id": "u1", "username": "openai", "name": "OpenAI" }
+                    ]
+                },
+                "meta": { "newest_id": "261" }
+            });
+            let tools = x_mcp_tools_list_response_for_tools(vec![(
+                "search_posts_all",
+                "Search Posts All",
+                vec![
+                    "query",
+                    "max_results",
+                    "since_id",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            )]);
+            let call = x_mcp_tool_call_content_response(&api_response.to_string());
+            let (base, requests) =
+                mock_recording_sequence_server(x_mcp_response_sequence(tools, call));
+
+            let report = with_x_api_base(&base, || {
+                store.x_recent_search_with_transport("agents", 10, None)
+            })
+            .unwrap();
+
+            assert_eq!(report.imported, 1);
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 6);
+            assert!(
+                captured
+                    .iter()
+                    .all(|request| request.contains("POST /mcp ")),
+                "{captured:#?}"
+            );
+            assert!(
+                captured.iter().all(|request| {
+                    request.contains("authorization: Bearer default-mcp-app-token")
+                        || request.contains("Authorization: Bearer default-mcp-app-token")
+                }),
+                "{captured:#?}"
+            );
+            let stats = store.x_stats().unwrap();
+            assert_eq!(stats.latest_sync_runs[0].stream, "recent_search");
+            assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+            assert_eq!(stats.latest_sync_runs[0].status, "completed");
+        });
+    });
+}
+
+#[test]
 fn severe_x_recent_search_x_api_mcp_rejects_prose_without_cursor_advance() {
     // CLAIM: MCP tool success is not enough; Arcwell requires X API-shaped JSON
     // before importing rows or advancing cursors.
@@ -1247,7 +1348,7 @@ priority = 20
         );
         let recent = (Utc::now() - chrono::Duration::days(2))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let api_response = json!({
+        let first_page = json!({
             "data": [
                 {
                     "id": "bmcp1",
@@ -1267,6 +1368,25 @@ priority = 20
                 "next_token": "MCP_NEXT"
             }
         });
+        let second_page = json!({
+            "data": [
+                {
+                    "id": "bmcp2",
+                    "author_id": "u2",
+                    "text": "Second hosted X MCP bookmark page.",
+                    "created_at": recent,
+                    "public_metrics": { "like_count": 7, "bookmark_count": 8 }
+                }
+            ],
+            "includes": {
+                "users": [
+                    { "id": "u2", "username": "sama", "name": "Sam Altman" }
+                ]
+            },
+            "meta": {
+                "account_id": "me"
+            }
+        });
         let tools = x_mcp_tools_list_response_for_tools(vec![
             (
                 "get_users_by_usernames",
@@ -1284,6 +1404,7 @@ priority = 20
                 vec![
                     "id",
                     "max_results",
+                    "pagination_token",
                     "post.fields",
                     "expansions",
                     "user.fields",
@@ -1300,28 +1421,26 @@ priority = 20
             })
             .to_string(),
         );
-        let call = x_mcp_tool_call_content_response(&api_response.to_string());
+        let first_call = x_mcp_tool_call_content_response(&first_page.to_string());
+        let second_call = x_mcp_tool_call_content_response(&second_page.to_string());
         let (base, requests) = mock_recording_sequence_server(x_mcp_response_sequence_for_calls(
             tools,
-            vec![me_response, call],
+            vec![me_response, first_call, second_call],
         ));
 
         let report = store
             .x_import_bookmarks_with_base_and_transport(92, 10, &base, XProviderTransport::XApiMcp)
             .unwrap();
 
-        assert_eq!(report.seen, 1);
-        assert_eq!(report.imported, 1);
-        assert_eq!(report.source_card_projections, Some(1));
-        assert_eq!(report.pages_fetched, Some(1));
-        assert_eq!(report.exhausted, Some(false));
-        assert_eq!(
-            report.stop_reason.as_deref(),
-            Some("mcp_single_page_next_token_unverified")
-        );
-        assert_eq!(report.next_token.as_deref(), Some("MCP_NEXT"));
+        assert_eq!(report.seen, 2);
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.source_card_projections, Some(2));
+        assert_eq!(report.pages_fetched, Some(2));
+        assert_eq!(report.exhausted, Some(true));
+        assert_eq!(report.stop_reason.as_deref(), Some("provider_exhausted"));
+        assert_eq!(report.next_token.as_deref(), None);
         let captured = requests.lock().unwrap();
-        assert_eq!(captured.len(), 9);
+        assert_eq!(captured.len(), 12);
         assert!(
             captured
                 .iter()
@@ -1348,17 +1467,25 @@ priority = 20
             "{}",
             captured[8]
         );
+        assert!(
+            captured[11].contains(r#""method":"tools/call""#)
+                && captured[11].contains(r#""name":"get_users_bookmarks""#)
+                && captured[11].contains(r#""pagination_token":"MCP_NEXT""#)
+                && captured[11].contains(r#""max_results":9"#),
+            "{}",
+            captured[11]
+        );
         let collection_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM x_collections WHERE tweet_x_id = 'bmcp1' AND collection_kind = 'bookmark' AND account_id = 'acct_default'",
+                "SELECT COUNT(*) FROM x_collections WHERE tweet_x_id IN ('bmcp1', 'bmcp2') AND collection_kind = 'bookmark' AND account_id = 'acct_default'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(collection_count, 1);
+        assert_eq!(collection_count, 2);
         let item = store
-            .list_x_items(Some("hosted X MCP"))
+            .list_x_items(Some("Second hosted X MCP"))
             .unwrap()
             .pop()
             .unwrap();
@@ -1370,7 +1497,7 @@ priority = 20
         let edge_transport: String = store
             .conn
             .query_row(
-                "SELECT transport FROM x_tweet_edges WHERE tweet_x_id = 'bmcp1'",
+                "SELECT transport FROM x_tweet_edges WHERE tweet_x_id = 'bmcp2'",
                 [],
                 |row| row.get(0),
             )
@@ -1380,7 +1507,195 @@ priority = 20
         assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
         assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
         assert_eq!(stats.latest_sync_runs[0].account_id.as_deref(), Some("me"));
-        assert_eq!(stats.latest_sync_runs[0].inserted, 1);
+        assert_eq!(stats.latest_sync_runs[0].inserted, 2);
+    });
+}
+
+#[test]
+fn severe_x_import_bookmarks_x_api_mcp_refreshes_provider_rejected_bearer() {
+    // CLAIM: Hosted MCP bookmark import refreshes a locally usable bearer
+    // token when the MCP server rejects it as unauthorized, then retries the
+    // user-context tool setup with the fresh token.
+    // PRECONDITIONS: SQLite has a non-expired bearer, refresh token, and
+    // client id; the first MCP tools/list call returns 401.
+    // POSTCONDITIONS: OAuth refresh occurs once, the fresh token is stored and
+    // used for get-users-me/bookmark calls, and the import completes through
+    // canonical Arcwell bookmark writes.
+    // ORACLE: captured HTTP request order, Authorization headers, durable
+    // token state, import report, and sync-run transport/status.
+    // SEVERITY: Severe because hosted MCP recurrence must not turn an
+    // invalidated bearer into either a fake empty bookmark corpus or a manual
+    // credential chore.
+    without_x_mcp_env(|| {
+        clear_x_bearer_env();
+        let store = test_store("x-mcp-bookmarks-refresh-provider-rejected-bearer");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "stale-mcp-user-token", "x")
+            .unwrap();
+        store
+            .set_secret_value("X_REFRESH_TOKEN", "refresh-token", "x")
+            .unwrap();
+        store
+            .set_secret_value("X_CLIENT_ID", "client-id", "x")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-hosted-mcp-bookmark-refresh-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow hosted MCP bookmark refresh retry test"
+priority = 20
+
+[[rules]]
+id = "allow-hosted-mcp-bookmark-refresh-oauth-test"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "allow hosted MCP bookmark refresh retry test"
+priority = 20
+
+[[rules]]
+id = "allow-hosted-mcp-bookmark-refresh-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow hosted MCP bookmark refresh retry source write test"
+priority = 20
+"#,
+        );
+        let recent = (Utc::now() - chrono::Duration::days(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let tools = x_mcp_tools_list_response_for_tools(vec![
+            (
+                "get_users_me",
+                "Get Users Me",
+                vec!["user.fields", "post.fields", "expansions"],
+            ),
+            (
+                "get_users_bookmarks",
+                "Get Users Bookmarks",
+                vec![
+                    "id",
+                    "max_results",
+                    "pagination_token",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            ),
+        ]);
+        let me_response = x_mcp_tool_call_content_response(
+            &json!({
+                "data": {
+                    "id": "me",
+                    "username": "me",
+                    "name": "Me"
+                }
+            })
+            .to_string(),
+        );
+        let page = x_mcp_tool_call_content_response(
+            &json!({
+                "data": [
+                    {
+                        "id": "mcprefresh1",
+                        "author_id": "u1",
+                        "text": "Hosted MCP bookmark after provider-side bearer refresh.",
+                        "created_at": recent
+                    }
+                ],
+                "includes": {
+                    "users": [
+                        { "id": "u1", "username": "openai", "name": "OpenAI" }
+                    ]
+                },
+                "meta": {}
+            })
+            .to_string(),
+        );
+        let mut responses = vec![
+            (
+                "200 OK",
+                "mcp-session-id: arcwell-mcp-stale-tools\r\n",
+                x_mcp_initialize_response(),
+                "application/json",
+            ),
+            ("200 OK", "", "", "application/json"),
+            (
+                "401 Unauthorized",
+                "",
+                r#"{"title":"Unauthorized","type":"about:blank","status":401,"detail":"Unauthorized"}"#,
+                "application/json",
+            ),
+            (
+                "200 OK",
+                "",
+                r#"{"token_type":"bearer","expires_in":7200,"access_token":"fresh-mcp-user-token","refresh_token":"fresh-refresh-token"}"#,
+                "application/json",
+            ),
+        ];
+        responses.extend(x_mcp_response_sequence_for_calls(
+            tools,
+            vec![me_response, page],
+        ));
+        let (base, requests) = mock_recording_sequence_server(responses);
+
+        let report = store
+            .x_import_bookmarks_with_base_and_transport(92, 10, &base, XProviderTransport::XApiMcp)
+            .unwrap();
+        assert_eq!(report.seen, 1);
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.pages_fetched, Some(1));
+        assert_eq!(report.stop_reason.as_deref(), Some("provider_exhausted"));
+        assert_eq!(
+            store.get_secret_value("X_BEARER_TOKEN").unwrap().as_deref(),
+            Some("fresh-mcp-user-token")
+        );
+        assert_eq!(
+            store
+                .get_secret_value("X_REFRESH_TOKEN")
+                .unwrap()
+                .as_deref(),
+            Some("fresh-refresh-token")
+        );
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 13);
+        assert!(captured[2].contains("tools/list"), "{}", captured[2]);
+        assert!(
+            captured[2]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer stale-mcp-user-token"),
+            "{}",
+            captured[2]
+        );
+        assert!(
+            captured[3].contains("POST /2/oauth2/token "),
+            "{}",
+            captured[3]
+        );
+        for request in captured.iter().skip(4) {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer fresh-mcp-user-token"),
+                "{request}"
+            );
+            assert!(!request.contains("stale-mcp-user-token"), "{request}");
+        }
+        let stats = store.x_stats().unwrap();
+        assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+        assert_eq!(stats.latest_sync_runs[0].transport, "x_api_mcp");
+        assert_eq!(stats.latest_sync_runs[0].status, "completed");
     });
 }
 
@@ -1624,6 +1939,289 @@ fn severe_worker_x_import_bookmarks_reports_completeness() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].x_id, "wb1");
     assert!(items[0].source_card_id.is_some());
+}
+
+#[test]
+fn severe_worker_x_import_bookmarks_auth_failure_defers_without_retry_storm() {
+    // CLAIM: scheduled bookmark import provider-auth failures are visible in
+    // source health and deferred without burning worker retry attempts.
+    // PRECONDITIONS: a worker-queued x_import_bookmarks job uses a bearer token
+    // that the provider rejects on the first identity lookup.
+    // POSTCONDITIONS: the job is deferred, attempts are restored to zero,
+    // x:bookmarks source health is auth_failed with a future retry, and no
+    // bookmark cursor/import rows are fabricated.
+    // ORACLE: worker report, source_health row, x_sync_runs row, and empty
+    // bookmark item list.
+    // SEVERITY: Severe because an invalid X user token must not let the
+    // resident worker spin through retries or dead-letter scheduled ingestion.
+    clear_x_bearer_env();
+    let store = test_store("worker-x-bookmark-auth-failure-defers");
+    store
+        .set_secret_value("X_BEARER_TOKEN", "provider-rejected-token", "x")
+        .unwrap();
+    let base = mock_status_server(
+        "401 Unauthorized",
+        "",
+        r#"{"title":"Unauthorized","status":401,"detail":"Unauthorized"}"#,
+        "application/json",
+    );
+    let job = store.enqueue_x_import_bookmarks_job(92, 10).unwrap();
+    let report = with_x_api_base(&base, || store.run_worker_once(1)).unwrap();
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.deferred, 1, "{report:#?}");
+    assert_eq!(report.jobs[0].id, job.id);
+    assert_eq!(report.jobs[0].kind, "x_import_bookmarks");
+    assert_eq!(report.jobs[0].status, "deferred");
+    assert_eq!(report.jobs[0].attempts, 0);
+    assert!(report.jobs[0].next_run_at.is_some());
+    let result = report.jobs[0].result_json.as_ref().expect("job result");
+    assert_eq!(result["status"], "deferred");
+    assert_eq!(result["source_health_key"], "x:bookmarks");
+    assert_eq!(result["provider_health_status"], "auth_failed");
+
+    let health = store
+        .get_source_health("x:bookmarks")
+        .unwrap()
+        .expect("bookmark provider auth failure must be visible");
+    assert_eq!(health.status, "auth_failed");
+    assert!(health.next_run_at.is_some());
+    assert!(
+        !serde_json::to_string(&health)
+            .unwrap()
+            .contains("provider-rejected-token")
+    );
+    let stats = store.x_stats().unwrap();
+    assert_eq!(stats.latest_sync_runs[0].stream, "bookmarks");
+    assert_eq!(stats.latest_sync_runs[0].status, "failed");
+    assert_eq!(stats.latest_sync_runs[0].inserted, 0);
+    assert!(
+        store
+            .list_x_items_filtered(None, Some("bookmark"), Some(5))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn severe_worker_x_api_mcp_bookmark_schedule_recurs_with_transport() {
+    // CLAIM: A resident x_bookmarks watch source can schedule the hosted
+    // x-api-mcp bookmark transport repeatedly, not just enqueue the old direct
+    // API job once.
+    // ORACLE: watch-source metadata carries transport into worker job input,
+    // first tick imports through MCP, an immediate tick is skipped by source
+    // health next_run_at, and a forced-due tick imports a second MCP bookmark.
+    // SEVERITY: Severe because recurrence is hollow if the schedule silently
+    // drops transport or ignores source-health backoff.
+    without_x_mcp_env(|| {
+        clear_x_bearer_env();
+        let store = test_store("worker-x-api-mcp-bookmark-recurrence");
+        store
+            .set_secret_value("X_BEARER_TOKEN", "mcp-bookmark-worker-token", "x")
+            .unwrap();
+        write_policy(
+            &store,
+            r#"
+[[rules]]
+id = "allow-worker-x-mcp-bookmarks-enqueue-test"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow worker hosted MCP bookmark recurrence enqueue test"
+priority = 20
+
+[[rules]]
+id = "allow-worker-x-mcp-bookmarks-network-test"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "allow worker hosted MCP bookmark recurrence test"
+priority = 20
+
+[[rules]]
+id = "allow-worker-x-mcp-bookmarks-source-write-test"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "allow source-card write in worker hosted MCP bookmark recurrence test"
+priority = 20
+"#,
+        );
+        let scheduled = store
+            .schedule_x_bookmark_import_with_transport(92, 10, "warm", "active", Some("x-api-mcp"))
+            .unwrap();
+        assert_eq!(scheduled.metadata["transport"], "x-api-mcp");
+
+        let recent = (Utc::now() - chrono::Duration::days(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let first_tools = x_mcp_tools_list_response_for_tools(vec![
+            (
+                "get_users_me",
+                "Get Users Me",
+                vec!["user.fields", "post.fields", "expansions"],
+            ),
+            (
+                "get_users_bookmarks",
+                "Get Users Bookmarks",
+                vec![
+                    "id",
+                    "max_results",
+                    "pagination_token",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            ),
+        ]);
+        let first_me_response = x_mcp_tool_call_content_response(
+            &json!({
+                "data": {
+                    "id": "me",
+                    "username": "me",
+                    "name": "Me"
+                }
+            })
+            .to_string(),
+        );
+        let first_page = x_mcp_tool_call_content_response(
+            &json!({
+                "data": [
+                    {
+                        "id": "wmcp1",
+                        "author_id": "u1",
+                        "text": "First scheduled hosted MCP bookmark.",
+                        "created_at": recent
+                    }
+                ],
+                "includes": {
+                    "users": [
+                        { "id": "u1", "username": "openai", "name": "OpenAI" }
+                    ]
+                },
+                "meta": {}
+            })
+            .to_string(),
+        );
+        let (first_base, first_requests) = mock_recording_sequence_server(
+            x_mcp_response_sequence_for_calls(first_tools, vec![first_me_response, first_page]),
+        );
+        let first = with_x_api_base(&first_base, || store.run_worker_once(1)).unwrap();
+        assert_eq!(first.processed, 1);
+        assert_eq!(first.completed, 1);
+        assert_eq!(first.jobs[0].kind, "x_import_bookmarks");
+        assert_eq!(first.jobs[0].input_json["transport"], "x-api-mcp");
+        assert_eq!(first.jobs[0].result_json.as_ref().unwrap()["imported"], 1);
+        assert_eq!(
+            first.jobs[0].result_json.as_ref().unwrap()["stop_reason"],
+            "provider_exhausted"
+        );
+        assert!(
+            first_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.contains("POST /mcp ")),
+        );
+
+        let immediate = store.run_worker_once(1).unwrap();
+        assert_eq!(immediate.processed, 0);
+
+        store
+            .conn
+            .execute(
+                "UPDATE source_health SET next_run_at = ?1 WHERE key = 'x:bookmarks'",
+                params!["2000-01-01T00:00:00Z"],
+            )
+            .unwrap();
+
+        let second_tools = x_mcp_tools_list_response_for_tools(vec![
+            (
+                "get_users_me",
+                "Get Users Me",
+                vec!["user.fields", "post.fields", "expansions"],
+            ),
+            (
+                "get_users_bookmarks",
+                "Get Users Bookmarks",
+                vec![
+                    "id",
+                    "max_results",
+                    "pagination_token",
+                    "post.fields",
+                    "expansions",
+                    "user.fields",
+                ],
+            ),
+        ]);
+        let second_me_response = x_mcp_tool_call_content_response(
+            &json!({
+                "data": {
+                    "id": "me",
+                    "username": "me",
+                    "name": "Me"
+                }
+            })
+            .to_string(),
+        );
+        let second_page = x_mcp_tool_call_content_response(
+            &json!({
+                "data": [
+                    {
+                        "id": "wmcp2",
+                        "author_id": "u2",
+                        "text": "Second scheduled hosted MCP bookmark.",
+                        "created_at": recent
+                    }
+                ],
+                "includes": {
+                    "users": [
+                        { "id": "u2", "username": "sama", "name": "Sam Altman" }
+                    ]
+                },
+                "meta": {}
+            })
+            .to_string(),
+        );
+        let (second_base, second_requests) = mock_recording_sequence_server(
+            x_mcp_response_sequence_for_calls(second_tools, vec![second_me_response, second_page]),
+        );
+        let second = with_x_api_base(&second_base, || store.run_worker_once(1)).unwrap();
+        assert_eq!(second.processed, 1);
+        assert_eq!(second.completed, 1);
+        assert_eq!(second.jobs[0].input_json["transport"], "x-api-mcp");
+        assert_eq!(second.jobs[0].result_json.as_ref().unwrap()["imported"], 1);
+        assert!(
+            second_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.contains("POST /mcp ")),
+        );
+
+        let sync_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM x_sync_runs WHERE stream = 'bookmarks' AND transport = 'x_api_mcp' AND status = 'completed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sync_count, 2);
+        let items = store
+            .list_x_items_filtered(None, Some("bookmark"), Some(10))
+            .unwrap();
+        let ids = items
+            .iter()
+            .map(|item| item.x_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("wmcp1"));
+        assert!(ids.contains("wmcp2"));
+    });
 }
 
 #[test]

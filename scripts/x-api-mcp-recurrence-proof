@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Copied-home live proof for hosted X MCP bookmark pagination and recurrence.
+
+This script schedules the resident X bookmark watch source with
+transport=x-api-mcp, runs the worker once, forces the source health due in the
+copied home, and runs the worker again. It records whether hosted MCP
+pagination was actually observed separately from whether the worker recurrence
+path completed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+
+
+TOKENISH = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}")
+LONG_SECRET = re.compile(r"[A-Za-z0-9._~+/=-]{40,}")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sanitize(value: str) -> str:
+    value = TOKENISH.sub(r"\1[REDACTED]", value)
+    value = LONG_SECRET.sub("[REDACTED]", value)
+    return value
+
+
+def ensure_arcwell_bin(path: str) -> list[str]:
+    if path:
+        return [path]
+    candidate = repo_root() / "target" / "debug" / "arcwell"
+    if candidate.exists() and os.access(candidate, os.X_OK):
+        return [str(candidate)]
+    return ["cargo", "run", "-p", "arcwell-cli", "--"]
+
+
+def copy_home(source: Path) -> Path:
+    target = Path(tempfile.mkdtemp(prefix="arcwell-x-api-mcp-recurrence-"))
+    if source.exists():
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+    policy = r'''
+[[rules]]
+id = "x-api-mcp-recurrence-allow-enqueue"
+effect = "allow"
+action = "worker.enqueue"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "copied-home hosted X MCP recurrence proof"
+priority = 50
+
+[[rules]]
+id = "x-api-mcp-recurrence-allow-bookmarks"
+effect = "allow"
+action = "provider.network"
+package = "arcwell-x"
+provider = "x"
+source = "x_import_bookmarks"
+reason = "copied-home hosted X MCP recurrence proof"
+priority = 50
+
+[[rules]]
+id = "x-api-mcp-recurrence-allow-oauth"
+effect = "allow"
+action = "provider.oauth"
+package = "arcwell-x"
+provider = "x"
+source = "x_oauth"
+reason = "copied-home hosted X MCP recurrence proof may refresh user-context bearer"
+priority = 50
+
+[[rules]]
+id = "x-api-mcp-recurrence-allow-source-write"
+effect = "allow"
+action = "source.write"
+package = "arcwell-llm-wiki"
+provider = "x"
+source = "source_card_add"
+reason = "copied-home hosted X MCP recurrence proof"
+priority = 50
+'''
+    (target / "arcwell-policy.toml").write_text(policy, encoding="utf-8")
+    return target
+
+
+def run_json(command: list[str], *, env: dict[str, str], timeout: int) -> tuple[dict | None, dict]:
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+        stdout = proc.stdout
+        stderr = proc.stderr
+        returncode = proc.returncode
+        status = "passed" if returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        returncode = None
+        status = "timeout"
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    parsed = None
+    if status == "passed":
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            status = "failed"
+            stderr = (stderr + "\nfailed to parse JSON stdout").strip()
+    return parsed, {
+        "status": status,
+        "returncode": returncode,
+        "duration_ms": elapsed_ms,
+        "command": [sanitize(part) for part in command],
+        "stdout_excerpt": sanitize(stdout)[:4000],
+        "stderr_excerpt": sanitize(stderr)[:4000],
+    }
+
+
+def force_bookmarks_due(home: Path) -> dict:
+    db = home / "arcwell.sqlite3"
+    before = None
+    after = None
+    updated = 0
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT next_run_at FROM source_health WHERE key = 'x:bookmarks'"
+        ).fetchone()
+        before = row[0] if row else None
+        updated = conn.execute(
+            "UPDATE source_health SET next_run_at = ? WHERE key = 'x:bookmarks'",
+            ("2000-01-01T00:00:00Z",),
+        ).rowcount
+        row = conn.execute(
+            "SELECT next_run_at FROM source_health WHERE key = 'x:bookmarks'"
+        ).fetchone()
+        after = row[0] if row else None
+    return {"updated": updated, "before": before, "after": after}
+
+
+def isolate_bookmark_schedule(home: Path) -> dict:
+    db = home / "arcwell.sqlite3"
+    with sqlite3.connect(db) as conn:
+        paused_sources = conn.execute(
+            """
+            UPDATE watch_sources
+            SET status = 'paused',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+            WHERE NOT (source_kind = 'x_bookmarks' AND locator = 'bookmarks')
+              AND status = 'active'
+            """
+        ).rowcount
+        deferred_jobs = conn.execute(
+            """
+            UPDATE wiki_jobs
+            SET status = 'deferred',
+                next_run_at = '2999-01-01T00:00:00Z',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+            WHERE status IN ('pending', 'failed', 'deferred', 'running')
+            """
+        ).rowcount
+    first_due = force_bookmarks_due(home)
+    return {
+        "paused_non_bookmark_watch_sources": paused_sources,
+        "deferred_preexisting_jobs": deferred_jobs,
+        "first_due": first_due,
+    }
+
+
+def x_token_rows(home: Path) -> dict[str, tuple]:
+    rows: dict[str, tuple] = {}
+    with sqlite3.connect(home / "arcwell.sqlite3") as conn:
+        for row in conn.execute(
+            """
+            SELECT name, value, scope, provider, expires_at, updated_at
+            FROM secret_values
+            WHERE name IN ('X_BEARER_TOKEN', 'X_REFRESH_TOKEN')
+            """
+        ):
+            rows[row[0]] = row
+    return rows
+
+
+def write_back_rotated_x_tokens(source_home: Path, copied_home: Path, enabled: bool) -> dict:
+    if not enabled:
+        return {"enabled": False, "updated": 0, "names": []}
+    if source_home.resolve() == copied_home.resolve():
+        return {"enabled": True, "updated": 0, "names": [], "reason": "source home is copied home"}
+    source_rows = x_token_rows(source_home)
+    copied_rows = x_token_rows(copied_home)
+    changed = []
+    for name, copied in copied_rows.items():
+        source = source_rows.get(name)
+        if source is None or source[1:] != copied[1:]:
+            changed.append(copied)
+    if not changed:
+        return {"enabled": True, "updated": 0, "names": []}
+    with sqlite3.connect(source_home / "arcwell.sqlite3") as conn:
+        for row in changed:
+            conn.execute(
+                """
+                INSERT INTO secret_values (name, value, scope, provider, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                  value = excluded.value,
+                  scope = excluded.scope,
+                  provider = excluded.provider,
+                  expires_at = excluded.expires_at,
+                  updated_at = excluded.updated_at
+                """,
+                row,
+            )
+    return {
+        "enabled": True,
+        "updated": len(changed),
+        "names": [row[0] for row in changed],
+        "raw_secret_values_included": False,
+    }
+
+
+def worker_job_result(worker: dict | None) -> dict:
+    if not worker:
+        return {}
+    jobs = worker.get("jobs") or []
+    if not jobs:
+        return {}
+    result = jobs[0].get("result_json") or {}
+    return result if isinstance(result, dict) else {}
+
+
+def worker_transport(worker: dict | None) -> str | None:
+    if not worker:
+        return None
+    jobs = worker.get("jobs") or []
+    if not jobs:
+        return None
+    input_json = jobs[0].get("input_json") or {}
+    return input_json.get("transport")
+
+
+def pagination_probe_detail(first_result: dict, second_result: dict) -> dict:
+    attempts = []
+    for label, result in (("first_worker", first_result), ("second_worker", second_result)):
+        attempts.append(
+            {
+                "worker": label,
+                "pages_fetched": int(result.get("pages_fetched") or 0),
+                "seen": int(result.get("seen") or 0),
+                "requested_limit": result.get("requested_limit"),
+                "stop_reason": result.get("stop_reason"),
+                "next_token_present": bool(result.get("next_token")),
+            }
+        )
+    observed = any(attempt["pages_fetched"] >= 2 for attempt in attempts)
+    exhausted_without_token = all(
+        attempt["pages_fetched"] == 1
+        and attempt["stop_reason"] == "provider_exhausted"
+        and not attempt["next_token_present"]
+        and attempt["requested_limit"] is not None
+        and attempt["seen"] < int(attempt["requested_limit"])
+        for attempt in attempts
+    )
+    if observed:
+        status = "observed_multiple_pages"
+        explanation = "Hosted MCP returned a pagination token and Arcwell fetched at least two bookmark pages."
+    elif exhausted_without_token:
+        status = "provider_exhausted_without_next_token"
+        explanation = (
+            "Hosted MCP returned fewer bookmarks than requested and no next_token on each worker run; "
+            "the live account/window did not expose a second page to follow."
+        )
+    else:
+        status = "not_observed"
+        explanation = "The worker did not produce a completed multi-page hosted-MCP bookmark import."
+    return {
+        "status": status,
+        "observed": observed,
+        "attempts": attempts,
+        "explanation": explanation,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bookmark-days", type=int, default=365)
+    parser.add_argument("--max-bookmarks", type=int, default=150)
+    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--second-attempts", type=int, default=3)
+    parser.add_argument("--retry-sleep-seconds", type=float, default=2.0)
+    parser.add_argument("--no-write-back-rotated-tokens", action="store_true")
+    parser.add_argument("--source-home", default=os.environ.get("ARCWELL_HOME", str(Path.home() / ".arcwell")))
+    parser.add_argument("--arcwell-bin", default=os.environ.get("ARCWELL_BIN", ""))
+    args = parser.parse_args()
+
+    root = repo_root()
+    proof_dir = (
+        root
+        / ".arcwell-dev"
+        / "proofs"
+        / f"x-api-mcp-recurrence-{utc_stamp()}-{os.getpid()}"
+        / "artifacts"
+    )
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    source_home = Path(args.source_home).expanduser()
+    home = copy_home(source_home)
+    base_command = ensure_arcwell_bin(args.arcwell_bin)
+    env = os.environ.copy()
+    env["ARCWELL_HOME"] = str(home)
+
+    schedule, schedule_evidence = run_json(
+        base_command
+        + [
+            "x",
+            "schedule-bookmarks",
+            "--bookmark-days",
+            str(args.bookmark_days),
+            "--max-bookmarks",
+            str(args.max_bookmarks),
+            "--cadence",
+            "hot",
+            "--status",
+            "active",
+            "--transport",
+            "x-api-mcp",
+        ],
+        env=env,
+        timeout=args.timeout,
+    )
+    isolation = isolate_bookmark_schedule(home)
+    first_worker, first_evidence = run_json(
+        base_command + ["worker", "run-once", "--max-jobs", "1"],
+        env=env,
+        timeout=args.timeout,
+    )
+    force_due = force_bookmarks_due(home)
+    second_attempts = []
+    second_worker = None
+    second_evidence = None
+    for attempt in range(1, max(1, args.second_attempts) + 1):
+        worker, evidence = run_json(
+            base_command + ["worker", "run-once", "--max-jobs", "1"],
+            env=env,
+            timeout=args.timeout,
+        )
+        second_attempts.append(
+            {
+                "attempt": attempt,
+                "force_due": force_due,
+                "worker": worker,
+                "evidence": evidence,
+            }
+        )
+        second_worker = worker
+        second_evidence = evidence
+        if (worker or {}).get("completed") == 1:
+            break
+        if attempt < max(1, args.second_attempts):
+            time.sleep(max(0.0, args.retry_sleep_seconds))
+            force_due = force_bookmarks_due(home)
+    stats, stats_evidence = run_json(base_command + ["x", "stats"], env=env, timeout=args.timeout)
+
+    first_result = worker_job_result(first_worker)
+    second_result = worker_job_result(second_worker)
+    first_pages = int(first_result.get("pages_fetched") or 0)
+    second_pages = int(second_result.get("pages_fetched") or 0)
+    recurrence_observed = (
+        (first_worker or {}).get("completed") == 1
+        and (second_worker or {}).get("completed") == 1
+        and worker_transport(first_worker) == "x-api-mcp"
+        and worker_transport(second_worker) == "x-api-mcp"
+    )
+    pagination_observed = first_pages >= 2 or second_pages >= 2
+    pagination_detail = pagination_probe_detail(first_result, second_result)
+    transport_sync_runs = []
+    if stats:
+        transport_sync_runs = [
+            run
+            for run in stats.get("latest_sync_runs", [])
+            if run.get("stream") == "bookmarks" and run.get("transport") == "x_api_mcp"
+        ]
+    status = (
+        "passed"
+        if recurrence_observed and pagination_observed
+        else "partial_no_pagination"
+        if recurrence_observed
+        else "failed"
+    )
+    completed_any_bookmark_worker = (first_worker or {}).get("completed") == 1 or (
+        second_worker or {}
+    ).get("completed") == 1
+    if completed_any_bookmark_worker:
+        token_write_back = write_back_rotated_x_tokens(
+            source_home,
+            home,
+            not args.no_write_back_rotated_tokens,
+        )
+    else:
+        token_write_back = {
+            "enabled": not args.no_write_back_rotated_tokens,
+            "updated": 0,
+            "names": [],
+            "skipped": True,
+            "reason": "no completed x-api-mcp bookmark worker job",
+        }
+    packet = {
+        "feature": "x_api_mcp_bookmark_pagination_and_recurrence",
+        "status": status,
+        "proof_level": "copied_home_live_provider_worker_proof",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "source_home_copied_from": str(source_home),
+        "copied_home": str(home),
+        "arcwell_command": base_command,
+        "bookmark_days": args.bookmark_days,
+        "max_bookmarks": args.max_bookmarks,
+        "schedule": schedule,
+        "isolation": isolation,
+        "first_worker": first_worker,
+        "force_due": force_due,
+        "second_worker": second_worker,
+        "second_attempts": second_attempts,
+        "stats": stats,
+        "pagination_observed": pagination_observed,
+        "pagination_probe": pagination_detail,
+        "recurrence_observed": recurrence_observed,
+        "x_api_mcp_bookmark_sync_runs_seen": len(transport_sync_runs),
+        "token_write_back": token_write_back,
+        "evidence": {
+            "schedule": schedule_evidence,
+            "first_worker": first_evidence,
+            "second_worker": second_evidence,
+            "stats": stats_evidence,
+        },
+        "non_claims": [
+            "This proves a bounded copied-home worker recurrence replay, not multi-day wall-clock launchd/systemd recurrence.",
+            "This proves hosted MCP bookmark pagination only when pagination_observed is true.",
+            "This does not prove DMs, media, Articles, streams, social writes, or provider quota capacity beyond this controlled run.",
+            "Copied-home state isolates cursors/source-health from the real Arcwell home.",
+        ],
+    }
+    path = proof_dir / "proof-packet.json"
+    path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(path)
+    return 0 if status in {"passed", "partial_no_pagination"} else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,6 +8,22 @@ fn issue_schedule_status_rank(status: &str) -> u8 {
     }
 }
 
+fn issue_schedule_catch_up_status(
+    schedule_status: &str,
+    has_active_job: bool,
+    due_slot_count: usize,
+) -> String {
+    if schedule_status != "active" {
+        "inactive".to_string()
+    } else if has_active_job {
+        "active_job".to_string()
+    } else if due_slot_count > 0 {
+        "due".to_string()
+    } else {
+        "not_due".to_string()
+    }
+}
+
 fn issue_schedule_tick_type(tick_key: &str) -> &'static str {
     if tick_key.starts_with("issue-") {
         "scheduled"
@@ -278,6 +294,13 @@ impl Store {
     }
 
     pub fn issue_schedule_ops_summary(&self) -> Result<Vec<IssueScheduleOpsSummary>> {
+        self.issue_schedule_ops_summary_at(Utc::now())
+    }
+
+    pub(crate) fn issue_schedule_ops_summary_at(
+        &self,
+        now_utc: DateTime<Utc>,
+    ) -> Result<Vec<IssueScheduleOpsSummary>> {
         let schedules = self.list_issue_schedules()?;
         let ticks = self.list_issue_schedule_ticks(None)?;
         let mut summaries = Vec::with_capacity(schedules.len());
@@ -347,6 +370,27 @@ impl Store {
                 self.issue_schedule_tick_delivery_proof(latest_manual_tick)?;
             let latest_sent_delivery_proof =
                 self.issue_schedule_tick_delivery_proof(latest_sent_tick)?;
+            let has_active_job = self.issue_schedule_has_active_job(&schedule.id)?;
+            let due_slots = if schedule.status == "active" {
+                self.issue_schedule_due_slots(&schedule, now_utc)?
+            } else {
+                Vec::new()
+            };
+            let next_due_at = due_slots.first().cloned();
+            let next_scheduled_at = if schedule.status == "active" {
+                Some(issue_schedule_next_scheduled_slot(
+                    &schedule.created_at,
+                    schedule.hour,
+                    schedule.minute,
+                    &schedule.time_zone,
+                    now_utc,
+                )?)
+            } else {
+                None
+            };
+            let due_slot_count = due_slots.len();
+            let catch_up_status =
+                issue_schedule_catch_up_status(&schedule.status, has_active_job, due_slot_count);
 
             summaries.push(IssueScheduleOpsSummary {
                 schedule_id: schedule.id,
@@ -359,6 +403,12 @@ impl Store {
                 hour: schedule.hour,
                 minute: schedule.minute,
                 catch_up_hours: schedule.catch_up_hours,
+                has_active_job,
+                due_slot_count,
+                next_due_at,
+                next_scheduled_at,
+                catch_up_status,
+                due_slots,
                 tick_status_counts,
                 tick_type_counts,
                 latest_tick_due_at: latest_tick.map(|tick| tick.due_at.clone()),

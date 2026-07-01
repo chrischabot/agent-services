@@ -6,6 +6,7 @@ static LOOPBACK_URL_INGEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static REDDIT_BEARER_TOKEN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static X_API_BASE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static X_MCP_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static X_TRANSPORT_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static XURL_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn with_loopback_url_ingest_allowed<T>(f: impl FnOnce() -> T) -> T {
@@ -149,6 +150,29 @@ fn without_x_mcp_env<T>(f: impl FnOnce() -> T) -> T {
             std::env::set_var("ARCWELL_X_MCP_BOOKMARKS_TOOL", previous);
         } else {
             std::env::remove_var("ARCWELL_X_MCP_BOOKMARKS_TOOL");
+        }
+    }
+    match result {
+        Ok(value) => value,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn without_x_transport_env<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = X_TRANSPORT_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var_os("ARCWELL_X_TRANSPORT");
+    unsafe {
+        std::env::remove_var("ARCWELL_X_TRANSPORT");
+    }
+    let result = catch_unwind(AssertUnwindSafe(f));
+    unsafe {
+        if let Some(previous) = previous {
+            std::env::set_var("ARCWELL_X_TRANSPORT", previous);
+        } else {
+            std::env::remove_var("ARCWELL_X_TRANSPORT");
         }
     }
     match result {

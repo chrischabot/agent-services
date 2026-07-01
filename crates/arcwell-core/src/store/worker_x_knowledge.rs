@@ -16,8 +16,27 @@ impl Store {
             .unwrap_or(10) as usize;
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let response =
-            self.x_recent_search_with_base_and_job_id(query, max_results, &endpoint, job_id)?;
+        let transport = input.get("transport").and_then(Value::as_str);
+        let response = if transport
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            let transport = XProviderTransport::parse(transport)?;
+            self.x_recent_search_with_base_transport_and_job_id(
+                query,
+                max_results,
+                &endpoint,
+                transport,
+                job_id,
+            )?
+        } else {
+            self.x_recent_search_with_base_default_and_job_id(
+                query,
+                max_results,
+                &endpoint,
+                job_id,
+            )?
+        };
         Ok(json!(response))
     }
 
@@ -30,10 +49,54 @@ impl Store {
             .get("max_bookmarks")
             .and_then(Value::as_u64)
             .unwrap_or(100) as usize;
+        let transport = input.get("transport").and_then(Value::as_str);
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let response =
-            self.x_import_bookmarks_with_base(bookmark_days, max_bookmarks, &endpoint)?;
+        let response = if transport
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            let transport = XProviderTransport::parse(transport)?;
+            self.x_import_bookmarks_with_base_and_transport(
+                bookmark_days,
+                max_bookmarks,
+                &endpoint,
+                transport,
+            )?
+        } else {
+            self.x_import_bookmarks_with_base(bookmark_days, max_bookmarks, &endpoint)?
+        };
+        if let Some(lineage) = input.get("lineage")
+            && let Some(source_key) = lineage.get("watch_source_key").and_then(Value::as_str)
+        {
+            let source_kind = lineage
+                .get("health_source_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("x_import_bookmarks");
+            let locator = lineage
+                .get("locator")
+                .and_then(Value::as_str)
+                .unwrap_or("bookmarks");
+            let next_run_at = lineage
+                .get("cadence")
+                .and_then(Value::as_str)
+                .and_then(watch_source_cadence_seconds)
+                .map(now_plus_seconds);
+            self.record_source_success(SourceHealthUpdate {
+                key: source_key,
+                provider: "x",
+                source_kind,
+                locator,
+                last_item_id: response.items.first().map(|item| item.x_id.as_str()),
+                last_item_date: response
+                    .items
+                    .first()
+                    .and_then(|item| item.created_at.as_deref()),
+                cursor_key: None,
+                cursor_value: response.next_token.as_deref(),
+                next_run_at: next_run_at.as_deref(),
+            })?;
+        }
         Ok(json!(response))
     }
 

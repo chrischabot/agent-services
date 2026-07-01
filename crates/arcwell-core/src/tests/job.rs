@@ -1639,6 +1639,122 @@ fn severe_job_weekly_report_filters_us_only_roles_and_groups_location_duplicates
 }
 
 #[test]
+fn severe_job_weekly_report_delivery_filters_roles_below_score_floor() {
+    // CLAIM: the reader-facing job scan email omits role entries whose
+    // displayed score is below 50%, even when they are live, remote-Europe,
+    // and newly observed by source refresh.
+    // ORACLE: a strong unscored role appears in new-openings and
+    // currently-open email sections, while a UK-plausible unscored role with a
+    // sub-50 heuristic score is absent from both the Markdown and HTML email.
+    // SEVERITY: Severe because low-fit noise directly undermines the daily
+    // job scan's usefulness as an apply-now inventory.
+    let store = test_store("job-weekly-email-score-floor");
+    let profile = job_fixture_profile(&store);
+    let evidence = job_fixture_evidence(&store, &profile.id);
+    let role_input = |canonical: &str,
+                      title: &str,
+                      core_requirements: Vec<String>,
+                      implied_business_problem: &str,
+                      why_they_might_need_user: &str|
+     -> JobRoleCardInput {
+        JobRoleCardInput {
+            company: "Strong DevTool Co".to_string(),
+            role_title: title.to_string(),
+            canonical_url: Some(format!("https://jobs.example.com/{canonical}")),
+            source_family: "company".to_string(),
+            source_url: format!("https://jobs.example.com/{canonical}"),
+            source_confidence: "canonical_confirmed".to_string(),
+            date_accessed: Some("2026-07-01T09:00:00Z".to_string()),
+            posting_freshness: "same_day".to_string(),
+            location: Some("Remote Europe".to_string()),
+            work_mode: Some("remote".to_string()),
+            company_stage_or_size: Some("startup".to_string()),
+            role_seniority: Some("senior".to_string()),
+            core_requirements,
+            implied_business_problem: Some(implied_business_problem.to_string()),
+            why_they_might_need_user: Some(why_they_might_need_user.to_string()),
+            evidence_card_ids: vec![evidence.id.clone()],
+            gaps_or_blockers: vec![],
+            cluster: Some("developer-tools".to_string()),
+            current_status: "live".to_string(),
+            metadata: json!({}),
+        }
+    };
+    let strong_role = store
+        .record_job_role_card(role_input(
+            "developer-advocate",
+            "Developer Advocate",
+            vec![
+                "developer relations".to_string(),
+                "developer tools".to_string(),
+                "technical writing".to_string(),
+            ],
+            "Help developers adopt a complex developer platform.",
+            "Senior developer-facing engineering and writing experience maps to the role.",
+        ))
+        .unwrap();
+    let low_role = store
+        .record_job_role_card(role_input(
+            "graduate-community-intern",
+            "Graduate Community Intern",
+            vec!["community operations".to_string()],
+            "Help coordinate early community programs.",
+            "This is entry-level coordination rather than senior developer-facing systems work.",
+        ))
+        .unwrap();
+    assert!(
+        job_report_role_heuristic_score(&strong_role) >= 50.0,
+        "{strong_role:?}"
+    );
+    assert!(
+        job_report_role_heuristic_score(&low_role) < 50.0,
+        "{low_role:?}"
+    );
+    for role in [&strong_role, &low_role] {
+        store
+            .record_job_role_status_event(JobRoleStatusEventInput {
+                role_id: role.id.clone(),
+                run_id: None,
+                status: "new".to_string(),
+                previous_tier: None,
+                current_tier: None,
+                note: Some(JOB_SOURCE_REFRESH_NEW_ROLE_EVENT_NOTE.to_string()),
+            })
+            .unwrap();
+    }
+
+    let report = store
+        .compile_job_weekly_report(&profile.id, "Remote Europe developer roles")
+        .unwrap();
+    let delivery_body = render_job_weekly_report_delivery_body(&report.body);
+    assert!(
+        delivery_body.contains("## New openings found"),
+        "{delivery_body}"
+    );
+    assert!(
+        delivery_body.contains("## Currently open roles"),
+        "{delivery_body}"
+    );
+    assert!(
+        delivery_body.contains(
+            "**[Developer Advocate at Strong DevTool Co](https://jobs.example.com/developer-advocate)**  Europe; remote"
+        ),
+        "{delivery_body}"
+    );
+    assert!(
+        !delivery_body.contains("Graduate Community Intern")
+            && !delivery_body.contains("graduate-community-intern"),
+        "{delivery_body}"
+    );
+    let html = render_email_html_from_markdown("Arcwell job scan", &delivery_body).unwrap();
+    assert!(
+        html.contains("https://jobs.example.com/developer-advocate"),
+        "{html}"
+    );
+    assert!(!html.contains("graduate-community-intern"), "{html}");
+}
+
+#[test]
 fn severe_job_weekly_report_delivery_keeps_full_open_inventory_over_note_limit() {
     // CLAIM: daily job-scan email preparation preserves the full plausible
     // open-role inventory even when the body is larger than the generic notes
@@ -4481,9 +4597,10 @@ priority = 10
         .unwrap();
     assert!(weekly_report.body.contains("## New openings found"));
     assert!(
-        weekly_report
-            .body
-            .contains("Staff Agent Platform Engineer at Example"),
+        weekly_report.body.contains("## Role Changes")
+            && weekly_report
+                .body
+                .contains("Example - Staff Agent Platform Engineer: new"),
         "{}",
         weekly_report.body
     );

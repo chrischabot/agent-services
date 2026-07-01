@@ -245,6 +245,12 @@ PR, implementation note, or final report:
       because no active mailbox gaps remain. Missing Gmail verifier credentials
       for future ready gaps now write `email:gmail-mailbox-verifier` source health
       instead of requiring a manual verifier run to expose the blocker.
+      `arcwell email recovery-plan` and MCP `email_delivery_recovery_plan`
+      classify current delivery gaps without side effects: unverified sends map
+      to mailbox verification, Trash/Spam maps to placement repair, and
+      not-observed/unknown states require explicit resend review before any new
+      user-visible duplicate delivery. This is the recovery policy surface, not
+      an automatic resend implementation.
       Mailbox observations for not-observed, unknown, Trash, and Spam
       placements now write per-delivery source-health alerts, while Inbox
       placement clears that per-delivery row. `arcwell email
@@ -256,7 +262,10 @@ PR, implementation note, or final report:
       uncontrolled mailbox mutation. Bad-placement gaps now also become
       throttled resident-worker-visible `email_delivery_mailbox_repair` jobs;
       absent Gmail modify credentials, the job records
-      `email:gmail-mailbox-repair` source health and leaves the gap open. The
+      `email:gmail-mailbox-repair` source health and leaves the gap open. A
+      configured-worker severe test now proves the local wake-up chain from
+      old provider-accepted send, to Gmail Trash observation, to next-pass
+      Inbox repair without duplicate resend. The
       2026-06-30 09:37 UTC catch-up briefing was originally mailbox-observed in
       Gmail with `TRASH`/`CATEGORY_UPDATES` labels, so the user-visible failure
       was mailbox placement rather than scheduler catch-up; host-Gmail repair
@@ -264,8 +273,14 @@ PR, implementation note, or final report:
       Gmail OAuth mailbox proof and Arcwell-owned Gmail repair execution are
       still open; the OAuth repair path and managed Gmail refresh path are
       local/mock proven and require an initial explicit Gmail OAuth grant with
-      modify scope. A broader
-      automatic retry policy for unobserved/trash/spam sends is still open. The
+      modify scope. `scripts/gmail-mailbox-proof --status` now emits a
+      read-only real-home recovery readiness packet, and
+      `scripts/gmail-mailbox-proof --self-test` proves the disposable
+      mock-provider send -> Gmail Trash verify -> Inbox repair chain through
+      the CLI/worker path. The guarded live mode is ready but intentionally
+      requires `ARCWELL_GMAIL_PROOF_CONFIRM=verify`, and label repair further
+      requires `ARCWELL_GMAIL_REPAIR_CONFIRM=repair`. A broader automatic
+      resend policy for not-observed/unknown sends is still open. The
       older June 29 oversized tick remains a historical blocked
       row. 2026-06-30 follow-up:
       `ops_snapshot`, compact MCP ops, and `/ops/ui` now expose issue schedule
@@ -351,6 +366,18 @@ PR, implementation note, or final report:
       Remaining work is still multi-day recurrence, complete source-family
       freshness, and editorial/report quality over broader live corpora, not
       these repaired local/live failure classes.
+      2026-07-01 shakeout: overnight X OAuth refresh did break again, proving
+      the token lifecycle still needed real next-day validation. Browser
+      reauthorization completed without user-supplied token material, endpoint
+      scope probe passed, all 170 configured X watch sources were polled with
+      0 failures/rate limits, 310 fresh watched tweets were imported across the
+      bounded passes, 84 X-linked digest candidates were created, X portable
+      export was refreshed and validated at 7,860 rows, and strict doctor went
+      green after rebuilding/restarting the resident worker onto the binary
+      that records successful `x:oauth-refresh` recovery. Remaining work is to
+      observe the native 7am issue tick after it is actually due and keep
+      proving recurrence over multiple days; this was not a July 1 7am delivery
+      proof because the schedule was still in the future during the shakeout.
       replace the remaining Codex-side six-hour catch-up wrapper with native
       fixed-time scan scheduling or prove watch-source cadence is sufficient,
       record multi-day sleep/shutdown/restart catch-up proof, work down
@@ -709,32 +736,52 @@ PR, implementation note, or final report:
 - [ ] Keep `arcwell-x` status honest: every checked X item must state whether
       it is only local proof, copied-home live proof, real-home live proof, or
       operational scheduled proof.
-- [ ] Promote the X MCP/xurl path beyond `Partial` only after recurrence and
-      pagination gaps are closed. Current implemented slice: `direct-api`
-      remains the default provider transport; `xurl-token-api` is wired through
-      CLI and MCP for recent search and bookmark import, delegates only token
-      acquisition to `xurl token`, and keeps Arcwell policy, cost,
+- [ ] Promote the X MCP/xurl path beyond `Partial` only after broader quota,
+      tier, and multi-day recurrence gaps are closed. Current implemented slice:
+      `direct-api` remains the broad fallback/default for X surfaces that do not
+      explicitly opt into MCP. Recent search now defaults to hosted
+      `x-api-mcp` when an app-only bearer alias such as `TWITTER_BEARER_TOKEN`
+      is configured, otherwise it uses direct API. `xurl-token-api` is wired
+      through CLI and MCP for recent search and bookmark import, delegates only
+      token acquisition to `xurl token`, and keeps Arcwell policy, cost,
       source-card/wiki projection, cursor, source-health, and sync-run writes.
       `x-api-mcp` now calls hosted X MCP directly: recent search uses
-      app-only bearer aliases such as `TWITTER_BEARER_TOKEN` with
       `search_posts_all`, while bookmark import uses user-context
-      `X_BEARER_TOKEN` through hosted `get_users_me` and `get_users_bookmarks`.
-      Severe tests prove xurl-token local token acquisition, hosted MCP
-      recent-search canonical writes, prose/non-JSON fail-closed cursor safety,
-      misleading-tool selection resistance, and hosted MCP bookmark canonical
-      collections/edge metadata. Current proof packets:
-      `.arcwell-dev/proofs/x-mcp-xurl-proof-20260630T182334Z-9284/artifacts/proof-packet.json`
-      is still `blocked_auth` because local `xurl` has no official X MCP bridge
-      `CLIENT_ID`/`CLIENT_SECRET` env and no registered app/cached token;
-      `.arcwell-dev/proofs/x-transport-comparison-20260630T190356Z-72790/artifacts/proof-packet.json`
+      `X_BEARER_TOKEN` through hosted `get_users_me` and paginated
+      `get_users_bookmarks`. Scheduled X bookmark watch sources can persist
+      `transport=x-api-mcp` into resident worker jobs. Severe tests prove
+      xurl-token local token acquisition, hosted MCP recent-search canonical
+      writes, transportless recent-search MCP adoption with app bearer aliases,
+      prose/non-JSON fail-closed cursor safety, misleading-tool selection
+      resistance, hosted MCP bookmark pagination/canonical collections/edge
+      metadata, and bounded local worker recurrence with x-api-mcp transport
+      preserved. Hosted MCP bookmark import now retries once after a refreshable
+      MCP 401 by refreshing stored X OAuth material; severe tests cover the
+      provider-rejected-bearer retry path. `scripts/x-api-mcp-recurrence-proof`
+      writes back rotated X bearer/refresh rows only after a successful
+      copied-home bookmark worker completion, and records only row names/counts.
+      Current proof packets:
+      `.arcwell-dev/proofs/x-mcp-xurl-proof-20260701T040008Z-28334/artifacts/proof-packet.json`
+      is still `blocked_auth` because local `xurl` has no registered app or
+      cached OAuth token; official docs require an X app plus `xurl auth oauth2`
+      / `xurl mcp` setup for the full user-context bridge;
+      `.arcwell-dev/proofs/x-transport-comparison-20260630T212343Z-31970/artifacts/proof-packet.json`
       scores `x-api-mcp` 8.0, `direct-api` 7.4, and `xurl-token-api` 2.6 for
       copied-home live recent search; and
       `.arcwell-dev/proofs/x-api-mcp-bookmarks-live-20260630T190104Z-62057/artifacts/proof-packet.json`
       passes one copied-home hosted MCP bookmark page with preserved
-      `next_token`. Remaining work: register/authorize the local xurl app if we
-      still want the xurl bridge, prove hosted MCP bookmark pagination beyond one
-      page, decide whether `x-api-mcp` should become the default recent-search
-      transport, and rerun broader quota/tier/live recurrence matrices.
+      `next_token`; and
+      `.arcwell-dev/proofs/x-api-mcp-recurrence-20260701T040030Z-32222/artifacts/proof-packet.json`
+      is the latest successful copied-home live worker proof with two
+      successful `transport=x-api-mcp` bookmark runs after forced due-time
+      replay. That packet is `partial_no_pagination`: recurrence was observed,
+      current X OAuth refresh is live again, and the proof packet explicitly
+      classifies pagination as `provider_exhausted_without_next_token` because
+      hosted MCP returned 99 API-visible duplicate bookmarks, one page, and no
+      `next_token` on both worker runs. Remaining work: register/authorize the
+      local xurl app if we still want the official bridge, run a hosted-MCP
+      bookmark pagination proof with enough provider-returned data to cross a
+      page boundary, and rerun broader quota/tier/live recurrence matrices.
 - [ ] Treat the 2026-06-25 X knowledge-system proof as the current baseline, not
       the finish line. Latest repeatable proof saw 1,010 bookmark collections,
       5,228 X source cards, three deterministic clusters (`model-launches`,
@@ -1841,11 +1888,17 @@ PR, implementation note, or final report:
       leaves unattempted source health/cursors untouched. `x repair-health`
       now reconciles stale X source-health failures only when later successful
       sync rows prove the failure obsolete, and defers stale `rate_limited`
-      rows without marking them healthy. Real-home run on 2026-06-26 repaired
+      rows without marking them healthy. It also supersedes historical
+      `x_import_bookmarks` dead letters caused by the old provider-network
+      policy gap only after a current deferred replacement job exists, so the
+      auth/rate blocker remains visible. Real-home run on 2026-06-26 repaired
       one stale bookmark failure, deferred 724 rate-limited watch rows for 24
       hours, and reduced X blocking stats to zero while keeping those 724 rows
-      visibly `rate_limited`. Remaining work: provider-plan capacity estimates,
-      adaptive per-window fanout, and successful durable provider reads for the
+      visibly `rate_limited`; real-home run on 2026-07-01 superseded 37 stale
+      bookmark policy-deferred dead letters and reduced wiki dead letters to
+      zero while X source health still showed the live auth blocker. Remaining
+      work: provider-plan capacity estimates, adaptive per-window fanout, X
+      OAuth reauthorization, and successful durable provider reads for the
       deferred rows.
 - [ ] Complete X watch-source curation beyond the first dry-run/local-restore
       slice. Schema v21 now records durable curation runs, decisions, evidence,

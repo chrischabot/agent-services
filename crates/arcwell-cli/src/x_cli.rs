@@ -27,6 +27,7 @@ pub(crate) fn x_oauth_reauthorize(
     client_id: Option<&str>,
     redirect_uri: Option<&str>,
     client_secret: Option<&str>,
+    public_client: bool,
     scopes: &[String],
     timeout_seconds: u64,
     probe_search_query: &str,
@@ -43,10 +44,10 @@ pub(crate) fn x_oauth_reauthorize(
         .context("configuring OAuth callback listener")?;
     let start = store.x_oauth_authorize_url(&client_id, &redirect_uri, &preflight.scopes)?;
     eprintln!(
-        "Arcwell X OAuth reauthorize pending: redirect_uri={} scopes={} authorization_url={}",
+        "Arcwell X OAuth reauthorize pending: redirect_uri={} scopes={} authorization_endpoint={}",
         redirect_uri,
         preflight.scopes.join(","),
-        start.authorization_url
+        oauth_authorization_endpoint(&start.authorization_url)
     );
     if open_browser {
         open_browser_url(&start.authorization_url)?;
@@ -66,6 +67,7 @@ pub(crate) fn x_oauth_reauthorize(
         &callback.code,
         &start.code_verifier,
         client_secret,
+        public_client,
     )?;
     let probe = store.x_oauth_probe(Some(probe_search_query))?;
     let status = if probe.status == "passed" {
@@ -160,8 +162,16 @@ pub(crate) fn x_oauth_callback_timeout_context(
     redirect_uri: &str,
 ) -> String {
     format!(
-        "X OAuth browser callback did not complete after opening authorization_url={authorization_url}; Chrome may still be on the login page, the X app may not accept redirect_uri={redirect_uri}, or the browser session may require an interactive account challenge"
+        "X OAuth browser callback did not complete after opening authorization_endpoint={}; Chrome may still be on the login page, the X app may not accept redirect_uri={redirect_uri}, or the browser session may require an interactive account challenge",
+        oauth_authorization_endpoint(authorization_url)
     )
+}
+
+pub(crate) fn oauth_authorization_endpoint(authorization_url: &str) -> &str {
+    authorization_url
+        .split_once('?')
+        .map(|(endpoint, _)| endpoint)
+        .unwrap_or(authorization_url)
 }
 
 pub(crate) fn parse_x_oauth_callback_request(
@@ -317,9 +327,15 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
             max_results,
             transport.as_deref(),
         )?),
-        XSubcommand::EnqueueRecentSearch { query, max_results } => {
-            print_json(&store.enqueue_x_recent_search_job(&query, max_results)?)
-        }
+        XSubcommand::EnqueueRecentSearch {
+            query,
+            max_results,
+            transport,
+        } => print_json(&store.enqueue_x_recent_search_job_with_transport(
+            &query,
+            max_results,
+            transport.as_deref(),
+        )?),
         XSubcommand::ImportBookmarks {
             bookmark_days,
             max_bookmarks,
@@ -334,11 +350,13 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
             max_bookmarks,
             cadence,
             status,
-        } => print_json(&store.schedule_x_bookmark_import(
+            transport,
+        } => print_json(&store.schedule_x_bookmark_import_with_transport(
             bookmark_days,
             max_bookmarks,
             &cadence,
             &status,
+            transport.as_deref(),
         )?),
         XSubcommand::ClusterRadarRun {
             run_id,
@@ -431,6 +449,7 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
             code,
             code_verifier,
             client_secret,
+            public_client,
         } => {
             let client_id = store.resolve_x_oauth_client_id(client_id.as_deref())?;
             let redirect_uri = store.resolve_x_oauth_redirect_uri(redirect_uri.as_deref())?;
@@ -440,12 +459,14 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
                 &code,
                 &code_verifier,
                 client_secret.as_deref(),
+                public_client,
             )?)
         }
         XSubcommand::OauthReauthorize {
             client_id,
             redirect_uri,
             client_secret,
+            public_client,
             scopes,
             timeout_seconds,
             probe_search_query,
@@ -455,6 +476,7 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
             client_id.as_deref(),
             redirect_uri.as_deref(),
             client_secret.as_deref(),
+            public_client,
             &scopes,
             timeout_seconds,
             &probe_search_query,
@@ -463,14 +485,20 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
         XSubcommand::OauthRefresh {
             client_id,
             client_secret,
+            public_client,
         } => {
             let client_id = store.resolve_x_oauth_client_id(client_id.as_deref())?;
-            print_json(&store.x_oauth_refresh(&client_id, client_secret.as_deref())?)
+            print_json(&store.x_oauth_refresh(
+                &client_id,
+                client_secret.as_deref(),
+                public_client,
+            )?)
         }
         XSubcommand::OauthRevoke {
             name,
             client_id,
             client_secret,
+            public_client,
             token_type_hint,
             delete_local,
         } => {
@@ -479,6 +507,7 @@ pub(crate) fn x_command(store: Store, args: XCommand) -> Result<()> {
                 &name,
                 &client_id,
                 client_secret.as_deref(),
+                public_client,
                 token_type_hint.as_deref(),
                 delete_local,
             )?)

@@ -169,6 +169,30 @@ fn severe_mcp_channel_delivery_observations_round_trip_mailbox_proof() {
         trash_gaps[0]["verification_state"],
         json!("mailbox_bad_placement_trash")
     );
+    let recovery_plan = call_mcp_tool(
+        &paths,
+        "email_delivery_recovery_plan",
+        json!({ "limit": 10 }),
+    )
+    .unwrap();
+    assert_eq!(recovery_plan["inspected"], json!(1));
+    assert_eq!(
+        recovery_plan["automatic_repair_candidates"],
+        json!(1),
+        "{recovery_plan:#?}"
+    );
+    assert_eq!(
+        recovery_plan["items"][0]["recommended_action"],
+        json!("repair_mailbox_placement")
+    );
+    assert_eq!(
+        recovery_plan["items"][0]["automatic_worker_action"],
+        json!("email_delivery_mailbox_repair")
+    );
+    assert_eq!(
+        recovery_plan["items"][0]["requires_explicit_resend_approval"],
+        json!(false)
+    );
     let repair_without_credentials = call_mcp_tool(
         &paths,
         "email_delivery_mailbox_repair",

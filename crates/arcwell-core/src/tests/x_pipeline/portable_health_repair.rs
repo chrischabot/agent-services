@@ -714,6 +714,13 @@ fn severe_x_source_health_status_matrix_is_visible_to_stats_and_doctor() {
             .iter()
             .any(|warning| warning == "X source health: 7 non-healthy source row(s)")
     );
+    assert!(
+        health
+            .warnings
+            .iter()
+            .any(|warning| warning
+                == "X OAuth reauthorization required: 1 auth-failed source row(s)")
+    );
     let doctor = store
         .doctor(DoctorOptions {
             strict: true,
@@ -726,6 +733,13 @@ fn severe_x_source_health_status_matrix_is_visible_to_stats_and_doctor() {
             .failures
             .iter()
             .any(|failure| failure == "X source health: 7 non-healthy source row(s)")
+    );
+    assert!(
+        doctor
+            .failures
+            .iter()
+            .any(|failure| failure
+                == "X OAuth reauthorization required: 1 auth-failed source row(s)")
     );
 }
 
@@ -849,6 +863,7 @@ fn severe_x_repair_health_reconciles_success_and_defers_quota_without_fake_green
     assert_eq!(report.repaired_watch_health, 0);
     assert_eq!(report.retired_legacy_x_handle_health, 1);
     assert_eq!(report.retired_orphan_x_monitor_health, 1);
+    assert_eq!(report.superseded_stale_bookmark_dead_letters, 0);
     assert_eq!(report.rate_limited_deferred, 1);
 
     let bookmark = store.get_source_health("x:bookmarks").unwrap().unwrap();
@@ -876,6 +891,112 @@ fn severe_x_repair_health_reconciles_success_and_defers_quota_without_fake_green
     assert_eq!(
         after.source_health_by_status.get("rate_limited").copied(),
         Some(1)
+    );
+}
+
+#[test]
+fn severe_x_repair_health_supersedes_stale_bookmark_policy_dead_letters_only_with_replacement() {
+    // CLAIM: X health repair may retire old bookmark import dead letters caused
+    // by obsolete policy drift, but only after the worker has a deferred
+    // replacement that preserves the real auth/rate blocker.
+    // PRECONDITIONS: Two old bookmark jobs dead-lettered on the exact historical
+    // provider.network policy denial, one unrelated dead letter exists, and no
+    // replacement exists at first.
+    // POSTCONDITIONS: The first repair leaves all dead letters intact; after a
+    // deferred bookmark replacement is present, only the stale bookmark policy
+    // dead letters become superseded and disappear from health dead-letter
+    // counts.
+    // ORACLE: repair report counts, wiki_jobs statuses, and health dead-letter
+    // warning count.
+    // SEVERITY: Severe because broad cleanup could hide genuine failed work,
+    // while no cleanup leaves obsolete retry storms as permanent ops noise.
+    let store = test_store("x-bookmark-dead-letter-repair");
+    let old_error = "policy deferred provider.network: no matching policy rule; defer to explicit user or higher-level policy";
+    for id in [
+        "stale-bookmark-dead-letter-1",
+        "stale-bookmark-dead-letter-2",
+    ] {
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO wiki_jobs
+                  (id, kind, status, input_json, result_json, error, attempts,
+                   max_attempts, leased_until, worker_id, next_run_at,
+                   dead_lettered_at, created_at, updated_at)
+                VALUES
+                  (?1, 'x_import_bookmarks', 'dead_lettered',
+                   '{"bookmark_days":36500,"max_bookmarks":100000}', NULL, ?2,
+                   3, 3, NULL, NULL, NULL, '2026-07-01T00:00:00+00:00',
+                   '2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00')
+                "#,
+                params![id, old_error],
+            )
+            .unwrap();
+    }
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO wiki_jobs
+              (id, kind, status, input_json, result_json, error, attempts,
+               max_attempts, leased_until, worker_id, next_run_at,
+               dead_lettered_at, created_at, updated_at)
+            VALUES
+              ('real-bookmark-dead-letter', 'x_import_bookmarks', 'dead_lettered',
+               '{"bookmark_days":36500,"max_bookmarks":100000}', NULL,
+               'provider returned malformed response', 3, 3, NULL, NULL, NULL,
+               '2026-07-01T00:00:00+00:00',
+               '2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00')
+            "#,
+            [],
+        )
+        .unwrap();
+
+    let first = store.x_repair_health(24, 100).unwrap();
+    assert_eq!(first.superseded_stale_bookmark_dead_letters, 0);
+    assert_eq!(store.health().unwrap().dead_lettered_jobs, 3);
+
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO wiki_jobs
+              (id, kind, status, input_json, result_json, error, attempts,
+               max_attempts, leased_until, worker_id, next_run_at,
+               dead_lettered_at, created_at, updated_at)
+            VALUES
+              ('deferred-bookmark-replacement', 'x_import_bookmarks', 'deferred',
+               '{"bookmark_days":36500,"max_bookmarks":100000}',
+               '{"status":"deferred","provider_health_status":"auth_failed"}',
+               NULL, 0, 3, NULL, NULL, '2026-07-01T06:00:00+00:00', NULL,
+               '2026-07-01T00:10:00+00:00', '2026-07-01T00:10:00+00:00')
+            "#,
+            [],
+        )
+        .unwrap();
+
+    let second = store.x_repair_health(24, 100).unwrap();
+    assert_eq!(second.superseded_stale_bookmark_dead_letters, 2);
+    let jobs = store.list_wiki_jobs().unwrap();
+    let stale_statuses = jobs
+        .iter()
+        .filter(|job| job.id.starts_with("stale-bookmark-dead-letter"))
+        .map(|job| job.status.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(stale_statuses, vec!["superseded", "superseded"]);
+    let real = jobs
+        .iter()
+        .find(|job| job.id == "real-bookmark-dead-letter")
+        .unwrap();
+    assert_eq!(real.status, "dead_lettered");
+    let health = store.health().unwrap();
+    assert_eq!(health.dead_lettered_jobs, 1);
+    assert!(
+        health
+            .warnings
+            .iter()
+            .any(|warning| warning == "1 wiki jobs are dead-lettered")
     );
 }
 

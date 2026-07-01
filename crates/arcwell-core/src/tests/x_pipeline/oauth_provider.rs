@@ -25,6 +25,7 @@ fn x_oauth_exchange_and_refresh_store_tokens_without_echoing_values() {
             &format!("code-{}", "c".repeat(240)),
             &format!("verifier-{}", "v".repeat(240)),
             Some("client-secret"),
+            false,
             &exchange_base,
         )
         .unwrap();
@@ -55,7 +56,7 @@ fn x_oauth_exchange_and_refresh_store_tokens_without_echoing_values() {
     );
     let refresh_base = mock_base_server(refresh_body, "application/json");
     let refresh = store
-        .x_oauth_refresh_with_base("client-id", None, &refresh_base)
+        .x_oauth_refresh_with_base("client-id", None, true, &refresh_base)
         .unwrap();
     let refresh_json = serde_json::to_string(&refresh).unwrap();
     assert!(!refresh_json.contains("fresh-access-token"));
@@ -957,6 +958,7 @@ fn severe_x_oauth_public_exchange_includes_client_id_without_basic_auth() {
             "auth-code",
             "pkce-verifier",
             None,
+            true,
             &base,
         )
         .unwrap();
@@ -994,7 +996,53 @@ fn severe_x_oauth_public_refresh_includes_client_id_without_basic_auth() {
         assert!(request.contains("client_id=client-id"), "{request}");
     });
     let report = store
-        .x_oauth_refresh_with_base("client-id", None, &base)
+        .x_oauth_refresh_with_base("client-id", None, true, &base)
+        .unwrap();
+    assert_eq!(
+        report.stored,
+        vec!["X_BEARER_TOKEN".to_string(), "X_REFRESH_TOKEN".to_string()]
+    );
+}
+
+#[test]
+fn severe_x_oauth_public_refresh_ignores_stored_client_secret_aliases() {
+    // CLAIM: explicit public-client mode remains public even when older
+    // confidential-client secret aliases are present in local secret storage.
+    // PRECONDITIONS: A refresh token and stored X_CLIENT_SECRET alias exist.
+    // POSTCONDITIONS: the token request omits Authorization: Basic and sends
+    // client_id in the form body.
+    // ORACLE: request bytes captured by a local token endpoint fixture.
+    // SEVERITY: Severe because stale stored client-secret aliases can otherwise
+    // shadow PKCE public-client recovery and make live refresh look healthy
+    // while producing provider-rejected tokens.
+    let store = test_store("x-oauth-public-refresh-ignores-stored-secret");
+    store
+        .set_secret_value("X_REFRESH_TOKEN", "refresh-token", "x")
+        .unwrap();
+    store
+        .set_secret_value("X_CLIENT_SECRET", "stored-client-secret", "x")
+        .unwrap();
+    store
+        .set_secret_value(
+            "TWITTER_OAUTH2_CLIENT_SECRET",
+            "legacy-stored-client-secret",
+            "x",
+        )
+        .unwrap();
+    let base = mock_oauth_request_assertion_server(|request| {
+        assert!(request.contains("POST /2/oauth2/token "), "{request}");
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains("authorization: basic "),
+            "{request}"
+        );
+        assert!(request.contains("grant_type=refresh_token"), "{request}");
+        assert!(request.contains("refresh_token=refresh-token"), "{request}");
+        assert!(request.contains("client_id=client-id"), "{request}");
+    });
+    let report = store
+        .x_oauth_refresh_with_base("client-id", None, true, &base)
         .unwrap();
     assert_eq!(
         report.stored,
@@ -1041,6 +1089,7 @@ fn severe_x_oauth_confidential_exchange_uses_basic_auth_without_client_id_body()
             "auth-code",
             "pkce-verifier",
             Some("client-secret"),
+            false,
             &base,
         )
         .unwrap();
@@ -1079,11 +1128,56 @@ fn severe_x_oauth_confidential_refresh_uses_basic_auth_without_client_id_body() 
         assert!(!request.contains("client_id=client-id"), "{request}");
     });
     let report = store
-        .x_oauth_refresh_with_base("client-id", Some("client-secret"), &base)
+        .x_oauth_refresh_with_base("client-id", Some("client-secret"), false, &base)
         .unwrap();
     assert_eq!(
         report.stored,
         vec!["X_BEARER_TOKEN".to_string(), "X_REFRESH_TOKEN".to_string()]
+    );
+}
+
+#[test]
+fn severe_x_worker_auto_refresh_uses_stored_confidential_client_secret() {
+    // CLAIM: worker-side automatic X bearer refresh uses the configured
+    // confidential-client credentials when they exist.
+    // PRECONDITIONS: Stored X client id, client secret, and refresh token exist
+    // but no usable bearer token is available.
+    // POSTCONDITIONS: the automatic refresh request carries Authorization:
+    // Basic and does not force the public-client client_id form shape.
+    // ORACLE: request bytes captured by a local token endpoint fixture and the
+    // refreshed bearer token stored in local secret state.
+    // SEVERITY: Severe because the resident worker otherwise keeps choosing a
+    // provider-rejected public-client refresh path while operators see valid
+    // confidential-client credentials in secret health.
+    clear_x_bearer_env();
+    let store = test_store("x-worker-auto-refresh-confidential");
+    store
+        .set_secret_value("X_CLIENT_ID", "client-id", "x")
+        .unwrap();
+    store
+        .set_secret_value("X_CLIENT_SECRET", "stored-client-secret", "x")
+        .unwrap();
+    store
+        .set_secret_value("X_REFRESH_TOKEN", "refresh-token", "x")
+        .unwrap();
+    let base = mock_oauth_request_assertion_server(|request| {
+        assert!(request.contains("POST /2/oauth2/token "), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: basic "),
+            "{request}"
+        );
+        assert!(request.contains("grant_type=refresh_token"), "{request}");
+        assert!(request.contains("refresh_token=refresh-token"), "{request}");
+        assert!(!request.contains("client_id=client-id"), "{request}");
+    });
+
+    let token = store.refresh_x_bearer_token_for_endpoint(&base).unwrap();
+    assert_eq!(token, "fresh-access-token");
+    assert_eq!(
+        store.get_secret_value("X_BEARER_TOKEN").unwrap().as_deref(),
+        Some("fresh-access-token")
     );
 }
 
@@ -1126,6 +1220,7 @@ fn severe_x_oauth_public_revoke_includes_client_id_without_basic_auth() {
             "X_BEARER_TOKEN",
             "client-id",
             None,
+            true,
             Some("access_token"),
             false,
             &base,
@@ -1180,6 +1275,7 @@ fn severe_x_oauth_confidential_revoke_uses_basic_auth_without_client_id_body() {
             "X_REFRESH_TOKEN",
             "client-id",
             Some("client-secret"),
+            false,
             Some("refresh_token"),
             true,
             &base,
@@ -1212,6 +1308,7 @@ fn severe_x_oauth_rejects_token_response_without_tokens() {
             "code",
             "verifier",
             None,
+            true,
             &base,
         )
         .expect_err("token endpoint responses without tokens must not be accepted");
@@ -1306,7 +1403,10 @@ priority = 20
         "http://127.0.0.1:8765/callback"
     );
     assert_eq!(
-        store.resolve_x_client_secret(None).unwrap().as_deref(),
+        store
+            .resolve_x_client_secret(None, false)
+            .unwrap()
+            .as_deref(),
         Some("stored-client-secret")
     );
     let report = store
@@ -1330,8 +1430,9 @@ priority = 20
 fn severe_x_oauth_refresh_failure_is_classified_and_redacted() {
     // CLAIM: X OAuth refresh failures are visible by class and never echo token values.
     // PRECONDITIONS: A stored refresh token exists and the token endpoint rejects refresh.
-    // POSTCONDITIONS: Error names token rejection/refresh failure, stored secrets are unchanged, raw tokens are absent.
-    // ORACLE: Error string and secret list/value surfaces.
+    // POSTCONDITIONS: Error names token rejection/refresh failure, stored secrets
+    // are unchanged, source health records auth_failed, and raw tokens are absent.
+    // ORACLE: Error string, source health, and secret list/value surfaces.
     // SEVERITY: Severe because refresh failures are a realistic production credential lifecycle break.
     clear_x_bearer_env();
     let store = test_store("x-oauth-refresh-failure");
@@ -1340,21 +1441,34 @@ fn severe_x_oauth_refresh_failure_is_classified_and_redacted() {
         .set_secret_value("X_REFRESH_TOKEN", &refresh_token, "x")
         .unwrap();
     let body = Box::leak(
-        format!(r#"{{"error":"invalid_grant","detail":"refresh_token={refresh_token} expired"}}"#)
-            .into_boxed_str(),
+        format!(
+            r#"{{"error":"invalid_request","error_description":"Value passed for the token was invalid. refresh_token={refresh_token}"}}"#
+        )
+        .into_boxed_str(),
     );
-    let base = mock_status_server("401 Unauthorized", "", body, "application/json");
+    let base = mock_status_server("400 Bad Request", "", body, "application/json");
 
     let error = store
-        .x_oauth_refresh_with_base("client-id", None, &base)
+        .x_oauth_refresh_with_base("client-id", None, true, &base)
         .expect_err("refresh rejection must be surfaced")
         .to_string();
     assert!(error.contains("X OAuth token endpoint failed"), "{error}");
     assert!(
-        error.contains("token rejected") || error.contains("expired"),
+        error.contains("token rejected") || error.contains("expired") || error.contains("invalid"),
         "{error}"
     );
     assert!(!error.contains(&refresh_token));
+    let health = store
+        .get_source_health("x:oauth-refresh")
+        .unwrap()
+        .expect("refresh failure must write source health");
+    assert_eq!(health.provider, "x");
+    assert_eq!(health.source_kind, "x_oauth");
+    assert_eq!(health.locator, "oauth_refresh");
+    assert_eq!(health.status, "auth_failed");
+    let health_json = serde_json::to_string(&health).unwrap();
+    assert!(health_json.contains("X OAuth token endpoint failed"));
+    assert!(!health_json.contains(&refresh_token));
     let listed = serde_json::to_string(&store.list_secret_values().unwrap()).unwrap();
     assert!(listed.contains("X_REFRESH_TOKEN"));
     assert!(!listed.contains(&refresh_token));
@@ -1398,6 +1512,7 @@ reason = "X OAuth disabled during revoke policy test"
             "X_BEARER_TOKEN",
             "client-id",
             None,
+            true,
             Some("access_token"),
             true,
             "https://api.x.com",
@@ -1439,6 +1554,7 @@ fn severe_x_oauth_revoke_failure_is_redacted_and_preserves_local_secret() {
             "X_BEARER_TOKEN",
             "client-id",
             None,
+            true,
             Some("access_token"),
             true,
             &base,
@@ -1475,6 +1591,7 @@ fn severe_x_oauth_revoke_rejects_unsupported_secret_names_and_hints() {
             "OPENAI_API_KEY",
             "client-id",
             None,
+            false,
             Some("access_token"),
             false,
             "https://api.x.com",
@@ -1488,6 +1605,7 @@ fn severe_x_oauth_revoke_rejects_unsupported_secret_names_and_hints() {
             "X_BEARER_TOKEN",
             "client-id",
             None,
+            false,
             Some("id_token"),
             false,
             "https://api.x.com",
@@ -1574,7 +1692,7 @@ fn severe_x_provider_auto_refresh_failure_is_redacted_and_preserves_cursor() {
         .unwrap()
         .expect("failed auto-refresh must be visible in source health");
     let health_json = serde_json::to_string(&health).unwrap();
-    assert_eq!(health.status, "failed");
+    assert_eq!(health.status, "auth_failed");
     assert!(health_json.contains("X_BEARER_TOKEN"), "{health_json}");
     assert!(!health_json.contains(&expired_token), "{health_json}");
     assert!(!health_json.contains(&refresh_token), "{health_json}");

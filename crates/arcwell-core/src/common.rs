@@ -54,6 +54,23 @@ pub(crate) fn classify_provider_failure(error: &str) -> ProviderFailureClassific
             status: "rate_limited",
             backoff_seconds: 3600,
         }
+    } else if lower.contains("token rejected")
+        || lower.contains("bad credentials")
+        || lower.contains("invalid_grant")
+        || lower.contains("unauthorized")
+        || lower.contains("token was invalid")
+        || (lower.contains("invalid_request") && lower.contains("token"))
+        || (lower.contains("expired")
+            && (lower.contains("token")
+                || lower.contains("credential")
+                || lower.contains("secret")
+                || lower.contains("oauth")
+                || lower.contains("bearer")))
+    {
+        ProviderFailureClassification {
+            status: "auth_failed",
+            backoff_seconds: 6 * 3600,
+        }
     } else if lower.contains("timeout") || lower.contains("temporarily unavailable") {
         ProviderFailureClassification {
             status: "transient_error",

@@ -78,6 +78,8 @@ impl Store {
                 "Radar delivery: {non_successful_radar_deliveries} failed or blocked delivery attempt(s)"
             ));
         }
+        let mut seen_warnings = BTreeSet::new();
+        warnings.retain(|warning| seen_warnings.insert(warning.clone()));
         Ok((
             HealthReport {
                 ok: warnings.is_empty(),
@@ -377,8 +379,29 @@ impl Store {
             > worker_heartbeat_segment_span_seconds(&best_segment)?
         {
             best_max_gap = current_max_gap;
-            best_segment = current_segment;
+            best_segment = current_segment.clone();
         }
+        let latest = events.last();
+        let latest_age_seconds = latest
+            .map(|event| {
+                DateTime::parse_from_rfc3339(&event.seen_at)
+                    .with_context(|| format!("parsing heartbeat event {}", event.seen_at))
+                    .map(|seen_at| {
+                        (Utc::now() - seen_at.with_timezone(&Utc))
+                            .num_seconds()
+                            .max(0)
+                    })
+            })
+            .transpose()?;
+        let latest_is_fresh = latest_age_seconds
+            .map(|age| age <= max_allowed_gap_seconds)
+            .unwrap_or(false);
+        let current_segment_event_count = current_segment.len();
+        let current_segment_first_seen_at =
+            current_segment.first().map(|event| event.seen_at.clone());
+        let current_segment_last_seen_at =
+            current_segment.last().map(|event| event.seen_at.clone());
+        let current_segment_span_seconds = worker_heartbeat_segment_span_seconds(&current_segment)?;
         let first = best_segment.first();
         let last = best_segment.last();
         let observed_span_seconds = worker_heartbeat_segment_span_seconds(&best_segment)?;
@@ -398,13 +421,21 @@ impl Store {
         Ok(WorkerRecurrenceAudit {
             ok: failures.is_empty(),
             worker_id: best_segment.first().map(|event| event.worker_id.clone()),
+            latest_worker_id: latest.map(|event| event.worker_id.clone()),
             worker_ids,
             event_count: best_segment.len(),
             retained_event_count: events.len(),
             first_seen_at: first.map(|event| event.seen_at.clone()),
             last_seen_at: last.map(|event| event.seen_at.clone()),
+            latest_seen_at: latest.map(|event| event.seen_at.clone()),
+            latest_age_seconds,
+            latest_is_fresh,
             observed_span_seconds,
             max_gap_seconds: best_max_gap,
+            current_segment_event_count,
+            current_segment_first_seen_at,
+            current_segment_last_seen_at,
+            current_segment_span_seconds,
             min_required_span_seconds,
             max_allowed_gap_seconds,
             failures,

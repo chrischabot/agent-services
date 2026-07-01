@@ -980,7 +980,28 @@ impl Store {
             }
         }
         if refresh_ready && client_id_ready {
-            if let Some(warning) = self.x_oauth_refresh_policy_warning() {
+            let refresh_auth_failure =
+                self.get_source_health("x:oauth-refresh")?.filter(|health| {
+                    health.status == "auth_failed"
+                        && health.source_kind.eq_ignore_ascii_case("x_oauth")
+                });
+            if let Some(refresh_health) = refresh_auth_failure {
+                let warning = format!(
+                    "Stored X_REFRESH_TOKEN was rejected during X OAuth refresh at {}; reauthorize X OAuth before scheduled bookmark/watch reads can recover. Last error: {}",
+                    refresh_health
+                        .last_failure_at
+                        .as_deref()
+                        .unwrap_or(&refresh_health.updated_at),
+                    refresh_health
+                        .last_error
+                        .as_deref()
+                        .unwrap_or("provider rejected stored refresh material")
+                );
+                push_secret_warning(&mut by_name, "X_REFRESH_TOKEN", "x", Some("x"), &warning);
+                if let Some(bearer) = by_name.get_mut("X_BEARER_TOKEN") {
+                    bearer.warnings.push(warning);
+                }
+            } else if let Some(warning) = self.x_oauth_refresh_policy_warning() {
                 push_secret_warning(
                     &mut by_name,
                     "X_OAUTH_REFRESH_POLICY",

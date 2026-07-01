@@ -1567,7 +1567,7 @@ fn severe_github_owner_job_defers_before_network_when_credential_probe_failed() 
     );
     assert_eq!(
         result.get("provider_health_status").and_then(Value::as_str),
-        Some("failed")
+        Some("auth_failed")
     );
     assert_eq!(
         result.get("source_health_key").and_then(Value::as_str),

@@ -2705,6 +2705,7 @@ reason = "X OAuth disabled during policy test"
             "authorization-code",
             "code-verifier",
             Some("explicit-client-secret"),
+            false,
             "https://api.x.com",
         )
         .unwrap_err()

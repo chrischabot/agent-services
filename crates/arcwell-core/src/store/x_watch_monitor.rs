@@ -602,6 +602,13 @@ impl Store {
                         ));
                         break;
                     }
+                    if failure_classification.status == "auth_failed" {
+                        let _ = self.defer_active_x_handle_sources_for_auth_failure(&error_text);
+                        if source_reports.len() < watch_sources.len() {
+                            stopped_reason = Some("auth_failure_abort_after_1_failure".to_string());
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -820,6 +827,30 @@ impl Store {
         self.x_bearer_token_for_endpoint(endpoint)
     }
 
+    pub(crate) fn has_x_mcp_app_bearer_token_alias(&self) -> Result<bool> {
+        for name in [
+            "ARCWELL_X_MCP_APP_BEARER_TOKEN",
+            "X_APP_BEARER_TOKEN",
+            "TWITTER_BEARER_TOKEN",
+        ] {
+            if let Ok(token) = std::env::var(name)
+                && !token.trim().is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        for name in [
+            "X_MCP_APP_BEARER_TOKEN",
+            "X_APP_BEARER_TOKEN",
+            "TWITTER_BEARER_TOKEN",
+        ] {
+            if self.get_usable_secret_value(name)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn xurl_bearer_token(&self, endpoint: &str) -> Result<String> {
         self.policy_guard(PolicyRequest {
             action: "provider.oauth".to_string(),
@@ -868,11 +899,57 @@ impl Store {
         Ok(token)
     }
 
+    pub(crate) fn defer_active_x_handle_sources_for_auth_failure(
+        &self,
+        error: &str,
+    ) -> Result<usize> {
+        let updated_at = now();
+        let next_run_at = now_plus_seconds(6 * 3600);
+        let error = excerpt(&redact_secret_like_text(error), 2000);
+        let updated = self.conn.execute(
+            r#"
+            INSERT INTO source_health
+              (key, provider, source_kind, locator, status, last_success_at, last_failure_at,
+               last_error, last_item_id, last_item_date, cursor_key, cursor_value, next_run_at, updated_at)
+            SELECT
+              'x:watch:' || locator,
+              'x',
+              'x_monitor',
+              locator,
+              'auth_failed',
+              NULL,
+              ?1,
+              ?2,
+              NULL,
+              NULL,
+              'x:watch:' || locator,
+              NULL,
+              ?3,
+              ?1
+            FROM watch_sources
+            WHERE source_kind = 'x_handle'
+              AND status = 'active'
+            ON CONFLICT(key) DO UPDATE SET
+              provider = excluded.provider,
+              source_kind = excluded.source_kind,
+              locator = excluded.locator,
+              status = excluded.status,
+              last_failure_at = excluded.last_failure_at,
+              last_error = excluded.last_error,
+              cursor_key = excluded.cursor_key,
+              next_run_at = excluded.next_run_at,
+              updated_at = excluded.updated_at
+            "#,
+            params![updated_at, error, next_run_at],
+        )?;
+        Ok(updated)
+    }
+
     pub(crate) fn refresh_x_bearer_token_for_endpoint(&self, endpoint: &str) -> Result<String> {
         let client_id = self
             .resolve_x_client_id()?
             .context("X_CLIENT_ID is required to refresh X_BEARER_TOKEN")?;
-        self.x_oauth_refresh_with_base(&client_id, None, endpoint)?;
+        self.x_oauth_refresh_with_base(&client_id, None, false, endpoint)?;
         self.get_usable_secret_value("X_BEARER_TOKEN")?
             .context("X OAuth refresh did not store a usable X_BEARER_TOKEN")
     }

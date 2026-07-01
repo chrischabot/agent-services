@@ -935,15 +935,71 @@ impl Store {
             "#,
             [],
         )?;
+        let superseded_stale_bookmark_dead_letters =
+            self.supersede_stale_x_bookmark_policy_dead_letters(limit)?;
         Ok(XHealthRepairReport {
             repaired_bookmark_health,
             repaired_watch_health,
             retired_legacy_x_handle_health,
             retired_orphan_x_monitor_health,
+            superseded_stale_bookmark_dead_letters,
             rate_limited_scanned: deferred.scanned,
             rate_limited_deferred: deferred.deferred,
             defer_until: deferred.defer_until,
         })
+    }
+
+    pub(crate) fn supersede_stale_x_bookmark_policy_dead_letters(
+        &self,
+        limit: usize,
+    ) -> Result<usize> {
+        let limit = limit.clamp(1, 100_000);
+        let superseded_at = now();
+        let result_json = json!({
+            "status": "superseded",
+            "reason": "stale_x_bookmark_policy_dead_letter",
+            "boundary": "Historical X bookmark import policy-deferred dead letter was superseded only after a deferred replacement job existed.",
+            "superseded_at": superseded_at,
+        });
+        let error = "superseded stale X bookmark policy-deferred dead letter; active deferred replacement exists";
+        self.conn
+            .execute(
+                r#"
+                UPDATE wiki_jobs
+                SET status = 'superseded',
+                    result_json = ?1,
+                    error = ?2,
+                    leased_until = NULL,
+                    worker_id = NULL,
+                    next_run_at = NULL,
+                    dead_lettered_at = NULL,
+                    updated_at = ?3
+                WHERE id IN (
+                  SELECT stale.id
+                  FROM wiki_jobs stale
+                  WHERE stale.kind = 'x_import_bookmarks'
+                    AND stale.status = 'dead_lettered'
+                    AND stale.error = 'policy deferred provider.network: no matching policy rule; defer to explicit user or higher-level policy'
+                    AND EXISTS (
+                      SELECT 1
+                      FROM wiki_jobs replacement
+                      WHERE replacement.kind = 'x_import_bookmarks'
+                        AND replacement.status = 'deferred'
+                        AND replacement.next_run_at IS NOT NULL
+                        AND replacement.id != stale.id
+                    )
+                  ORDER BY stale.updated_at ASC, stale.id ASC
+                  LIMIT ?4
+                )
+                "#,
+                params![
+                    serde_json::to_string(&result_json)?,
+                    error,
+                    superseded_at,
+                    limit as i64
+                ],
+            )
+            .map_err(Into::into)
     }
 
     pub(crate) fn x_defer_rate_limited_sources(
@@ -1168,6 +1224,13 @@ impl Store {
             warnings.push(format!(
                 "X source health: {} non-healthy source row(s)",
                 stats.drift.non_healthy_sources
+            ));
+        }
+        if let Some(auth_failed) = stats.source_health_by_status.get("auth_failed")
+            && *auth_failed > 0
+        {
+            warnings.push(format!(
+                "X OAuth reauthorization required: {auth_failed} auth-failed source row(s)"
             ));
         }
         if stats.unresolved_failed_sync_runs > 0 {

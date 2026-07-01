@@ -16,11 +16,15 @@ pub(crate) fn gmail_oauth_reauthorize(
     client_id: Option<&str>,
     redirect_uri: Option<&str>,
     client_secret: Option<&str>,
+    public_client: bool,
     scopes: &[String],
     timeout_seconds: u64,
     verify_limit: usize,
     open_browser: bool,
 ) -> Result<GmailOAuthReauthorizeCliReport> {
+    if public_client && client_secret.is_some_and(|value| !value.trim().is_empty()) {
+        bail!("public Gmail OAuth client mode cannot use a client secret");
+    }
     let client_id = store.resolve_gmail_oauth_client_id(client_id)?;
     let redirect_uri = store.resolve_gmail_oauth_redirect_uri(redirect_uri)?;
     let preflight = store.gmail_oauth_reauthorize_preflight(&redirect_uri, scopes)?;
@@ -32,10 +36,10 @@ pub(crate) fn gmail_oauth_reauthorize(
         .context("configuring OAuth callback listener")?;
     let start = store.gmail_oauth_authorize_url(&client_id, &redirect_uri, &preflight.scopes)?;
     eprintln!(
-        "Arcwell Gmail OAuth reauthorize pending: redirect_uri={} scopes={} authorization_url={}",
+        "Arcwell Gmail OAuth reauthorize pending: redirect_uri={} scopes={} authorization_endpoint={}",
         redirect_uri,
         preflight.scopes.join(","),
-        start.authorization_url
+        oauth_authorization_endpoint(&start.authorization_url)
     );
     if open_browser {
         open_browser_url(&start.authorization_url)?;
@@ -49,17 +53,14 @@ pub(crate) fn gmail_oauth_reauthorize(
         timeout_seconds.max(1),
     )
     .with_context(|| {
-        format!(
-            "Timed out waiting for Gmail OAuth callback at {redirect_uri}. Open this URL and complete consent, then retry if the browser did not return to Arcwell: {}",
-            start.authorization_url
-        )
+        gmail_oauth_callback_timeout_context(&start.authorization_url, &redirect_uri)
     })?;
     let token_store = store.gmail_oauth_exchange_code(
         &client_id,
         &redirect_uri,
         &callback.code,
         &start.code_verifier,
-        client_secret,
+        if public_client { None } else { client_secret },
     )?;
     let mailbox_verification = store.verify_email_delivery_mailbox_with_gmail(
         verify_limit,
@@ -84,6 +85,16 @@ pub(crate) fn gmail_oauth_reauthorize(
         token_store: serde_json::to_value(token_store)?,
         mailbox_verification: serde_json::to_value(mailbox_verification)?,
     })
+}
+
+pub(crate) fn gmail_oauth_callback_timeout_context(
+    authorization_url: &str,
+    redirect_uri: &str,
+) -> String {
+    format!(
+        "Timed out waiting for Gmail OAuth callback at {redirect_uri} after opening authorization_endpoint={}. Complete consent in the browser, then retry if the browser did not return to Arcwell.",
+        oauth_authorization_endpoint(authorization_url)
+    )
 }
 
 pub(crate) fn telegram(store: Store, args: TelegramCommand) -> Result<()> {
@@ -321,6 +332,15 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
             state.as_deref(),
             destination.as_deref(),
         )?),
+        EmailSubcommand::RecoveryPlan {
+            limit,
+            state,
+            destination,
+        } => print_json(&store.email_delivery_recovery_plan(
+            limit,
+            state.as_deref(),
+            destination.as_deref(),
+        )?),
         EmailSubcommand::VerifyMailbox {
             limit,
             state,
@@ -362,7 +382,15 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
             code,
             code_verifier,
             client_secret,
+            public_client,
         } => {
+            if public_client
+                && client_secret
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                bail!("public Gmail OAuth client mode cannot use a client secret");
+            }
             let client_id = store.resolve_gmail_oauth_client_id(client_id.as_deref())?;
             let redirect_uri = store.resolve_gmail_oauth_redirect_uri(redirect_uri.as_deref())?;
             print_json(&store.gmail_oauth_exchange_code(
@@ -370,13 +398,18 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
                 &redirect_uri,
                 &code,
                 &code_verifier,
-                client_secret.as_deref(),
+                if public_client {
+                    None
+                } else {
+                    client_secret.as_deref()
+                },
             )?)
         }
         EmailSubcommand::OauthReauthorize {
             client_id,
             redirect_uri,
             client_secret,
+            public_client,
             scopes,
             timeout_seconds,
             verify_limit,
@@ -386,6 +419,7 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
             client_id.as_deref(),
             redirect_uri.as_deref(),
             client_secret.as_deref(),
+            public_client,
             &scopes,
             timeout_seconds,
             verify_limit,
@@ -394,9 +428,24 @@ pub(crate) fn email(store: Store, args: EmailCommand) -> Result<()> {
         EmailSubcommand::OauthRefresh {
             client_id,
             client_secret,
+            public_client,
         } => {
+            if public_client
+                && client_secret
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                bail!("public Gmail OAuth client mode cannot use a client secret");
+            }
             let client_id = store.resolve_gmail_oauth_client_id(client_id.as_deref())?;
-            print_json(&store.gmail_oauth_refresh(&client_id, client_secret.as_deref())?)
+            print_json(&store.gmail_oauth_refresh(
+                &client_id,
+                if public_client {
+                    None
+                } else {
+                    client_secret.as_deref()
+                },
+            )?)
         }
         EmailSubcommand::ObserveDeliveryBatch {
             source,

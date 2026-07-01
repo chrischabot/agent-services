@@ -1,5 +1,11 @@
 use super::*;
 
+struct XApiMcpBookmarksContext {
+    server_url: String,
+    user_id: String,
+    tool: XApiMcpTool,
+}
+
 impl Store {
     pub fn x_oauth_authorize_url(
         &self,
@@ -115,6 +121,7 @@ impl Store {
         code: &str,
         code_verifier: &str,
         client_secret: Option<&str>,
+        public_client: bool,
     ) -> Result<XOAuthTokenStoreReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
@@ -124,6 +131,7 @@ impl Store {
             code,
             code_verifier,
             client_secret,
+            public_client,
             &endpoint,
         )
     }
@@ -135,8 +143,12 @@ impl Store {
         code: &str,
         code_verifier: &str,
         client_secret: Option<&str>,
+        public_client: bool,
         endpoint: &str,
     ) -> Result<XOAuthTokenStoreReport> {
+        if public_client && client_secret.is_some() {
+            bail!("public X OAuth client mode cannot use a client secret");
+        }
         validate_key(client_id)?;
         validate_public_http_url(redirect_uri)?;
         validate_oauth_param(code, "authorization code")?;
@@ -153,7 +165,8 @@ impl Store {
             metadata: json!({
                 "operation": "exchange_code",
                 "redirect_uri": redirect_uri,
-                "has_explicit_client_secret": client_secret.is_some()
+                "has_explicit_client_secret": client_secret.is_some(),
+                "public_client": public_client
             }),
             untrusted_excerpt: None,
         })?;
@@ -166,7 +179,7 @@ impl Store {
             estimated_network_fetch_cost(1),
             "X OAuth exchange",
         )?;
-        let client_secret = self.resolve_x_client_secret(client_secret)?;
+        let client_secret = self.resolve_x_client_secret(client_secret, public_client)?;
         let mut form = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -177,17 +190,22 @@ impl Store {
             form.push(("client_id", client_id));
         }
         let value = post_x_oauth_form(endpoint, client_id, client_secret.as_deref(), &form)?;
-        self.store_x_token_response(&value)
+        let report = self.store_x_token_response(&value)?;
+        if report.stored.iter().any(|name| name == "X_REFRESH_TOKEN") {
+            self.record_x_oauth_refresh_recovered()?;
+        }
+        Ok(report)
     }
 
     pub fn x_oauth_refresh(
         &self,
         client_id: &str,
         client_secret: Option<&str>,
+        public_client: bool,
     ) -> Result<XOAuthTokenStoreReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        self.x_oauth_refresh_with_base(client_id, client_secret, &endpoint)
+        self.x_oauth_refresh_with_base(client_id, client_secret, public_client, &endpoint)
     }
 
     pub fn x_oauth_revoke(
@@ -195,6 +213,7 @@ impl Store {
         name: &str,
         client_id: &str,
         client_secret: Option<&str>,
+        public_client: bool,
         token_type_hint: Option<&str>,
         delete_local: bool,
     ) -> Result<XOAuthRevocationReport> {
@@ -204,6 +223,7 @@ impl Store {
             name,
             client_id,
             client_secret,
+            public_client,
             token_type_hint,
             delete_local,
             &endpoint,
@@ -215,10 +235,14 @@ impl Store {
         name: &str,
         client_id: &str,
         client_secret: Option<&str>,
+        public_client: bool,
         token_type_hint: Option<&str>,
         delete_local: bool,
         endpoint: &str,
     ) -> Result<XOAuthRevocationReport> {
+        if public_client && client_secret.is_some() {
+            bail!("public X OAuth client mode cannot use a client secret");
+        }
         validate_x_oauth_secret_name(name)?;
         validate_key(client_id)?;
         if let Some(hint) = token_type_hint {
@@ -238,7 +262,8 @@ impl Store {
                 "secret_name": name,
                 "token_type_hint": token_type_hint,
                 "delete_local": delete_local,
-                "has_explicit_client_secret": client_secret.is_some()
+                "has_explicit_client_secret": client_secret.is_some(),
+                "public_client": public_client
             }),
             untrusted_excerpt: None,
         })?;
@@ -255,7 +280,7 @@ impl Store {
             .get_secret_value(name)?
             .with_context(|| format!("{name} is required"))?;
         validate_oauth_param(&token, "token")?;
-        let client_secret = self.resolve_x_client_secret(client_secret)?;
+        let client_secret = self.resolve_x_client_secret(client_secret, public_client)?;
         let mut form = vec![("token", token.as_str())];
         if let Some(hint) = token_type_hint {
             form.push(("token_type_hint", hint));
@@ -899,8 +924,12 @@ impl Store {
         &self,
         client_id: &str,
         client_secret: Option<&str>,
+        public_client: bool,
         endpoint: &str,
     ) -> Result<XOAuthTokenStoreReport> {
+        if public_client && client_secret.is_some() {
+            bail!("public X OAuth client mode cannot use a client secret");
+        }
         validate_key(client_id)?;
         self.policy_guard(PolicyRequest {
             action: "provider.oauth".to_string(),
@@ -913,7 +942,8 @@ impl Store {
             projected_usd: Some(estimated_network_fetch_cost(1)),
             metadata: json!({
                 "operation": "refresh",
-                "has_explicit_client_secret": client_secret.is_some()
+                "has_explicit_client_secret": client_secret.is_some(),
+                "public_client": public_client
             }),
             untrusted_excerpt: None,
         })?;
@@ -930,7 +960,7 @@ impl Store {
             .get_usable_secret_value("X_REFRESH_TOKEN")?
             .context("X_REFRESH_TOKEN is required")?;
         validate_oauth_param(&refresh_token, "refresh token")?;
-        let client_secret = self.resolve_x_client_secret(client_secret)?;
+        let client_secret = self.resolve_x_client_secret(client_secret, public_client)?;
         let mut form = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
@@ -938,18 +968,37 @@ impl Store {
         if client_secret.is_none() {
             form.push(("client_id", client_id));
         }
-        let value = post_x_oauth_form(endpoint, client_id, client_secret.as_deref(), &form)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    redact_secret_like_text(&error.to_string())
-                        .replace(&refresh_token, "[REDACTED]")
-                )
-            })?;
-        self.store_x_token_response(&value)
+        let value = match post_x_oauth_form(endpoint, client_id, client_secret.as_deref(), &form) {
+            Ok(value) => value,
+            Err(error) => {
+                let redacted = redact_secret_like_text(&error.to_string())
+                    .replace(&refresh_token, "[REDACTED]");
+                let _ = self.record_source_failure(
+                    "x:oauth-refresh",
+                    "x",
+                    "x_oauth",
+                    "oauth_refresh",
+                    &redacted,
+                );
+                return Err(anyhow::anyhow!("{}", redacted));
+            }
+        };
+        let report = self.store_x_token_response(&value)?;
+        self.record_x_oauth_refresh_recovered()?;
+        Ok(report)
     }
 
-    pub(crate) fn resolve_x_client_secret(&self, explicit: Option<&str>) -> Result<Option<String>> {
+    pub(crate) fn resolve_x_client_secret(
+        &self,
+        explicit: Option<&str>,
+        public_client: bool,
+    ) -> Result<Option<String>> {
+        if public_client {
+            if explicit.is_some_and(|value| !value.trim().is_empty()) {
+                bail!("public X OAuth client mode cannot use a client secret");
+            }
+            return Ok(None);
+        }
         let secret = explicit
             .map(ToOwned::to_owned)
             .or_else(|| std::env::var("X_CLIENT_SECRET").ok())
@@ -1016,6 +1065,20 @@ impl Store {
         })
     }
 
+    fn record_x_oauth_refresh_recovered(&self) -> Result<()> {
+        self.record_source_success(SourceHealthUpdate {
+            key: "x:oauth-refresh",
+            provider: "x",
+            source_kind: "x_oauth",
+            locator: "oauth_refresh",
+            last_item_id: None,
+            last_item_date: None,
+            cursor_key: None,
+            cursor_value: None,
+            next_run_at: None,
+        })
+    }
+
     pub fn x_recent_search(&self, query: &str, max_results: usize) -> Result<XImportReport> {
         self.x_recent_search_with_transport(query, max_results, None)
     }
@@ -1028,14 +1091,23 @@ impl Store {
     ) -> Result<XImportReport> {
         let endpoint =
             std::env::var("ARCWELL_X_API_BASE").unwrap_or_else(|_| "https://api.x.com".to_string());
-        let transport = XProviderTransport::parse(transport)?;
-        self.x_recent_search_with_base_transport_and_job_id(
-            query,
-            max_results,
-            &endpoint,
-            transport,
-            None,
-        )
+        let explicit_transport = transport
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || std::env::var("ARCWELL_X_TRANSPORT")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty());
+        if explicit_transport {
+            let transport = XProviderTransport::parse(transport)?;
+            return self.x_recent_search_with_base_transport_and_job_id(
+                query,
+                max_results,
+                &endpoint,
+                transport,
+                None,
+            );
+        }
+        self.x_recent_search_with_base_default_and_job_id(query, max_results, &endpoint, None)
     }
 
     #[cfg(test)]
@@ -1054,6 +1126,7 @@ impl Store {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn x_recent_search_with_base_and_job_id(
         &self,
         query: &str,
@@ -1061,6 +1134,49 @@ impl Store {
         endpoint: &str,
         job_id: Option<&str>,
     ) -> Result<XImportReport> {
+        self.x_recent_search_with_base_transport_and_job_id(
+            query,
+            max_results,
+            endpoint,
+            XProviderTransport::DirectApi,
+            job_id,
+        )
+    }
+
+    pub(crate) fn x_recent_search_with_base_default_and_job_id(
+        &self,
+        query: &str,
+        max_results: usize,
+        endpoint: &str,
+        job_id: Option<&str>,
+    ) -> Result<XImportReport> {
+        if self.has_x_mcp_app_bearer_token_alias()? {
+            match self.x_recent_search_with_base_transport_and_job_id(
+                query,
+                max_results,
+                endpoint,
+                XProviderTransport::XApiMcp,
+                job_id,
+            ) {
+                Ok(report) => return Ok(report),
+                Err(mcp_error) => {
+                    let mcp_error = redact_secret_like_text(&mcp_error.to_string());
+                    return self
+                        .x_recent_search_with_base_transport_and_job_id(
+                            query,
+                            max_results,
+                            endpoint,
+                            XProviderTransport::DirectApi,
+                            job_id,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "x-api-mcp default recent search failed before direct-api fallback also failed: {mcp_error}"
+                            )
+                        });
+                }
+            }
+        }
         self.x_recent_search_with_base_transport_and_job_id(
             query,
             max_results,
@@ -1364,12 +1480,11 @@ impl Store {
         Ok((x_mcp_extract_x_api_response(&result)?, tool.name))
     }
 
-    fn x_mcp_bookmarks_api_response(
+    fn x_mcp_bookmarks_context(
         &self,
         endpoint: &str,
         token: &str,
-        max_bookmarks: usize,
-    ) -> Result<(Value, String)> {
+    ) -> Result<XApiMcpBookmarksContext> {
         let server_url = default_x_mcp_server_url(endpoint)?;
         let tools = fetch_x_mcp_tools(&server_url, token)?;
         let me_tool = select_x_mcp_tool_excluding(
@@ -1406,16 +1521,74 @@ impl Store {
             &["bookmark"],
             &["create", "delete", "folder"],
         )?;
+        Ok(XApiMcpBookmarksContext {
+            server_url,
+            user_id: user_id.to_string(),
+            tool,
+        })
+    }
+
+    fn x_mcp_bookmarks_page_api_response(
+        &self,
+        context: &XApiMcpBookmarksContext,
+        token: &str,
+        page_size: usize,
+        pagination_token: Option<&str>,
+    ) -> Result<(Value, String)> {
         let mut arguments = Map::new();
-        let page_size = max_bookmarks.clamp(1, 100);
-        x_mcp_insert_arg(&mut arguments, &tool, "id", json!(user_id));
-        x_mcp_insert_arg(&mut arguments, &tool, "max_results", json!(page_size));
-        x_mcp_insert_arg(&mut arguments, &tool, "maxResults", json!(page_size));
-        x_mcp_insert_arg(&mut arguments, &tool, "limit", json!(page_size));
-        x_mcp_insert_arg(&mut arguments, &tool, "count", json!(page_size));
+        let page_size = page_size.clamp(1, 100);
         x_mcp_insert_arg(
             &mut arguments,
-            &tool,
+            &context.tool,
+            "id",
+            json!(context.user_id.as_str()),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &context.tool,
+            "max_results",
+            json!(page_size),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &context.tool,
+            "maxResults",
+            json!(page_size),
+        );
+        x_mcp_insert_arg(&mut arguments, &context.tool, "limit", json!(page_size));
+        x_mcp_insert_arg(&mut arguments, &context.tool, "count", json!(page_size));
+        if let Some(token) = pagination_token {
+            let inserted = x_mcp_insert_arg_if_accepts(
+                &mut arguments,
+                &context.tool,
+                "pagination_token",
+                json!(token),
+            ) || x_mcp_insert_arg_if_accepts(
+                &mut arguments,
+                &context.tool,
+                "paginationToken",
+                json!(token),
+            ) || x_mcp_insert_arg_if_accepts(
+                &mut arguments,
+                &context.tool,
+                "next_token",
+                json!(token),
+            ) || x_mcp_insert_arg_if_accepts(
+                &mut arguments,
+                &context.tool,
+                "nextToken",
+                json!(token),
+            );
+            if !inserted {
+                bail!(
+                    "X MCP bookmark tool {} does not advertise a pagination-token argument",
+                    context.tool.name
+                );
+            }
+        }
+        x_mcp_insert_arg(
+            &mut arguments,
+            &context.tool,
             "tweet.fields",
             json!(
                 "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets"
@@ -1423,30 +1596,40 @@ impl Store {
         );
         x_mcp_insert_arg(
             &mut arguments,
-            &tool,
+            &context.tool,
             "post.fields",
             json!(
                 "created_at,author_id,public_metrics,lang,entities,conversation_id,referenced_tweets"
             ),
         );
-        x_mcp_insert_arg(&mut arguments, &tool, "expansions", json!("author_id"));
         x_mcp_insert_arg(
             &mut arguments,
-            &tool,
+            &context.tool,
+            "expansions",
+            json!("author_id"),
+        );
+        x_mcp_insert_arg(
+            &mut arguments,
+            &context.tool,
             "user.fields",
             json!("username,name,description,verified,verified_type"),
         );
-        let result = call_x_mcp_tool(&server_url, token, &tool.name, Value::Object(arguments))?;
+        let result = call_x_mcp_tool(
+            &context.server_url,
+            token,
+            &context.tool.name,
+            Value::Object(arguments),
+        )?;
         let mut value = x_mcp_extract_x_api_response(&result)?;
         if let Some(object) = value.as_object_mut() {
             let meta = object.entry("meta").or_insert_with(|| json!({}));
             if let Some(meta) = meta.as_object_mut()
                 && !meta.contains_key("account_id")
             {
-                meta.insert("account_id".to_string(), json!(user_id));
+                meta.insert("account_id".to_string(), json!(context.user_id.as_str()));
             }
         }
-        Ok((value, tool.name))
+        Ok((value, context.tool.name.clone()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1587,7 +1770,7 @@ impl Store {
         let started_at = now();
         let mut account_id_for_run: Option<String> = None;
         let result = (|| -> Result<XImportReport> {
-            let token = self.x_bearer_token_for_transport(endpoint, transport)?;
+            let mut token = self.x_bearer_token_for_transport(endpoint, transport)?;
             let cutoff = Utc::now() - chrono::Duration::days(bookmark_days);
             let mut seen = 0;
             let mut imported = 0;
@@ -1601,31 +1784,74 @@ impl Store {
             let mut stop_reason = "not_started".to_string();
 
             if transport == XProviderTransport::XApiMcp {
-                let (value, tool_name) =
-                    self.x_mcp_bookmarks_api_response(endpoint, &token, max_bookmarks)?;
-                x_fail_on_response_errors(&value)?;
-                pages_fetched = 1;
-                account_id_for_run = value
-                    .pointer("/meta/account_id")
-                    .and_then(Value::as_str)
-                    .or_else(|| value.pointer("/meta/user_id").and_then(Value::as_str))
-                    .map(ToOwned::to_owned);
-                let tweets_on_page = self.x_ingest_bookmark_response_tweets(
-                    &value,
-                    cutoff,
-                    max_bookmarks,
-                    &mut seen,
-                    &mut imported,
-                    &mut skipped_duplicates,
-                    &mut rejected,
-                    &mut rejected_errors,
-                    &mut imported_items,
-                    Some(&tool_name),
-                )?;
-                if tweets_on_page == 0 {
-                    exhausted = true;
-                    stop_reason = "empty_page".to_string();
-                } else {
+                let mut refreshed_mcp_token = false;
+                let context = match self.x_mcp_bookmarks_context(endpoint, &token) {
+                    Ok(context) => context,
+                    Err(error) if x_mcp_user_token_rejection_should_refresh(&error) => {
+                        token = self.refresh_x_bearer_token_for_endpoint(endpoint).map_err(
+                            |refresh_error| {
+                                anyhow::anyhow!(
+                                    "refreshing X_BEARER_TOKEN after X MCP rejection failed: {}",
+                                    redact_secret_like_text(&refresh_error.to_string())
+                                )
+                            },
+                        )?;
+                        refreshed_mcp_token = true;
+                        self.x_mcp_bookmarks_context(endpoint, &token)?
+                    }
+                    Err(error) => return Err(error),
+                };
+                account_id_for_run = Some(context.user_id.clone());
+                while seen < max_bookmarks {
+                    let page_size = (max_bookmarks - seen).clamp(1, 100);
+                    let (value, tool_name) = match self.x_mcp_bookmarks_page_api_response(
+                        &context,
+                        &token,
+                        page_size,
+                        pagination_token.as_deref(),
+                    ) {
+                        Ok(response) => response,
+                        Err(error)
+                            if !refreshed_mcp_token
+                                && x_mcp_user_token_rejection_should_refresh(&error) =>
+                        {
+                            token = self.refresh_x_bearer_token_for_endpoint(endpoint).map_err(
+                                |refresh_error| {
+                                    anyhow::anyhow!(
+                                        "refreshing X_BEARER_TOKEN after X MCP rejection failed: {}",
+                                        redact_secret_like_text(&refresh_error.to_string())
+                                    )
+                                },
+                            )?;
+                            refreshed_mcp_token = true;
+                            self.x_mcp_bookmarks_page_api_response(
+                                &context,
+                                &token,
+                                page_size,
+                                pagination_token.as_deref(),
+                            )?
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    x_fail_on_response_errors(&value)?;
+                    pages_fetched += 1;
+                    let tweets_on_page = self.x_ingest_bookmark_response_tweets(
+                        &value,
+                        cutoff,
+                        max_bookmarks,
+                        &mut seen,
+                        &mut imported,
+                        &mut skipped_duplicates,
+                        &mut rejected,
+                        &mut rejected_errors,
+                        &mut imported_items,
+                        Some(&tool_name),
+                    )?;
+                    if tweets_on_page == 0 {
+                        exhausted = true;
+                        stop_reason = "empty_page".to_string();
+                        break;
+                    }
                     pagination_token = value
                         .pointer("/meta/next_token")
                         .and_then(Value::as_str)
@@ -1633,9 +1859,12 @@ impl Store {
                     if pagination_token.is_none() {
                         exhausted = true;
                         stop_reason = "provider_exhausted".to_string();
-                    } else {
+                        break;
+                    }
+                    if seen >= max_bookmarks {
                         exhausted = false;
-                        stop_reason = "mcp_single_page_next_token_unverified".to_string();
+                        stop_reason = "requested_limit_reached".to_string();
+                        break;
                     }
                 }
             } else {
@@ -1839,9 +2068,20 @@ fn x_mcp_insert_arg(
     key: &str,
     value: Value,
 ) {
-    if x_mcp_tool_accepts(tool, key) {
-        arguments.insert(key.to_string(), value);
+    let _ = x_mcp_insert_arg_if_accepts(arguments, tool, key, value);
+}
+
+fn x_mcp_insert_arg_if_accepts(
+    arguments: &mut Map<String, Value>,
+    tool: &XApiMcpTool,
+    key: &str,
+    value: Value,
+) -> bool {
+    if !x_mcp_tool_accepts(tool, key) {
+        return false;
     }
+    arguments.insert(key.to_string(), value);
+    true
 }
 
 fn x_tag_import_value_as_mcp(value: &mut Value, tool_name: &str) {
@@ -1871,4 +2111,9 @@ fn x_tag_bookmark_input_as_mcp(input: &mut XItemInput, tool_name: &str) {
 fn x_recent_search_error_is_stale_since_id(error: &str) -> bool {
     error.contains("'since_id' must be a tweet id created after")
         || error.contains("\"since_id\" must be a tweet id created after")
+}
+
+fn x_mcp_user_token_rejection_should_refresh(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("token rejected") || text.contains("http 401") || text.contains("unauthorized")
 }

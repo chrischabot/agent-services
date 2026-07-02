@@ -136,11 +136,7 @@ fn x_watch_curation_run_body(csrf_token: &str, idempotency_key: &str, mode: &str
     )
 }
 
-fn x_watch_curation_restore_body(
-    csrf_token: &str,
-    idempotency_key: &str,
-    run_id: &str,
-) -> String {
+fn x_watch_curation_restore_body(csrf_token: &str, idempotency_key: &str, run_id: &str) -> String {
     format!(
         "csrf_token={}&idempotency_key={}&run_id={}",
         url_component(csrf_token),

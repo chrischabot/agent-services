@@ -2115,11 +2115,8 @@ reason = "ops controls may enqueue local worker jobs"
             false,
         )
         .unwrap();
-    let dry_body = x_watch_curation_run_body(
-        &state.csrf_token,
-        "ops-ui-x-curation-dry-run",
-        "dry-run",
-    );
+    let dry_body =
+        x_watch_curation_run_body(&state.csrf_token, "ops-ui-x-curation-dry-run", "dry-run");
     let (dry_status, _) = response_text(
         http_ops_x_watch_curation_run(
             State(state.clone()),
